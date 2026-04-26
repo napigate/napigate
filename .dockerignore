@@ -1,0 +1,10 @@
+.git
+.gitignore
+.idea
+.env
+.venv
+__pycache__
+*.pyc
+data
+logs
+config/services.yaml

@@ -1,0 +1,238 @@
+clients:
+  - slug: demo-portal
+    code: demo_portal
+    title: Demo Portal
+    enabled: true
+    access:
+      mode: services
+      services:
+        - protected_httpbin
+    auth_methods:
+      - code: portal_api_key
+        title: Primary API Key
+        type: api_key
+        secret: demo-api-key
+        header_names:
+          - X-API-Key
+        query_params:
+          - api_key
+      - code: portal_bearer
+        title: Bearer Token
+        type: bearer
+        token: demo-bearer-token
+
+  - slug: demo-ops
+    code: demo_ops
+    title: Demo Operations
+    enabled: true
+    access:
+      mode: services
+      services:
+        - protected_httpbin
+    ip_allowlist:
+      - 127.0.0.1/32
+    auth_methods:
+      - code: ops_basic
+        title: Basic Auth
+        type: basic
+        username: demo-user
+        password: demo-pass
+      - code: ops_header
+        title: Header Key
+        type: header_key
+        header_name: X-Partner-Token
+        secret: partner-secret
+
+  - slug: demo-partner
+    code: demo_partner
+    title: Demo Partner
+    enabled: true
+    access:
+      mode: endpoints
+      endpoints:
+        - service: protected_httpbin
+          endpoint: protected_headers
+    auth_methods:
+      - code: partner_oauth
+        title: OAuth Client Credentials
+        type: oauth_client_credentials
+        client_id: demo-client-id
+        client_secret: demo-client-secret
+        token_ttl_seconds: 3600
+      - code: partner_external
+        title: External Validation
+        type: external_service
+        script: |
+          token = headers.get("Authorization")
+          if not token:
+              skip()
+          response = call(
+              "POST",
+              "https://httpbin.org/anything/external-auth",
+              headers={"Authorization": token},
+          )
+          if response.status_code != 200:
+              deny("External authentication rejected the request.")
+          payload = response.json()
+          allow(
+              source="external_service",
+              consumed_headers=["Authorization"],
+              metadata={"echo_url": payload.get("url")},
+          )
+        cache_ttl_seconds: 60
+
+output_profiles:
+  standard_json:
+    title: Standard JSON Envelope
+    enabled: true
+    type: json_envelope
+    success_key: success
+    data_key: data
+    message_key: message
+    error_key: error
+    passthrough_keys:
+      - success
+      - data
+      - message
+    headers:
+      Cache-Control: no-store
+
+  partner_jsonp:
+    title: JSONP Callback
+    enabled: true
+    type: jsonp
+    jsonp_callback_param: callback
+    jsonp_default_callback: callback
+
+observability:
+  log_aggregators:
+    audit_loki:
+      enabled: false
+      type: loki
+      url: https://logs.example.com/loki/api/v1/push
+      labels:
+        env: demo
+        app: napigate
+
+services:
+  status:
+    base_url: https://example.invalid
+    timeout_seconds: 10
+    verify_ssl: true
+    trust_env_proxy: false
+    headers:
+      X-Gateway-Service: status
+    auth:
+      required: false
+    endpoints:
+      - name: status_ok
+        slug: status-ok
+        methods:
+          - GET
+        gateway_path: /demo/status
+        response:
+          status_code: 200
+          content_type: text/plain; charset=utf-8
+          body: ok
+
+  public_httpbin:
+    base_url: https://httpbin.org
+    timeout_seconds: 20
+    verify_ssl: true
+    trust_env_proxy: false
+    headers:
+      X-Gateway-Service: public_httpbin
+    cors:
+      enabled: true
+      allow_origins:
+        - "*"
+      allow_methods:
+        - GET
+      allow_headers:
+        - Authorization
+        - Content-Type
+      expose_headers:
+        - X-Request-ID
+      max_age_seconds: 600
+    auth:
+      required: false
+    endpoints:
+      - name: public_ip
+        slug: public-ip
+        methods:
+          - GET
+        gateway_path: /demo/ip
+        upstream_path: /ip
+        response_cache:
+          enabled: true
+          ttl_seconds: 60
+          vary_by_client: false
+          methods:
+            - GET
+
+  protected_httpbin:
+    base_url: https://httpbin.org
+    timeout_seconds: 20
+    verify_ssl: true
+    trust_env_proxy: false
+    variables:
+      client_id: demo-client
+      client_secret: demo-secret
+    headers:
+      X-Gateway-Service: protected_httpbin
+    rate_limit:
+      enabled: true
+      requests: 120
+      window_seconds: 60
+      scope: client_or_ip
+    auth:
+      required: true
+    endpoints:
+      - name: protected_headers
+        slug: protected-headers
+        methods:
+          - GET
+        gateway_path: /demo/headers
+        upstream_path: /anything/secure
+        output_profile: standard_json
+        response_cache:
+          enabled: true
+          ttl_seconds: 60
+          vary_headers:
+            - Accept-Language
+          methods:
+            - GET
+        success_hook:
+          enabled: false
+          url: https://billing.example.com/hooks/usage
+          timeout_seconds: 5
+          event_type: financial
+          headers:
+            X-NapiGate-Signature: demo
+        pre_call:
+          cache_ttl_seconds: 300
+          code: |
+            response = call(
+                "POST",
+                "https://httpbin.org/anything/token",
+                json={
+                    "client_id": vars["client_id"],
+                    "client_secret": vars["client_secret"],
+                },
+            )
+            response.raise_for_status()
+            body = response.json()
+            token = body["json"]["client_id"] + "-token"
+            set_var("access_token", token)
+        headers:
+          Authorization: Bearer {{ access_token }}
+          X-Client-Id: "{{ client_id }}"
+
+      - name: user_by_id
+        slug: user-by-id
+        methods:
+          - GET
+        gateway_path: /demo/users/{id}
+        upstream_path: /anything/users/{{ path.id }}
+        headers:
+          X-User-Id: "{{ path.id }}"

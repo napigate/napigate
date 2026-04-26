@@ -1,0 +1,47 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+        CURRENT_USER: ${CURRENT_USER:-app}
+        CURRENT_GROUP: ${CURRENT_GROUP:-app}
+        APP_TIMEZONE: ${APP_TIMEZONE:-UTC}
+        DEBIAN_MIRROR_URL: ${DEBIAN_MIRROR_URL}
+        DEBIAN_SECURITY_MIRROR_URL: ${DEBIAN_SECURITY_MIRROR_URL}
+        PIP_INDEX_URL: ${PIP_INDEX_URL}
+    container_name: napigate
+    env_file: .env
+    environment:
+      TZ: ${APP_TIMEZONE:-UTC}
+      PYTHONUNBUFFERED: "1"
+    working_dir: /code
+    user: "${UID:-1000}:${GID:-1000}"
+    command: >
+      python3 -m gateway.main
+      --host 0.0.0.0
+      --port 8000
+      --config ${NAPIGATE_CONFIG:-config/services.yaml}
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      - ./config:/code/config
+      - ./data:/code/data
+      - ./logs:/code/logs
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/__health', timeout=5).read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s

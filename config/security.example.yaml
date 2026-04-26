@@ -1,0 +1,17 @@
+roles:
+  admin:
+    permissions:
+      - monitor_access
+      - admin_access
+      - services_manage
+      - security_manage
+  operator:
+    permissions:
+      - monitor_access
+      - admin_access
+      - services_manage
+  monitor:
+    permissions:
+      - monitor_access
+
+users: {}

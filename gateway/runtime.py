@@ -1,0 +1,1812 @@
+from __future__ import annotations
+
+from collections import deque
+from collections.abc import Mapping
+from http.cookies import SimpleCookie
+import ipaddress
+from dataclasses import dataclass
+from datetime import UTC, datetime
+import base64
+import hmac
+import json
+import logging
+from pathlib import Path
+import re
+import threading
+import time
+from typing import Any
+import uuid
+
+import requests
+
+from gateway.config import (
+    AuthMethodConfig,
+    ClientConfig,
+    EndpointConfig,
+    OutputProfileConfig,
+    ServiceConfig,
+    StaticResponseConfig,
+    load_gateway_config,
+)
+from gateway.integrations import IntegrationDispatcher
+from gateway.monitoring import LogEntry, RequestLogStore
+
+
+LOGGER = logging.getLogger("gateway.runtime")
+FILTERED_RESPONSE_HEADERS = {
+    "content-length",
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
+FILTERED_REQUEST_HEADERS = {
+    "host",
+    "content-length",
+    "connection",
+}
+TEMPLATE_PATTERN = re.compile(r"{{\s*([^{}]+?)\s*}}")
+
+
+class GatewayError(Exception):
+    def __init__(
+        self,
+        status_code: int,
+        detail: str,
+        *,
+        headers: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+        self.headers = {str(key): str(value) for key, value in (headers or {}).items()}
+
+
+@dataclass(slots=True)
+class IncomingRequest:
+    method: str
+    path: str
+    query: dict[str, Any]
+    headers: dict[str, Any]
+    body: bytes
+    client_ip: str
+    url: str
+    json_body: Any
+
+
+@dataclass(slots=True)
+class OutgoingResponse:
+    status_code: int
+    headers: dict[str, str]
+    body: bytes
+
+
+@dataclass(slots=True)
+class MatchedEndpoint:
+    service: ServiceConfig
+    endpoint: EndpointConfig
+    path_params: dict[str, str]
+
+
+@dataclass(slots=True)
+class AuthenticatedClient:
+    client_slug: str
+    client_code: str
+    client_title: str
+    auth_method_code: str
+    auth_method_title: str
+    auth_type: str
+    source: str
+    metadata: dict[str, Any]
+    consumed_headers: set[str]
+    consumed_query_params: set[str]
+    consumed_cookie_names: set[str]
+
+
+@dataclass(slots=True)
+class CacheValue:
+    expires_at: float
+    value: Any
+
+
+class GatewayRuntime:
+    def __init__(self, config_path: Path | str = "config/services.yaml") -> None:
+        self.config_path = Path(config_path)
+        self.services: list[ServiceConfig] = []
+        self.clients: dict[str, ClientConfig] = {}
+        self.output_profiles: dict[str, OutputProfileConfig] = {}
+        self.log_store = RequestLogStore()
+        self.pre_call_cache: dict[str, CacheValue] = {}
+        self.auth_cache: dict[str, CacheValue] = {}
+        self.response_cache: dict[str, CacheValue] = {}
+        self.rate_limit_hits: dict[str, deque[float]] = {}
+        self._config_signature: tuple[int, int] | None = None
+        self._lock = threading.RLock()
+        self.dispatcher = IntegrationDispatcher()
+
+    def load(self) -> None:
+        gateway_config = load_gateway_config(self.config_path)
+        services = gateway_config.services
+        clients = gateway_config.clients
+        output_profiles = gateway_config.output_profiles
+        signature = self._file_signature(self.config_path)
+        with self._lock:
+            self.services = services
+            self.clients = clients
+            self.output_profiles = output_profiles
+            self.pre_call_cache.clear()
+            self.auth_cache.clear()
+            self.response_cache.clear()
+            self.rate_limit_hits.clear()
+            self._config_signature = signature
+        self.dispatcher.configure(log_aggregators=gateway_config.log_aggregators)
+        self.log_store.cleanup_old()
+        LOGGER.info(
+            "Loaded %s services, %s gateway clients, and %s output profiles from %s",
+            len(services),
+            len(clients),
+            len(output_profiles),
+            self.config_path,
+        )
+
+    def maybe_reload(self) -> None:
+        current_signature = self._file_signature(self.config_path)
+        with self._lock:
+            known_signature = self._config_signature
+        if current_signature == known_signature:
+            return
+        try:
+            self.load()
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to reload gateway config from %s", self.config_path)
+            with self._lock:
+                self._config_signature = known_signature
+
+    def close(self) -> None:
+        self.log_store.close()
+        self.dispatcher.close()
+
+    def match(self, method: str, path: str) -> MatchedEndpoint | None:
+        method_upper = method.upper()
+        with self._lock:
+            services = list(self.services)
+
+        for service in services:
+            for endpoint in service.endpoints:
+                if method_upper not in endpoint.methods:
+                    continue
+                match = endpoint.compiled_pattern.match(path) if endpoint.compiled_pattern else None
+                if match:
+                    return MatchedEndpoint(
+                        service=service,
+                        endpoint=endpoint,
+                        path_params=match.groupdict(),
+                    )
+        return None
+
+    def match_any(self, path: str) -> MatchedEndpoint | None:
+        with self._lock:
+            services = list(self.services)
+
+        for service in services:
+            for endpoint in service.endpoints:
+                match = endpoint.compiled_pattern.match(path) if endpoint.compiled_pattern else None
+                if match:
+                    return MatchedEndpoint(
+                        service=service,
+                        endpoint=endpoint,
+                        path_params=match.groupdict(),
+                    )
+        return None
+
+    def handle_options(self, request: IncomingRequest) -> OutgoingResponse | None:
+        matched = self.match_any(request.path)
+        if matched is None or not matched.service.cors.enabled:
+            return None
+
+        request_id = str(uuid.uuid4())
+        started_at = time.perf_counter()
+        status_code = 204
+        error_message = ""
+        upstream_url = "local://cors-preflight"
+
+        try:
+            headers = self._build_cors_headers(matched, request, preflight=True)
+            if self._get_header(request.headers, "Origin") and "Access-Control-Allow-Origin" not in headers:
+                raise GatewayError(403, "Origin is not allowed for this service.")
+            headers["X-Request-ID"] = request_id
+            return OutgoingResponse(status_code=204, headers=headers, body=b"")
+        except GatewayError as exc:
+            status_code = exc.status_code
+            error_message = exc.detail
+            raise
+        finally:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            self._write_log(
+                request_id=request_id,
+                request=request,
+                matched=matched,
+                upstream_url=upstream_url,
+                status_code=status_code,
+                duration_ms=duration_ms,
+                error_message=error_message,
+            )
+
+    def handle_proxy(self, request: IncomingRequest) -> OutgoingResponse:
+        matched = self.match(request.method, request.path)
+        if matched is None:
+            raise GatewayError(404, "No route matched this request.")
+
+        request_id = str(uuid.uuid4())
+        started_at = time.perf_counter()
+        status_code = 500
+        error_message = ""
+        upstream_url = ""
+        authenticated_client: AuthenticatedClient | None = None
+
+        variables = dict(matched.service.variables)
+
+        try:
+            authenticated_client = self._authenticate_client(matched=matched, request=request)
+            self._enforce_rate_limit(
+                matched=matched,
+                request=request,
+                authenticated_client=authenticated_client,
+            )
+            cached_response = self._get_cached_response(
+                matched=matched,
+                request=request,
+                authenticated_client=authenticated_client,
+                request_id=request_id,
+            )
+            if cached_response is not None:
+                upstream_url = "cache://response"
+                cached_response.headers = self.merge_response_headers(
+                    cached_response.headers,
+                    self._build_cors_headers(matched, request),
+                )
+                status_code = cached_response.status_code
+                self._emit_success_hook(
+                    matched=matched,
+                    request=request,
+                    authenticated_client=authenticated_client,
+                    response=cached_response,
+                    request_id=request_id,
+                    response_source="cache",
+                )
+                return cached_response
+            context = self._build_template_context(
+                matched=matched,
+                request=request,
+                variables=variables,
+                authenticated_client=authenticated_client,
+            )
+
+            if matched.endpoint.pre_call:
+                self._run_pre_call(
+                    matched=matched,
+                    request=request,
+                    context=context,
+                    variables=variables,
+                )
+
+            context = self._build_template_context(
+                matched=matched,
+                request=request,
+                variables=variables,
+                authenticated_client=authenticated_client,
+            )
+
+            if matched.endpoint.response is not None:
+                upstream_url = "local://response"
+                direct_response = self._build_static_response(
+                    response_config=matched.endpoint.response,
+                    context=context,
+                    request_id=request_id,
+                )
+                direct_response = self._apply_output_profile(
+                    matched=matched,
+                    request=request,
+                    response=direct_response,
+                )
+                self._store_cached_response(
+                    matched=matched,
+                    request=request,
+                    authenticated_client=authenticated_client,
+                    response=direct_response,
+                )
+                direct_response.headers = self.merge_response_headers(
+                    direct_response.headers,
+                    self._build_cors_headers(matched, request),
+                )
+                status_code = direct_response.status_code
+                self._emit_success_hook(
+                    matched=matched,
+                    request=request,
+                    authenticated_client=authenticated_client,
+                    response=direct_response,
+                    request_id=request_id,
+                    response_source="local",
+                )
+                return direct_response
+
+            upstream_path = self.render_template(matched.endpoint.upstream_path, context)
+            upstream_url = self._join_url(matched.service.base_url, str(upstream_path))
+
+            rendered_service_headers = self.render_data(matched.service.headers, context)
+            rendered_endpoint_headers = self.render_data(matched.endpoint.headers, context)
+            request_headers = self._prepare_request_headers(
+                incoming_headers=request.headers,
+                service_headers=rendered_service_headers,
+                endpoint_headers=rendered_endpoint_headers,
+                authenticated_client=authenticated_client,
+                request_id=request_id,
+            )
+            request_headers["X-NapiGate-Endpoint-Slug"] = matched.endpoint.slug
+
+            rendered_query = self.render_data(matched.endpoint.query, context)
+            final_query = self._merge_query_params(
+                request.query,
+                rendered_query,
+                authenticated_client=authenticated_client,
+            )
+
+            response = self._send_request(
+                matched.service,
+                request.method,
+                upstream_url,
+                headers=request_headers,
+                params=final_query,
+                data=request.body or None,
+                timeout=matched.service.timeout_seconds,
+                verify=matched.service.verify_ssl,
+                allow_redirects=False,
+            )
+
+            status_code = response.status_code
+            outgoing_response = OutgoingResponse(
+                status_code=response.status_code,
+                headers=self._prepare_response_headers(response.headers, request_id),
+                body=response.content,
+            )
+            outgoing_response = self._apply_output_profile(
+                matched=matched,
+                request=request,
+                response=outgoing_response,
+            )
+            self._store_cached_response(
+                matched=matched,
+                request=request,
+                authenticated_client=authenticated_client,
+                response=outgoing_response,
+            )
+            outgoing_response.headers = self.merge_response_headers(
+                outgoing_response.headers,
+                self._build_cors_headers(matched, request),
+            )
+            self._emit_success_hook(
+                matched=matched,
+                request=request,
+                authenticated_client=authenticated_client,
+                response=outgoing_response,
+                request_id=request_id,
+                response_source="upstream",
+            )
+            return outgoing_response
+        except GatewayError as exc:
+            status_code = exc.status_code
+            error_message = exc.detail
+            raise
+        except requests.RequestException as exc:
+            status_code = 502
+            error_message = str(exc)
+            LOGGER.exception("Upstream HTTP error for %s", request.path)
+            raise GatewayError(502, "Upstream request failed.") from exc
+        except Exception as exc:  # noqa: BLE001
+            status_code = 500
+            error_message = str(exc)
+            LOGGER.exception("Unhandled gateway error for %s", request.path)
+            raise GatewayError(500, "Gateway internal error.") from exc
+        finally:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            self._write_log(
+                request_id=request_id,
+                request=request,
+                matched=matched,
+                upstream_url=upstream_url,
+                status_code=status_code,
+                duration_ms=duration_ms,
+                error_message=error_message,
+            )
+
+    def list_logs(self, limit: int = 200) -> list[dict[str, Any]]:
+        return self.log_store.recent(limit=limit)
+
+    def service_count(self) -> int:
+        with self._lock:
+            return len(self.services)
+
+    def client_count(self) -> int:
+        with self._lock:
+            return len(self.clients)
+
+    def output_profile_count(self) -> int:
+        with self._lock:
+            return len(self.output_profiles)
+
+    def _get_cached_response(
+        self,
+        *,
+        matched: MatchedEndpoint,
+        request: IncomingRequest,
+        authenticated_client: AuthenticatedClient | None,
+        request_id: str,
+    ) -> OutgoingResponse | None:
+        cache_config = matched.endpoint.response_cache
+        if (
+            not cache_config.enabled
+            or cache_config.ttl_seconds <= 0
+            or request.method.upper() not in cache_config.methods
+        ):
+            return None
+
+        cache_key = self._response_cache_key(
+            matched=matched,
+            request=request,
+            authenticated_client=authenticated_client,
+        )
+        with self._lock:
+            cached = self.response_cache.get(cache_key)
+        if not cached or cached.expires_at <= time.time():
+            return None
+
+        cached_response = cached.value
+        headers = self.merge_response_headers(
+            cached_response.headers,
+            {
+                "X-Request-ID": request_id,
+                "X-NapiGate-Cache": "HIT",
+            },
+        )
+        return OutgoingResponse(
+            status_code=cached_response.status_code,
+            headers=headers,
+            body=bytes(cached_response.body),
+        )
+
+    def _store_cached_response(
+        self,
+        *,
+        matched: MatchedEndpoint,
+        request: IncomingRequest,
+        authenticated_client: AuthenticatedClient | None,
+        response: OutgoingResponse,
+    ) -> None:
+        cache_config = matched.endpoint.response_cache
+        if (
+            not cache_config.enabled
+            or cache_config.ttl_seconds <= 0
+            or request.method.upper() not in cache_config.methods
+            or response.status_code >= 400
+        ):
+            return
+
+        cache_key = self._response_cache_key(
+            matched=matched,
+            request=request,
+            authenticated_client=authenticated_client,
+        )
+        stored_headers = {
+            key: value
+            for key, value in response.headers.items()
+            if key.lower() not in {"x-request-id", "x-napigate-cache"}
+        }
+        with self._lock:
+            self.response_cache[cache_key] = CacheValue(
+                expires_at=time.time() + cache_config.ttl_seconds,
+                value=OutgoingResponse(
+                    status_code=response.status_code,
+                    headers=stored_headers,
+                    body=bytes(response.body),
+                ),
+            )
+
+    def _response_cache_key(
+        self,
+        *,
+        matched: MatchedEndpoint,
+        request: IncomingRequest,
+        authenticated_client: AuthenticatedClient | None,
+    ) -> str:
+        parts = [
+            matched.service.name,
+            matched.endpoint.name,
+            request.method.upper(),
+            request.path,
+        ]
+        if matched.endpoint.response_cache.vary_by_client:
+            parts.append(
+                f"client={authenticated_client.client_slug if authenticated_client else 'anonymous'}"
+            )
+        for key in sorted(request.query):
+            parts.append(f"query:{key}={request.query[key]}")
+        for header_name in matched.endpoint.response_cache.vary_headers:
+            parts.append(
+                f"header:{header_name.lower()}={self._get_header(request.headers, header_name) or ''}"
+            )
+        return "|".join(parts)
+
+    def _apply_output_profile(
+        self,
+        *,
+        matched: MatchedEndpoint,
+        request: IncomingRequest,
+        response: OutgoingResponse,
+    ) -> OutgoingResponse:
+        profile_slug = matched.endpoint.output_profile
+        if not profile_slug:
+            return response
+
+        with self._lock:
+            profile = self.output_profiles.get(profile_slug)
+        if profile is None or not profile.enabled:
+            return response
+
+        if profile.type == "passthrough":
+            response.headers = self.merge_response_headers(response.headers, profile.headers)
+            return response
+
+        content_type = self._response_content_type(response.headers)
+        parsed_body = self._parse_response_body(response.body, content_type=content_type)
+
+        if profile.type == "jsonp":
+            callback_raw = str(
+                request.query.get(profile.jsonp_callback_param)
+                or profile.jsonp_default_callback
+                or "callback"
+            )
+            callback = re.sub(r"[^a-zA-Z0-9_.$]", "", callback_raw) or "callback"
+            body = f"{callback}({json.dumps(parsed_body, ensure_ascii=False)});".encode("utf-8")
+            headers = dict(response.headers)
+            headers["Content-Type"] = "application/javascript; charset=utf-8"
+            headers = self.merge_response_headers(headers, profile.headers)
+            return OutgoingResponse(status_code=response.status_code, headers=headers, body=body)
+
+        if content_type.startswith("image/") or content_type == "application/octet-stream":
+            response.headers = self.merge_response_headers(response.headers, profile.headers)
+            return response
+
+        if self._is_existing_output_envelope(parsed_body, profile):
+            envelope = parsed_body
+        else:
+            success = response.status_code < 400
+            message = self._output_message_from_payload(parsed_body)
+            envelope = {
+                profile.success_key: success,
+                profile.message_key: message,
+            }
+            if success:
+                envelope[profile.data_key] = parsed_body
+            else:
+                envelope[profile.data_key] = None
+                envelope[profile.error_key] = (
+                    parsed_body
+                    if parsed_body not in (None, "")
+                    else message or f"HTTP {response.status_code}"
+                )
+
+        body = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
+        headers = dict(response.headers)
+        headers["Content-Type"] = "application/json; charset=utf-8"
+        headers = self.merge_response_headers(headers, profile.headers)
+        return OutgoingResponse(status_code=response.status_code, headers=headers, body=body)
+
+    def _response_content_type(self, headers: Mapping[str, Any]) -> str:
+        return str(self._get_header(headers, "Content-Type") or "").split(";", 1)[0].strip().lower()
+
+    def _parse_response_body(self, body: bytes, *, content_type: str) -> Any:
+        if not body:
+            return None
+        if content_type in {
+            "application/json",
+            "application/problem+json",
+            "text/json",
+        }:
+            try:
+                return json.loads(body.decode("utf-8"))
+            except Exception:  # noqa: BLE001
+                return body.decode("utf-8", errors="ignore")
+        return body.decode("utf-8", errors="ignore")
+
+    def _is_existing_output_envelope(
+        self,
+        payload: Any,
+        profile: OutputProfileConfig,
+    ) -> bool:
+        if not isinstance(payload, Mapping):
+            return False
+        required_keys = profile.passthrough_keys or [profile.success_key, profile.data_key]
+        return all(key in payload for key in required_keys)
+
+    def _output_message_from_payload(self, payload: Any) -> str:
+        if isinstance(payload, Mapping):
+            for key in ("message", "detail", "error"):
+                value = payload.get(key)
+                if value not in (None, ""):
+                    return str(value)
+        if isinstance(payload, str):
+            return payload
+        return ""
+
+    def _emit_success_hook(
+        self,
+        *,
+        matched: MatchedEndpoint,
+        request: IncomingRequest,
+        authenticated_client: AuthenticatedClient | None,
+        response: OutgoingResponse,
+        request_id: str,
+        response_source: str,
+    ) -> None:
+        success_hook = matched.endpoint.success_hook
+        if success_hook is None or not success_hook.enabled or response.status_code >= 400:
+            return
+
+        payload: dict[str, Any] = {
+            "event_type": success_hook.event_type,
+            "request_id": request_id,
+            "response_source": response_source,
+            "service": {
+                "name": matched.service.name,
+            },
+            "endpoint": {
+                "name": matched.endpoint.name,
+                "slug": matched.endpoint.slug,
+                "gateway_path": matched.endpoint.gateway_path,
+            },
+            "client": (
+                {
+                    "slug": authenticated_client.client_slug,
+                    "code": authenticated_client.client_code,
+                    "title": authenticated_client.client_title,
+                    "auth_method_code": authenticated_client.auth_method_code,
+                    "auth_method_type": authenticated_client.auth_type,
+                }
+                if authenticated_client is not None
+                else None
+            ),
+            "request": {
+                "method": request.method,
+                "path": request.path,
+                "client_ip": request.client_ip,
+                "query": request.query,
+                "headers": request.headers,
+            },
+            "response": {
+                "status_code": response.status_code,
+                "headers": response.headers,
+            },
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        if success_hook.include_request_body:
+            payload["request"]["body_text"] = request.body.decode("utf-8", errors="ignore")
+        if success_hook.include_response_body:
+            payload["response"]["body_text"] = response.body.decode("utf-8", errors="ignore")
+        self.dispatcher.enqueue_success_hook(success_hook=success_hook, payload=payload)
+
+    def issue_oauth_token(
+        self,
+        *,
+        client_id: str,
+        client_secret: str,
+        client_ip: str | None = None,
+    ) -> tuple[str, int, str, str]:
+        with self._lock:
+            clients = list(self.clients.values())
+
+        for client in clients:
+            if not client.enabled:
+                continue
+            for method in client.auth_methods:
+                if not method.enabled or method.type != "oauth_client_credentials":
+                    continue
+                if not hmac.compare_digest(method.client_id or "", client_id):
+                    continue
+                if not hmac.compare_digest(method.client_secret or "", client_secret):
+                    continue
+                if client_ip and client.ip_allowlist and not self._ip_allowed(client_ip, client.ip_allowlist):
+                    raise GatewayError(
+                        403,
+                        f"Client '{client.code}' is not allowed from IP '{client_ip}'.",
+                    )
+                issued_at = int(time.time())
+                expires_at = issued_at + max(1, int(method.token_ttl_seconds or 3600))
+                token = self._build_oauth_access_token(client, method, expires_at)
+                return token, expires_at - issued_at, client.code, method.code
+
+        raise GatewayError(401, "OAuth client authentication failed.")
+
+    def _run_pre_call(
+        self,
+        *,
+        matched: MatchedEndpoint,
+        request: IncomingRequest,
+        context: dict[str, Any],
+        variables: dict[str, Any],
+    ) -> None:
+        pre_call = matched.endpoint.pre_call
+        if pre_call is None:
+            return
+
+        cache_key = pre_call.cache_key or f"{matched.service.name}:{matched.endpoint.name}"
+        now = time.time()
+        cached = self.pre_call_cache.get(cache_key)
+        if cached and cached.expires_at > now:
+            variables.update(cached.value)
+            return
+
+        def call(method: str, url: str, **kwargs: Any) -> requests.Response:
+            call_context = self._build_template_context(
+                matched=matched,
+                request=request,
+                variables=variables,
+            )
+            rendered_url = self.render_template(url, call_context)
+            final_url = self._join_url(matched.service.base_url, str(rendered_url))
+            rendered_kwargs = self.render_data(kwargs, call_context)
+            rendered_kwargs.setdefault("timeout", matched.service.timeout_seconds)
+            rendered_kwargs.setdefault("verify", matched.service.verify_ssl)
+            rendered_kwargs.setdefault("allow_redirects", False)
+            return self._send_request(matched.service, method.upper(), final_url, **rendered_kwargs)
+
+        def set_var(name: str, value: Any) -> None:
+            variables[name] = value
+
+        def get_var(name: str, default: Any = None) -> Any:
+            return variables.get(name, default)
+
+        exec_globals: dict[str, Any] = {
+            "__builtins__": __builtins__,
+            "call": call,
+            "set_var": set_var,
+            "get_var": get_var,
+            "vars": variables,
+            "service": {
+                "name": matched.service.name,
+                "base_url": matched.service.base_url,
+                "timeout_seconds": matched.service.timeout_seconds,
+                "verify_ssl": matched.service.verify_ssl,
+                "trust_env_proxy": matched.service.trust_env_proxy,
+                "variables": matched.service.variables,
+            },
+            "endpoint": {
+                "name": matched.endpoint.name,
+                "methods": matched.endpoint.methods,
+                "gateway_path": matched.endpoint.gateway_path,
+                "upstream_path": matched.endpoint.upstream_path,
+                "response": (
+                    {
+                        "status_code": matched.endpoint.response.status_code,
+                        "content_type": matched.endpoint.response.content_type,
+                        "headers": matched.endpoint.response.headers,
+                        "body": matched.endpoint.response.body,
+                    }
+                    if matched.endpoint.response is not None
+                    else None
+                ),
+            },
+            "request_ctx": context["request"],
+            "path": context["path"],
+            "query": context["query"],
+            "headers": context["headers"],
+            "json": json,
+            "time": time,
+            "datetime": datetime,
+            "base64": __import__("base64"),
+            "hashlib": __import__("hashlib"),
+        }
+        exec_locals: dict[str, Any] = {}
+
+        snippet = "def __user_pre_call__():\n"
+        for line in pre_call.code.splitlines():
+            snippet += f"    {line}\n"
+
+        exec(snippet, exec_globals, exec_locals)
+        exec_locals["__user_pre_call__"]()
+
+        if pre_call.cache_ttl_seconds > 0:
+            self.pre_call_cache[cache_key] = CacheValue(
+                expires_at=now + pre_call.cache_ttl_seconds,
+                value=dict(variables),
+            )
+
+    def _build_template_context(
+        self,
+        *,
+        matched: MatchedEndpoint,
+        request: IncomingRequest,
+        variables: dict[str, Any],
+        authenticated_client: AuthenticatedClient | None = None,
+    ) -> dict[str, Any]:
+        request_ctx = {
+            "method": request.method,
+            "path": request.path,
+            "url": request.url,
+            "client_ip": request.client_ip,
+            "headers": request.headers,
+            "query": request.query,
+            "body_bytes": request.body,
+            "body_text": request.body.decode("utf-8", errors="ignore"),
+            "json": request.json_body,
+        }
+
+        base_context: dict[str, Any] = {
+            "service": {
+                "name": matched.service.name,
+                "base_url": matched.service.base_url,
+                "timeout_seconds": matched.service.timeout_seconds,
+                "verify_ssl": matched.service.verify_ssl,
+                "trust_env_proxy": matched.service.trust_env_proxy,
+                "variables": matched.service.variables,
+            },
+            "endpoint": {
+                "name": matched.endpoint.name,
+                "slug": matched.endpoint.slug,
+                "gateway_path": matched.endpoint.gateway_path,
+                "upstream_path": matched.endpoint.upstream_path,
+                "response": (
+                    {
+                        "status_code": matched.endpoint.response.status_code,
+                        "content_type": matched.endpoint.response.content_type,
+                        "headers": matched.endpoint.response.headers,
+                        "body": matched.endpoint.response.body,
+                    }
+                    if matched.endpoint.response is not None
+                    else None
+                ),
+            },
+            "auth": {
+                "required": matched.service.auth.required,
+                "client_slug": authenticated_client.client_slug if authenticated_client else None,
+                "client_code": authenticated_client.client_code if authenticated_client else None,
+                "client_title": authenticated_client.client_title if authenticated_client else None,
+                "method_code": authenticated_client.auth_method_code if authenticated_client else None,
+                "method_title": authenticated_client.auth_method_title if authenticated_client else None,
+                "method_type": authenticated_client.auth_type if authenticated_client else None,
+                "source": authenticated_client.source if authenticated_client else None,
+                "metadata": authenticated_client.metadata if authenticated_client else {},
+            },
+            "client": {
+                "slug": authenticated_client.client_slug if authenticated_client else None,
+                "code": authenticated_client.client_code if authenticated_client else None,
+                "title": authenticated_client.client_title if authenticated_client else None,
+                "auth_method_code": authenticated_client.auth_method_code if authenticated_client else None,
+                "auth_method_title": authenticated_client.auth_method_title if authenticated_client else None,
+                "auth_type": authenticated_client.auth_type if authenticated_client else None,
+                "source": authenticated_client.source if authenticated_client else None,
+                "metadata": authenticated_client.metadata if authenticated_client else {},
+            },
+            "request": request_ctx,
+            "request_ctx": request_ctx,
+            "path": matched.path_params,
+            "query": request.query,
+            "headers": request.headers,
+            "vars": variables,
+        }
+
+        for key, value in variables.items():
+            if key not in base_context:
+                base_context[key] = value
+
+        return base_context
+
+    def render_data(self, value: Any, context: dict[str, Any]) -> Any:
+        if isinstance(value, str):
+            return self.render_template(value, context)
+        if isinstance(value, list):
+            return [self.render_data(item, context) for item in value]
+        if isinstance(value, Mapping):
+            return {
+                key: self.render_data(item, context)
+                for key, item in value.items()
+                if item is not None
+            }
+        return value
+
+    def render_template(self, template: str, context: dict[str, Any]) -> Any:
+        match = TEMPLATE_PATTERN.fullmatch(template)
+        if match:
+            return self._resolve_path(match.group(1), context)
+
+        def replace(item: re.Match[str]) -> str:
+            resolved = self._resolve_path(item.group(1), context)
+            return "" if resolved is None else str(resolved)
+
+        return TEMPLATE_PATTERN.sub(replace, template)
+
+    def _resolve_path(self, expression: str, context: dict[str, Any]) -> Any:
+        current: Any = context
+        for part in expression.split("."):
+            if isinstance(current, Mapping):
+                current = current.get(part)
+            else:
+                current = getattr(current, part, None)
+            if current is None:
+                return None
+        return current
+
+    def _prepare_request_headers(
+        self,
+        *,
+        incoming_headers: dict[str, Any],
+        service_headers: dict[str, Any],
+        endpoint_headers: dict[str, Any],
+        authenticated_client: AuthenticatedClient | None,
+        request_id: str,
+    ) -> dict[str, str]:
+        filtered_headers = set(FILTERED_REQUEST_HEADERS)
+        if authenticated_client is not None:
+            filtered_headers.update(item.lower() for item in authenticated_client.consumed_headers)
+
+        outgoing = {
+            key: value
+            for key, value in incoming_headers.items()
+            if key.lower() not in filtered_headers
+        }
+
+        if authenticated_client is not None and authenticated_client.consumed_cookie_names:
+            cookie_header = self._remove_cookie_names(
+                str(incoming_headers.get("Cookie", incoming_headers.get("cookie", ""))),
+                authenticated_client.consumed_cookie_names,
+            )
+            if cookie_header:
+                outgoing["Cookie"] = cookie_header
+            else:
+                outgoing.pop("Cookie", None)
+                outgoing.pop("cookie", None)
+
+        outgoing.update({key: str(value) for key, value in service_headers.items()})
+        outgoing.update({key: str(value) for key, value in endpoint_headers.items()})
+        outgoing["X-Request-ID"] = request_id
+        if authenticated_client is not None:
+            outgoing["X-NapiGate-Client-Slug"] = authenticated_client.client_slug
+            outgoing["X-NapiGate-Client-Code"] = authenticated_client.client_code
+            outgoing["X-NapiGate-Client-Title"] = authenticated_client.client_title
+            outgoing["X-NapiGate-Auth-Method-Code"] = authenticated_client.auth_method_code
+            outgoing["X-NapiGate-Auth-Method-Type"] = authenticated_client.auth_type
+            outgoing["X-NapiGate-Auth-Source"] = authenticated_client.source
+        return outgoing
+
+    def _prepare_response_headers(
+        self,
+        response_headers: Mapping[str, str],
+        request_id: str,
+    ) -> dict[str, str]:
+        headers = {
+            key: value
+            for key, value in response_headers.items()
+            if key.lower() not in FILTERED_RESPONSE_HEADERS
+        }
+        headers["X-Request-ID"] = request_id
+        return headers
+
+    def merge_response_headers(
+        self,
+        headers: Mapping[str, Any],
+        extra_headers: Mapping[str, Any],
+    ) -> dict[str, str]:
+        merged = {str(key): str(value) for key, value in headers.items()}
+        for key, value in extra_headers.items():
+            existing_key = next(
+                (candidate for candidate in merged if candidate.lower() == key.lower()),
+                None,
+            )
+            if key.lower() == "vary" and existing_key is not None:
+                current_values = [
+                    item.strip() for item in merged[existing_key].split(",") if item.strip()
+                ]
+                new_values = [item.strip() for item in str(value).split(",") if item.strip()]
+                merged[existing_key] = ", ".join(dict.fromkeys(current_values + new_values))
+            else:
+                merged[existing_key or str(key)] = str(value)
+        return merged
+
+    def cors_headers_for_request(
+        self,
+        request: IncomingRequest,
+        *,
+        preflight: bool = False,
+    ) -> dict[str, str]:
+        matched = self.match(request.method, request.path)
+        if matched is None and (preflight or request.method.upper() == "OPTIONS"):
+            matched = self.match_any(request.path)
+        if matched is None:
+            return {}
+        return self._build_cors_headers(matched, request, preflight=preflight)
+
+    def _build_static_response(
+        self,
+        *,
+        response_config: StaticResponseConfig,
+        context: dict[str, Any],
+        request_id: str,
+    ) -> OutgoingResponse:
+        rendered_headers = self.render_data(response_config.headers, context)
+        headers = {
+            key: str(value)
+            for key, value in rendered_headers.items()
+            if value is not None and key.lower() not in FILTERED_RESPONSE_HEADERS
+        }
+
+        rendered_body = self.render_data(response_config.body, context)
+        default_content_type = response_config.content_type
+
+        if isinstance(rendered_body, bytes):
+            body = rendered_body
+            default_content_type = default_content_type or "application/octet-stream"
+        elif isinstance(rendered_body, (dict, list)):
+            body = json.dumps(rendered_body, ensure_ascii=False).encode("utf-8")
+            default_content_type = default_content_type or "application/json; charset=utf-8"
+        elif rendered_body is None:
+            body = b""
+            default_content_type = default_content_type or "text/plain; charset=utf-8"
+        else:
+            body = str(rendered_body).encode("utf-8")
+            default_content_type = default_content_type or "text/plain; charset=utf-8"
+
+        if default_content_type and not any(key.lower() == "content-type" for key in headers):
+            headers["Content-Type"] = default_content_type
+        headers["X-Request-ID"] = request_id
+        return OutgoingResponse(
+            status_code=response_config.status_code,
+            headers=headers,
+            body=body,
+        )
+
+    def _build_cors_headers(
+        self,
+        matched: MatchedEndpoint,
+        request: IncomingRequest,
+        *,
+        preflight: bool = False,
+    ) -> dict[str, str]:
+        cors = matched.service.cors
+        if not cors.enabled:
+            return {}
+
+        origin = self._get_header(request.headers, "Origin")
+        allowed_origin = self._allowed_cors_origin(
+            origin=origin,
+            allow_origins=cors.allow_origins,
+            allow_credentials=cors.allow_credentials,
+        )
+        if origin and allowed_origin is None:
+            return {}
+
+        headers: dict[str, str] = {}
+        vary_values: list[str] = []
+
+        if allowed_origin is not None:
+            headers["Access-Control-Allow-Origin"] = allowed_origin
+            if allowed_origin != "*":
+                vary_values.append("Origin")
+
+        if cors.allow_credentials:
+            headers["Access-Control-Allow-Credentials"] = "true"
+
+        if cors.expose_headers and not preflight:
+            headers["Access-Control-Expose-Headers"] = ", ".join(cors.expose_headers)
+
+        if preflight:
+            allow_methods = cors.allow_methods or list(
+                dict.fromkeys([*matched.endpoint.methods, "OPTIONS"])
+            )
+            request_headers = [
+                item.strip()
+                for item in str(
+                    self._get_header(request.headers, "Access-Control-Request-Headers") or ""
+                ).split(",")
+                if item.strip()
+            ]
+            allow_headers = cors.allow_headers or request_headers or [
+                "Authorization",
+                "Content-Type",
+            ]
+            headers["Access-Control-Allow-Methods"] = ", ".join(allow_methods)
+            headers["Access-Control-Allow-Headers"] = ", ".join(allow_headers)
+            headers["Access-Control-Max-Age"] = str(cors.max_age_seconds)
+            if request_headers and not cors.allow_headers:
+                vary_values.append("Access-Control-Request-Headers")
+
+        if vary_values:
+            headers["Vary"] = ", ".join(dict.fromkeys(vary_values))
+
+        return headers
+
+    def _allowed_cors_origin(
+        self,
+        *,
+        origin: str | None,
+        allow_origins: list[str],
+        allow_credentials: bool,
+    ) -> str | None:
+        if not allow_origins:
+            return None
+        if "*" in allow_origins:
+            if allow_credentials:
+                return origin
+            return "*"
+        if origin and origin in allow_origins:
+            return origin
+        return None
+
+    def _merge_query_params(
+        self,
+        incoming_query: dict[str, Any],
+        configured_query: dict[str, Any],
+        authenticated_client: AuthenticatedClient | None = None,
+    ) -> dict[str, Any]:
+        merged = dict(incoming_query)
+        if authenticated_client is not None:
+            for key in authenticated_client.consumed_query_params:
+                merged.pop(key, None)
+        for key, value in configured_query.items():
+            if value is None:
+                continue
+            merged[key] = value
+        return merged
+
+    def _join_url(self, base_url: str, path_or_url: str) -> str:
+        if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
+            return path_or_url
+        return f"{base_url.rstrip('/')}/{str(path_or_url).lstrip('/')}"
+
+    def _send_request(
+        self,
+        service: ServiceConfig,
+        method: str,
+        url: str,
+        **kwargs: Any,
+    ) -> requests.Response:
+        with requests.Session() as session:
+            session.trust_env = service.trust_env_proxy
+            return session.request(method.upper(), url, **kwargs)
+
+    def _write_log(
+        self,
+        *,
+        request_id: str,
+        request: IncomingRequest,
+        matched: MatchedEndpoint,
+        upstream_url: str,
+        status_code: int,
+        duration_ms: int,
+        error_message: str,
+    ) -> None:
+        created_at = datetime.now(UTC).isoformat()
+        entry = LogEntry(
+            request_id=request_id,
+            method=request.method,
+            gateway_path=request.path,
+            service_name=matched.service.name,
+            endpoint_name=matched.endpoint.name,
+            upstream_url=upstream_url,
+            status_code=status_code,
+            duration_ms=duration_ms,
+            client_ip=request.client_ip,
+            error=error_message,
+            created_at=created_at,
+        )
+        self.log_store.write(entry)
+        self.dispatcher.emit_request_log(
+            {
+                "request_id": request_id,
+                "method": request.method,
+                "gateway_path": request.path,
+                "service_name": matched.service.name,
+                "endpoint_name": matched.endpoint.name,
+                "endpoint_slug": matched.endpoint.slug,
+                "upstream_url": upstream_url,
+                "status_code": status_code,
+                "duration_ms": duration_ms,
+                "client_ip": request.client_ip,
+                "error": error_message,
+                "created_at": created_at,
+            }
+        )
+        LOGGER.info(
+            "request_id=%s method=%s path=%s service=%s endpoint=%s status=%s duration_ms=%s upstream=%s error=%s",
+            request_id,
+            request.method,
+            request.path,
+            matched.service.name,
+            matched.endpoint.name,
+            status_code,
+            duration_ms,
+            upstream_url,
+            error_message or "-",
+        )
+
+    def _enforce_rate_limit(
+        self,
+        *,
+        matched: MatchedEndpoint,
+        request: IncomingRequest,
+        authenticated_client: AuthenticatedClient | None,
+    ) -> None:
+        rate_limit = matched.service.rate_limit
+        if not rate_limit.enabled:
+            return
+
+        subject = self._rate_limit_subject(
+            scope=rate_limit.scope,
+            request=request,
+            authenticated_client=authenticated_client,
+        )
+        bucket_key = f"{matched.service.name}:{rate_limit.scope}:{subject}"
+        now = time.time()
+
+        with self._lock:
+            bucket = self.rate_limit_hits.setdefault(bucket_key, deque())
+            cutoff = now - rate_limit.window_seconds
+            while bucket and bucket[0] <= cutoff:
+                bucket.popleft()
+            if len(bucket) >= rate_limit.requests:
+                retry_after = max(1, int(bucket[0] + rate_limit.window_seconds - now))
+                raise GatewayError(
+                    429,
+                    f"Rate limit exceeded for service '{matched.service.name}'.",
+                    headers={"Retry-After": str(retry_after)},
+                )
+            bucket.append(now)
+
+    def _rate_limit_subject(
+        self,
+        *,
+        scope: str,
+        request: IncomingRequest,
+        authenticated_client: AuthenticatedClient | None,
+    ) -> str:
+        if scope == "client":
+            return authenticated_client.client_code if authenticated_client else "anonymous"
+        if scope == "ip":
+            return request.client_ip or "unknown"
+        return authenticated_client.client_code if authenticated_client else (request.client_ip or "anonymous")
+
+    def _authenticate_client(
+        self,
+        *,
+        matched: MatchedEndpoint,
+        request: IncomingRequest,
+    ) -> AuthenticatedClient | None:
+        if not matched.service.auth.required:
+            return None
+
+        with self._lock:
+            eligible_clients = [
+                client
+                for client in self.clients.values()
+                if client.enabled and self._client_scope_applies(client, matched=matched)
+            ]
+
+        if not eligible_clients:
+            raise GatewayError(
+                500,
+                f"Protected route '{matched.service.name}.{matched.endpoint.name}' has no eligible clients.",
+            )
+
+        for client in eligible_clients:
+            for method in client.auth_methods:
+                if not method.enabled:
+                    continue
+                matched_client = self._match_auth_method(
+                    client=client,
+                    method=method,
+                    matched=matched,
+                    request=request,
+                )
+                if matched_client is None:
+                    continue
+                if client.ip_allowlist and not self._ip_allowed(request.client_ip, client.ip_allowlist):
+                    raise GatewayError(
+                        403,
+                        f"Client '{client.code}' is not allowed from IP '{request.client_ip}'.",
+                    )
+                return matched_client
+
+        raise GatewayError(401, "Client authentication failed.")
+
+    def _client_scope_applies(
+        self,
+        client: ClientConfig,
+        *,
+        matched: MatchedEndpoint,
+    ) -> bool:
+        if client.access.mode == "all":
+            return True
+        if client.access.mode == "services":
+            return matched.service.name in client.access.services
+        return any(
+            target.service == matched.service.name and target.endpoint == matched.endpoint.name
+            for target in client.access.endpoints
+        )
+
+    def _match_auth_method(
+        self,
+        client: ClientConfig,
+        method: AuthMethodConfig,
+        matched: MatchedEndpoint,
+        request: IncomingRequest,
+    ) -> AuthenticatedClient | None:
+        cookies = self._parse_cookies(request.headers)
+
+        if method.type == "api_key":
+            for header_name in method.header_names:
+                value = self._get_header(request.headers, header_name)
+                if value is not None and hmac.compare_digest(value, method.secret or ""):
+                    return AuthenticatedClient(
+                        client_slug=client.slug,
+                        client_code=client.code,
+                        client_title=client.title,
+                        auth_method_code=method.code,
+                        auth_method_title=method.title,
+                        auth_type=method.type,
+                        source=f"header:{header_name}",
+                        metadata={},
+                        consumed_headers={header_name},
+                        consumed_query_params=set(),
+                        consumed_cookie_names=set(),
+                    )
+            for query_name in method.query_params:
+                value = request.query.get(query_name)
+                if value is not None and hmac.compare_digest(str(value), method.secret or ""):
+                    return AuthenticatedClient(
+                        client_slug=client.slug,
+                        client_code=client.code,
+                        client_title=client.title,
+                        auth_method_code=method.code,
+                        auth_method_title=method.title,
+                        auth_type=method.type,
+                        source=f"query:{query_name}",
+                        metadata={},
+                        consumed_headers=set(),
+                        consumed_query_params={query_name},
+                        consumed_cookie_names=set(),
+                    )
+            for cookie_name in method.cookie_names:
+                value = cookies.get(cookie_name)
+                if value is not None and hmac.compare_digest(value, method.secret or ""):
+                    return AuthenticatedClient(
+                        client_slug=client.slug,
+                        client_code=client.code,
+                        client_title=client.title,
+                        auth_method_code=method.code,
+                        auth_method_title=method.title,
+                        auth_type=method.type,
+                        source=f"cookie:{cookie_name}",
+                        metadata={},
+                        consumed_headers={"Cookie"},
+                        consumed_query_params=set(),
+                        consumed_cookie_names={cookie_name},
+                    )
+            return None
+
+        if method.type == "bearer":
+            if method.allow_authorization_header:
+                token = self._extract_bearer_token(request.headers)
+                if token is not None and hmac.compare_digest(token, method.token or ""):
+                    return AuthenticatedClient(
+                        client_slug=client.slug,
+                        client_code=client.code,
+                        client_title=client.title,
+                        auth_method_code=method.code,
+                        auth_method_title=method.title,
+                        auth_type=method.type,
+                        source="authorization:bearer",
+                        metadata={},
+                        consumed_headers={"Authorization"},
+                        consumed_query_params=set(),
+                        consumed_cookie_names=set(),
+                    )
+            for header_name in method.header_names:
+                value = self._get_header(request.headers, header_name)
+                if value is not None and hmac.compare_digest(value, method.token or ""):
+                    return AuthenticatedClient(
+                        client_slug=client.slug,
+                        client_code=client.code,
+                        client_title=client.title,
+                        auth_method_code=method.code,
+                        auth_method_title=method.title,
+                        auth_type=method.type,
+                        source=f"header:{header_name}",
+                        metadata={},
+                        consumed_headers={header_name},
+                        consumed_query_params=set(),
+                        consumed_cookie_names=set(),
+                    )
+            for query_name in method.query_params:
+                value = request.query.get(query_name)
+                if value is not None and hmac.compare_digest(str(value), method.token or ""):
+                    return AuthenticatedClient(
+                        client_slug=client.slug,
+                        client_code=client.code,
+                        client_title=client.title,
+                        auth_method_code=method.code,
+                        auth_method_title=method.title,
+                        auth_type=method.type,
+                        source=f"query:{query_name}",
+                        metadata={},
+                        consumed_headers=set(),
+                        consumed_query_params={query_name},
+                        consumed_cookie_names=set(),
+                    )
+            for cookie_name in method.cookie_names:
+                value = cookies.get(cookie_name)
+                if value is not None and hmac.compare_digest(value, method.token or ""):
+                    return AuthenticatedClient(
+                        client_slug=client.slug,
+                        client_code=client.code,
+                        client_title=client.title,
+                        auth_method_code=method.code,
+                        auth_method_title=method.title,
+                        auth_type=method.type,
+                        source=f"cookie:{cookie_name}",
+                        metadata={},
+                        consumed_headers={"Cookie"},
+                        consumed_query_params=set(),
+                        consumed_cookie_names={cookie_name},
+                    )
+            return None
+
+        if method.type == "basic":
+            parsed = self._extract_basic_credentials(request.headers)
+            if parsed is None:
+                return None
+            username, password = parsed
+            if hmac.compare_digest(username, method.username or "") and hmac.compare_digest(
+                password, method.password or ""
+            ):
+                return AuthenticatedClient(
+                    client_slug=client.slug,
+                    client_code=client.code,
+                    client_title=client.title,
+                    auth_method_code=method.code,
+                    auth_method_title=method.title,
+                    auth_type=method.type,
+                    source="authorization:basic",
+                    metadata={},
+                    consumed_headers={"Authorization"},
+                    consumed_query_params=set(),
+                    consumed_cookie_names=set(),
+                )
+            return None
+
+        if method.type == "header_key":
+            header_name = method.header_name or ""
+            value = self._get_header(request.headers, header_name)
+            if value is not None and hmac.compare_digest(value, method.secret or ""):
+                return AuthenticatedClient(
+                    client_slug=client.slug,
+                    client_code=client.code,
+                    client_title=client.title,
+                    auth_method_code=method.code,
+                    auth_method_title=method.title,
+                    auth_type=method.type,
+                    source=f"header:{header_name}",
+                    metadata={},
+                    consumed_headers={header_name},
+                    consumed_query_params=set(),
+                    consumed_cookie_names=set(),
+                )
+            return None
+
+        if method.type == "oauth_client_credentials":
+            token = self._extract_bearer_token(request.headers)
+            if token is None:
+                return None
+            if self._verify_oauth_access_token(client, method, token):
+                return AuthenticatedClient(
+                    client_slug=client.slug,
+                    client_code=client.code,
+                    client_title=client.title,
+                    auth_method_code=method.code,
+                    auth_method_title=method.title,
+                    auth_type=method.type,
+                    source="authorization:bearer",
+                    metadata={},
+                    consumed_headers={"Authorization"},
+                    consumed_query_params=set(),
+                    consumed_cookie_names=set(),
+                )
+            return None
+
+        if method.type == "external_service":
+            return self._match_external_service_auth(
+                client=client,
+                method=method,
+                matched=matched,
+                request=request,
+            )
+
+        return None
+
+    def _match_external_service_auth(
+        self,
+        *,
+        client: ClientConfig,
+        method: AuthMethodConfig,
+        matched: MatchedEndpoint,
+        request: IncomingRequest,
+    ) -> AuthenticatedClient | None:
+        request_ctx = {
+            "method": request.method,
+            "path": request.path,
+            "url": request.url,
+            "client_ip": request.client_ip,
+            "headers": request.headers,
+            "query": request.query,
+            "body_bytes": request.body,
+            "body_text": request.body.decode("utf-8", errors="ignore"),
+            "json": request.json_body,
+        }
+        context = {
+            "client": {
+                "slug": client.slug,
+                "code": client.code,
+                "title": client.title,
+            },
+            "auth": {
+                "client_slug": client.slug,
+                "client_code": client.code,
+                "client_title": client.title,
+                "method_code": method.code,
+                "method_title": method.title,
+                "method_type": method.type,
+            },
+            "auth_method": {
+                "code": method.code,
+                "title": method.title,
+                "type": method.type,
+            },
+            "service": {
+                "name": matched.service.name,
+                "base_url": matched.service.base_url,
+            },
+            "endpoint": {
+                "name": matched.endpoint.name,
+                "slug": matched.endpoint.slug,
+                "gateway_path": matched.endpoint.gateway_path,
+                "upstream_path": matched.endpoint.upstream_path,
+            },
+            "request": request_ctx,
+            "request_ctx": request_ctx,
+            "path": matched.path_params,
+            "query": request.query,
+            "headers": request.headers,
+        }
+
+        cache_key: str | None = None
+        if method.cache_ttl_seconds > 0 and method.cache_key:
+            rendered_cache_key = self.render_template(method.cache_key, context)
+            cache_key = f"{client.code}:{method.code}:{rendered_cache_key}"
+            cached = self.auth_cache.get(cache_key)
+            if cached and cached.expires_at > time.time():
+                return cached.value
+
+        decision: dict[str, Any] = {"result": None}
+
+        def call(http_method: str, url: str, **kwargs: Any) -> requests.Response:
+            rendered_url = self.render_template(url, context)
+            final_url = str(rendered_url)
+            if not final_url.startswith(("http://", "https://")):
+                raise ValueError("external_service call() requires an absolute URL.")
+            rendered_kwargs = self.render_data(kwargs, context)
+            rendered_kwargs.setdefault("timeout", matched.service.timeout_seconds)
+            rendered_kwargs.setdefault("allow_redirects", False)
+            with requests.Session() as session:
+                session.trust_env = matched.service.trust_env_proxy
+                return session.request(http_method.upper(), final_url, **rendered_kwargs)
+
+        def allow(
+            *,
+            source: str = "external_service",
+            consumed_headers: list[str] | None = None,
+            consumed_query_params: list[str] | None = None,
+            consumed_cookie_names: list[str] | None = None,
+            metadata: dict[str, Any] | None = None,
+        ) -> None:
+            decision["result"] = AuthenticatedClient(
+                client_slug=client.slug,
+                client_code=client.code,
+                client_title=client.title,
+                auth_method_code=method.code,
+                auth_method_title=method.title,
+                auth_type=method.type,
+                source=source,
+                metadata=dict(metadata or {}),
+                consumed_headers=set(consumed_headers or []),
+                consumed_query_params=set(consumed_query_params or []),
+                consumed_cookie_names=set(consumed_cookie_names or []),
+            )
+
+        def skip() -> None:
+            decision["result"] = None
+
+        def deny(detail: str = "Client authentication failed.", *, status_code: int = 401) -> None:
+            raise GatewayError(status_code, detail)
+
+        exec_globals: dict[str, Any] = {
+            "__builtins__": __builtins__,
+            "call": call,
+            "allow": allow,
+            "skip": skip,
+            "deny": deny,
+            "client": context["client"],
+            "auth_method": context["auth_method"],
+            "service": context["service"],
+            "endpoint": context["endpoint"],
+            "request_ctx": request_ctx,
+            "path": context["path"],
+            "query": context["query"],
+            "headers": context["headers"],
+            "json": json,
+            "time": time,
+            "datetime": datetime,
+            "base64": __import__("base64"),
+            "hashlib": __import__("hashlib"),
+        }
+        exec_locals: dict[str, Any] = {}
+        snippet = "def __user_external_auth__():\n"
+        for line in (method.script or "").splitlines():
+            snippet += f"    {line}\n"
+        exec(snippet, exec_globals, exec_locals)
+        exec_locals["__user_external_auth__"]()
+
+        result = decision["result"]
+        if result is not None and cache_key and method.cache_ttl_seconds > 0:
+            self.auth_cache[cache_key] = CacheValue(
+                expires_at=time.time() + method.cache_ttl_seconds,
+                value=result,
+            )
+        return result
+
+    def _extract_bearer_token(self, headers: Mapping[str, Any]) -> str | None:
+        header = self._get_header(headers, "Authorization")
+        if not header:
+            return None
+        parts = header.split(" ", 1)
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            return None
+        return parts[1].strip() or None
+
+    def _extract_basic_credentials(self, headers: Mapping[str, Any]) -> tuple[str, str] | None:
+        header = self._get_header(headers, "Authorization")
+        if not header:
+            return None
+        parts = header.split(" ", 1)
+        if len(parts) != 2 or parts[0].lower() != "basic":
+            return None
+        try:
+            decoded = base64.b64decode(parts[1].encode("ascii")).decode("utf-8")
+            username, password = decoded.split(":", 1)
+        except Exception:  # noqa: BLE001
+            return None
+        return username, password
+
+    def _get_header(self, headers: Mapping[str, Any], name: str) -> str | None:
+        expected = name.lower()
+        for key, value in headers.items():
+            if key.lower() == expected:
+                return str(value)
+        return None
+
+    def _parse_cookies(self, headers: Mapping[str, Any]) -> dict[str, str]:
+        raw_cookie = self._get_header(headers, "Cookie")
+        if not raw_cookie:
+            return {}
+        cookie = SimpleCookie()
+        cookie.load(raw_cookie)
+        return {key: morsel.value for key, morsel in cookie.items()}
+
+    def _file_signature(self, path: Path) -> tuple[int, int] | None:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return None
+        return stat.st_mtime_ns, stat.st_size
+
+    def _remove_cookie_names(self, raw_cookie: str, names: set[str]) -> str:
+        if not raw_cookie:
+            return ""
+        cookie = SimpleCookie()
+        cookie.load(raw_cookie)
+        for name in names:
+            cookie.pop(name, None)
+        parts = [f"{key}={morsel.value}" for key, morsel in cookie.items()]
+        return "; ".join(parts)
+
+    def _ip_allowed(self, client_ip: str, allowlist: list[str]) -> bool:
+        try:
+            address = ipaddress.ip_address(client_ip)
+        except ValueError:
+            return False
+
+        for entry in allowlist:
+            if address in ipaddress.ip_network(entry, strict=False):
+                return True
+        return False
+
+    def _build_oauth_access_token(
+        self,
+        client: ClientConfig,
+        method: AuthMethodConfig,
+        expires_at: int,
+    ) -> str:
+        if method.type != "oauth_client_credentials":
+            raise ValueError("OAuth tokens can only be issued for oauth_client_credentials clients.")
+
+        payload = {
+            "type": "oauth_client_credentials",
+            "client_code": client.code,
+            "auth_method_code": method.code,
+            "client_id": method.client_id,
+            "exp": expires_at,
+        }
+        payload_raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        payload_encoded = self._base64url_encode(payload_raw)
+        signature = hmac.new(
+            (method.client_secret or "").encode("utf-8"),
+            payload_encoded.encode("ascii"),
+            "sha256",
+        ).digest()
+        return f"{payload_encoded}.{self._base64url_encode(signature)}"
+
+    def _verify_oauth_access_token(
+        self,
+        client: ClientConfig,
+        method: AuthMethodConfig,
+        token: str,
+    ) -> bool:
+        if method.type != "oauth_client_credentials":
+            return False
+        try:
+            payload_encoded, signature_encoded = token.split(".", 1)
+            payload_raw = self._base64url_decode(payload_encoded)
+            payload = json.loads(payload_raw.decode("utf-8"))
+            expected_signature = hmac.new(
+                (method.client_secret or "").encode("utf-8"),
+                payload_encoded.encode("ascii"),
+                "sha256",
+            ).digest()
+        except Exception:  # noqa: BLE001
+            return False
+
+        if not hmac.compare_digest(
+            self._base64url_encode(expected_signature),
+            signature_encoded,
+        ):
+            return False
+        if payload.get("type") != "oauth_client_credentials":
+            return False
+        if payload.get("client_code") != client.code:
+            return False
+        if payload.get("auth_method_code") != method.code:
+            return False
+        if payload.get("client_id") != method.client_id:
+            return False
+        try:
+            expires_at = int(payload.get("exp", 0))
+        except (TypeError, ValueError):
+            return False
+        return expires_at > int(time.time())
+
+    def _base64url_encode(self, value: bytes) -> str:
+        return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+    def _base64url_decode(self, value: str) -> bytes:
+        padding = "=" * (-len(value) % 4)
+        return base64.urlsafe_b64decode((value + padding).encode("ascii"))
