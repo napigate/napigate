@@ -583,20 +583,35 @@ class GatewayRuntime:
         if self._is_existing_output_envelope(parsed_body, profile):
             envelope = parsed_body
         else:
-            success = response.status_code < 400
-            message = self._output_message_from_payload(parsed_body)
+            success_value = self._payload_value_or_default(
+                parsed_body,
+                profile.success_key,
+                response.status_code < 400,
+            )
+            success = self._success_flag(success_value)
+            message = self._payload_value_or_default(
+                parsed_body,
+                profile.message_key,
+                self._output_message_from_payload(parsed_body),
+            )
+            data_default = parsed_body if success else None
+            error_default = (
+                parsed_body
+                if not success and parsed_body not in (None, "")
+                else message or f"HTTP {response.status_code}"
+            )
             envelope = {
-                profile.success_key: success,
+                profile.success_key: success_value,
                 profile.message_key: message,
+                profile.data_key: self._payload_value_or_default(
+                    parsed_body,
+                    profile.data_key,
+                    data_default,
+                ),
             }
-            if success:
-                envelope[profile.data_key] = parsed_body
-            else:
-                envelope[profile.data_key] = None
+            if not success:
                 envelope[profile.error_key] = (
-                    parsed_body
-                    if parsed_body not in (None, "")
-                    else message or f"HTTP {response.status_code}"
+                    self._payload_value_or_default(parsed_body, profile.error_key, error_default)
                 )
 
         body = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
@@ -631,6 +646,24 @@ class GatewayRuntime:
             return False
         required_keys = profile.passthrough_keys or [profile.success_key, profile.data_key]
         return all(key in payload for key in required_keys)
+
+    def _payload_value_or_default(self, payload: Any, key: str, default: Any) -> Any:
+        if isinstance(payload, Mapping) and key in payload and payload[key] not in (None, ""):
+            return payload[key]
+        return default
+
+    def _success_flag(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"false", "0", "no", "failed", "error"}:
+                return False
+            if normalized in {"true", "1", "yes", "ok", "success"}:
+                return True
+        return bool(value)
 
     def _output_message_from_payload(self, payload: Any) -> str:
         if isinstance(payload, Mapping):

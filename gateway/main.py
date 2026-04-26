@@ -87,48 +87,50 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
           font-family: "Segoe UI", "Inter", sans-serif;
           background: radial-gradient(circle at top, #fbf6eb 0%, var(--bg) 60%);
           color: var(--ink);
+          font-size: 13px;
+          line-height: 1.45;
         }}
         .wrap {{
-          max-width: 1280px;
-          margin: 32px auto;
-          padding: 0 20px;
+          max-width: 1480px;
+          margin: 18px auto;
+          padding: 0 16px;
         }}
         .panel {{
           background: var(--paper);
           border: 1px solid var(--line);
-          border-radius: 18px;
+          border-radius: 14px;
           overflow: hidden;
-          box-shadow: 0 20px 50px rgba(107, 114, 128, 0.08);
+          box-shadow: 0 12px 30px rgba(107, 114, 128, 0.08);
         }}
         .head {{
           display: flex;
           justify-content: space-between;
-          gap: 16px;
+          gap: 12px;
           align-items: center;
-          padding: 18px 22px;
+          padding: 12px 16px;
           border-bottom: 1px solid var(--line);
         }}
         .title {{
-          font-size: 22px;
+          font-size: 18px;
           font-weight: 700;
           margin: 0;
         }}
         .meta {{
           color: var(--muted);
-          font-size: 13px;
+          font-size: 12px;
         }}
         .toolbar {{
           display: flex;
-          gap: 12px;
+          gap: 8px;
           align-items: center;
           flex-wrap: wrap;
         }}
         .chip {{
           border: 1px solid var(--line);
           border-radius: 999px;
-          padding: 6px 10px;
+          padding: 4px 8px;
           background: #fff8ee;
-          font-size: 13px;
+          font-size: 12px;
         }}
         .chip.ok {{ color: var(--ok); }}
         .chip.offline {{ color: var(--bad); }}
@@ -137,38 +139,38 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
           color: var(--accent);
           text-decoration: none;
           font-weight: 700;
-          margin-inline-start: 12px;
+          margin-inline-start: 8px;
         }}
         .stats {{
           display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-          gap: 12px;
-          padding: 16px 22px;
+          grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+          gap: 10px;
+          padding: 10px 16px;
           border-bottom: 1px solid var(--line);
           background: #fff8ef;
         }}
         .stat {{
           border: 1px solid #eadbc4;
-          border-radius: 14px;
-          padding: 12px 14px;
+          border-radius: 10px;
+          padding: 8px 10px;
           background: #fffdf8;
         }}
         .stat-label {{
           color: var(--muted);
-          font-size: 12px;
+          font-size: 11px;
         }}
         .stat-value {{
-          font-size: 24px;
+          font-size: 19px;
           font-weight: 700;
-          margin-top: 4px;
+          margin-top: 2px;
         }}
         table {{
           width: 100%;
           border-collapse: collapse;
-          font-size: 14px;
+          font-size: 12.5px;
         }}
         th, td {{
-          padding: 10px 12px;
+          padding: 7px 8px;
           border-bottom: 1px solid #eee4d2;
           text-align: left;
           vertical-align: top;
@@ -177,17 +179,18 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
           background: #f7f0e5;
           position: sticky;
           top: 0;
+          font-size: 11.5px;
         }}
         tbody tr:nth-child(even) {{
           background: #fffaf2;
         }}
         .status-badge {{
           display: inline-block;
-          min-width: 56px;
+          min-width: 48px;
           text-align: center;
           border-radius: 999px;
-          padding: 4px 8px;
-          font-size: 12px;
+          padding: 3px 7px;
+          font-size: 11px;
           font-weight: 700;
           background: #fce7d2;
           color: var(--accent);
@@ -197,7 +200,7 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
         .status-5xx {{ background: #fee2e2; color: var(--bad); }}
         .mono {{
           font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
-          font-size: 12px;
+          font-size: 11px;
           direction: ltr;
           unicode-bidi: plaintext;
         }}
@@ -239,7 +242,7 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
               <div class="stat-value" id="stat-updated">-</div>
             </div>
           </div>
-          <div style="overflow:auto; max-height:75vh;">
+          <div style="overflow:auto; max-height:80vh;">
             <table>
               <thead>
                 <tr>
@@ -328,15 +331,13 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
     """
 
 
-def render_admin_page(
+def build_admin_state(
     *,
     principal: AuthenticatedPrincipal,
     document: dict[str, Any],
-    message: str = "",
-    error: str = "",
-) -> str:
+) -> dict[str, Any]:
     can_view_live = principal.can("monitor_access")
-    state = build_admin_page_state(
+    return build_admin_page_state(
         principal=principal,
         document=document,
         security_state=security.public_state(),
@@ -349,6 +350,16 @@ def render_admin_page(
             "monitor_url": "/__monitor",
         },
     )
+
+
+def render_admin_page(
+    *,
+    principal: AuthenticatedPrincipal,
+    document: dict[str, Any],
+    message: str = "",
+    error: str = "",
+) -> str:
+    state = build_admin_state(principal=principal, document=document)
     state_json = json.dumps(state, ensure_ascii=False).replace("</", "<\\/")
     flash = ""
     if message:
@@ -383,51 +394,55 @@ def render_admin_page(
           margin: 0;
           font-family: "Google Sans Text", "Segoe UI", sans-serif;
           color: var(--ink);
+          font-size: 13px;
+          line-height: 1.45;
           background:
             radial-gradient(circle at top right, rgba(26, 115, 232, 0.10), transparent 30%),
             radial-gradient(circle at bottom left, rgba(66, 133, 244, 0.08), transparent 35%),
             var(--bg);
         }}
         .wrap {{
-          max-width: 1320px;
-          margin: 28px auto 48px;
-          padding: 0 18px;
+          max-width: 1500px;
+          margin: 18px auto 28px;
+          padding: 0 14px;
         }}
         .hero {{
           display: flex;
           justify-content: space-between;
-          gap: 16px;
+          gap: 12px;
           align-items: center;
-          margin-bottom: 18px;
+          margin-bottom: 12px;
         }}
         .title {{
           margin: 0;
-          font-size: 32px;
+          font-size: 26px;
           font-weight: 900;
         }}
         .subtitle {{
-          margin-top: 8px;
+          margin-top: 5px;
           color: var(--muted);
-          line-height: 1.8;
+          line-height: 1.55;
+          font-size: 12px;
         }}
         .meta-box {{
           display: flex;
-          gap: 10px;
+          gap: 8px;
           flex-wrap: wrap;
           justify-content: flex-start;
         }}
         .chip {{
-          padding: 8px 12px;
+          padding: 5px 10px;
           border-radius: 999px;
           background: #fff;
           border: 1px solid var(--line);
-          font-size: 13px;
+          font-size: 12px;
         }}
         .flash {{
-          margin-bottom: 18px;
-          padding: 12px 14px;
-          border-radius: 14px;
+          margin-bottom: 12px;
+          padding: 9px 11px;
+          border-radius: 10px;
           font-weight: 700;
+          font-size: 12px;
         }}
         .flash.ok {{
           background: var(--okbg);
@@ -437,18 +452,33 @@ def render_admin_page(
           background: var(--errbg);
           color: var(--danger);
         }}
+        #admin-flash:not(:empty) {{
+          margin-bottom: 12px;
+        }}
+        .field-error {{
+          color: var(--danger);
+          font-size: 11px;
+          font-weight: 700;
+          margin-top: 4px;
+        }}
+        .form-grid input:invalid,
+        .form-grid textarea:invalid,
+        .form-grid select:invalid {{
+          border-color: #ef9a9a;
+          box-shadow: 0 0 0 2px rgba(217, 48, 37, 0.08);
+        }}
         .panel {{
           background: var(--paper);
           border: 1px solid var(--line);
-          border-radius: 28px;
+          border-radius: 18px;
           overflow: hidden;
-          box-shadow: 0 20px 50px rgba(60, 64, 67, 0.12);
+          box-shadow: 0 14px 34px rgba(60, 64, 67, 0.10);
         }}
         .tabs {{
           display: flex;
-          gap: 8px;
+          gap: 6px;
           flex-wrap: wrap;
-          padding: 16px;
+          padding: 10px;
           background: var(--tabbg);
           border-bottom: 1px solid var(--line);
         }}
@@ -457,11 +487,13 @@ def render_admin_page(
           border-radius: 999px;
           background: #202124;
           color: #fff;
-          padding: 10px 14px;
+          padding: 7px 11px;
           font: inherit;
           font-weight: 800;
+          font-size: 12px;
           cursor: pointer;
           text-decoration: none;
+          line-height: 1.2;
         }}
         .tab.active {{
           background: var(--accent);
@@ -475,7 +507,7 @@ def render_admin_page(
         }}
         .section {{
           display: none;
-          padding: 22px;
+          padding: 14px;
         }}
         .section.active {{
           display: block;
@@ -483,41 +515,44 @@ def render_admin_page(
         .section-head {{
           display: flex;
           justify-content: space-between;
-          gap: 12px;
+          gap: 10px;
           align-items: center;
-          margin-bottom: 16px;
+          margin-bottom: 12px;
         }}
         .section-title {{
           margin: 0;
-          font-size: 22px;
+          font-size: 18px;
           font-weight: 800;
         }}
         .section-note {{
           color: var(--muted);
-          margin-top: 6px;
+          margin-top: 4px;
+          font-size: 12px;
+          line-height: 1.45;
         }}
         .card {{
           border: 1px solid #e3e9f1;
-          border-radius: 24px;
-          padding: 16px;
+          border-radius: 16px;
+          padding: 12px;
           background: #fff;
         }}
         table {{
           width: 100%;
           border-collapse: collapse;
           background: white;
-          border-radius: 20px;
+          border-radius: 14px;
           overflow: hidden;
+          font-size: 12.5px;
         }}
         th, td {{
-          padding: 12px 14px;
+          padding: 8px 10px;
           border-bottom: 1px solid #edf1f5;
           text-align: left;
           vertical-align: top;
         }}
         th {{
           background: #f8fafd;
-          font-size: 13px;
+          font-size: 11.5px;
         }}
         tr:last-child td {{
           border-bottom: none;
@@ -526,27 +561,30 @@ def render_admin_page(
           font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
           direction: ltr;
           unicode-bidi: plaintext;
-          font-size: 12px;
+          font-size: 11px;
         }}
         .actions {{
           display: flex;
           flex-wrap: wrap;
-          gap: 8px;
+          gap: 6px;
         }}
         button,
         .btn {{
           border: none;
-          border-radius: 12px;
+          border-radius: 10px;
           background: var(--accent);
           color: white;
-          padding: 10px 14px;
+          padding: 7px 10px;
           font: inherit;
           font-weight: 700;
+          font-size: 12px;
+          line-height: 1.2;
           cursor: pointer;
           text-decoration: none;
           display: inline-flex;
           align-items: center;
           justify-content: center;
+          white-space: nowrap;
         }}
         .btn.secondary {{
           background: var(--accent-2);
@@ -561,19 +599,20 @@ def render_admin_page(
         }}
         .empty {{
           color: var(--muted);
-          padding: 18px 4px;
+          padding: 12px 2px;
+          font-size: 12px;
         }}
         .tag {{
           display: inline-flex;
           align-items: center;
           gap: 6px;
-          padding: 4px 8px;
+          padding: 3px 7px;
           border-radius: 999px;
           background: #e8f0fe;
           color: #174ea6;
-          font-size: 12px;
-          margin-inline-end: 6px;
-          margin-bottom: 6px;
+          font-size: 11px;
+          margin-inline-end: 4px;
+          margin-bottom: 4px;
         }}
         .tag.ok {{
           background: #dcfce7;
@@ -585,48 +624,48 @@ def render_admin_page(
         }}
         .live-grid {{
           display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-          gap: 12px;
-          margin-bottom: 16px;
+          grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+          gap: 10px;
+          margin-bottom: 12px;
         }}
         .live-stat {{
           border: 1px solid #e3e9f1;
-          border-radius: 20px;
-          padding: 16px;
+          border-radius: 14px;
+          padding: 10px;
           background: #f8fafd;
         }}
         .live-label {{
           color: var(--muted);
-          font-size: 12px;
-          margin-bottom: 8px;
+          font-size: 11px;
+          margin-bottom: 5px;
         }}
         .live-value {{
-          font-size: 28px;
+          font-size: 22px;
           font-weight: 900;
           line-height: 1;
         }}
         .live-subvalue {{
-          margin-top: 8px;
+          margin-top: 4px;
           color: var(--muted);
-          font-size: 13px;
+          font-size: 12px;
         }}
         .live-head {{
           display: flex;
           justify-content: space-between;
-          gap: 12px;
+          gap: 10px;
           align-items: center;
-          margin-bottom: 14px;
+          margin-bottom: 10px;
         }}
         .live-badge {{
           display: inline-flex;
           align-items: center;
-          gap: 8px;
-          padding: 8px 12px;
+          gap: 6px;
+          padding: 5px 9px;
           border-radius: 999px;
           border: 1px solid #d6e2fb;
           background: #fff;
           color: var(--muted);
-          font-size: 13px;
+          font-size: 12px;
           font-weight: 700;
         }}
         .live-badge.ok {{
@@ -640,20 +679,20 @@ def render_admin_page(
           border-color: #f3dfb4;
         }}
         .live-dot {{
-          width: 10px;
-          height: 10px;
+          width: 8px;
+          height: 8px;
           border-radius: 50%;
           background: currentColor;
-          box-shadow: 0 0 0 5px rgba(26, 115, 232, 0.10);
+          box-shadow: 0 0 0 4px rgba(26, 115, 232, 0.10);
         }}
         .live-table-card {{
           border: 1px solid #e3e9f1;
-          border-radius: 24px;
-          padding: 16px;
+          border-radius: 16px;
+          padding: 12px;
           background: #fff;
         }}
         .live-table-card table {{
-          border-radius: 16px;
+          border-radius: 12px;
         }}
         .overlay {{
           position: fixed;
@@ -662,59 +701,59 @@ def render_admin_page(
           display: none;
           align-items: center;
           justify-content: center;
-          padding: 20px;
+          padding: 14px;
           z-index: 999;
         }}
         .overlay.open {{
           display: flex;
         }}
         .modal {{
-          width: min(920px, 100%);
-          max-height: 90vh;
+          width: min(980px, 100%);
+          max-height: 92vh;
           overflow: auto;
           background: white;
-          border-radius: 28px;
-          box-shadow: 0 30px 80px rgba(60, 64, 67, 0.22);
+          border-radius: 18px;
+          box-shadow: 0 22px 56px rgba(60, 64, 67, 0.18);
           border: 1px solid #d8e0ea;
         }}
         .modal-head {{
           display: flex;
           justify-content: space-between;
-          gap: 12px;
+          gap: 10px;
           align-items: center;
-          padding: 18px 20px;
+          padding: 12px 14px;
           border-bottom: 1px solid #e8edf3;
           position: sticky;
           top: 0;
           background: white;
         }}
         .modal-body {{
-          padding: 20px;
+          padding: 14px;
         }}
         .modal-title {{
           margin: 0;
-          font-size: 20px;
+          font-size: 17px;
           font-weight: 800;
         }}
         .icon-btn {{
           background: transparent;
           color: var(--ink);
           border: 1px solid #d6cab8;
-          width: 42px;
-          height: 42px;
-          border-radius: 12px;
+          width: 34px;
+          height: 34px;
+          border-radius: 10px;
           padding: 0;
         }}
         .form-grid {{
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 14px;
+          gap: 10px;
         }}
         .form-grid label {{
           display: flex;
           flex-direction: column;
-          gap: 8px;
-          font-size: 14px;
+          gap: 6px;
+          font-size: 13px;
           font-weight: 700;
         }}
         .help-label {{
@@ -728,13 +767,13 @@ def render_admin_page(
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          width: 18px;
-          height: 18px;
+          width: 16px;
+          height: 16px;
           border-radius: 999px;
           border: 1px solid #c9d6eb;
           background: #f8fbff;
           color: #1a73e8;
-          font-size: 11px;
+          font-size: 10px;
           font-weight: 900;
           cursor: help;
           outline: none;
@@ -746,15 +785,15 @@ def render_admin_page(
         }}
         .help-popover {{
           position: absolute;
-          top: calc(100% + 10px);
+          top: calc(100% + 8px);
           inset-inline-end: 0;
-          width: min(320px, calc(100vw - 64px));
-          padding: 12px 14px;
-          border-radius: 16px;
+          width: min(300px, calc(100vw - 40px));
+          padding: 10px 12px;
+          border-radius: 14px;
           border: 1px solid #d9e4f2;
           background: #fff;
           color: var(--ink);
-          box-shadow: 0 20px 45px rgba(60, 64, 67, 0.18);
+          box-shadow: 0 16px 34px rgba(60, 64, 67, 0.16);
           opacity: 0;
           transform: translateY(6px);
           pointer-events: none;
@@ -770,29 +809,29 @@ def render_admin_page(
         }}
         .help-title {{
           display: block;
-          font-size: 12px;
+          font-size: 11px;
           font-weight: 800;
-          margin-bottom: 6px;
+          margin-bottom: 4px;
         }}
         .help-body {{
           display: block;
           color: var(--muted);
-          font-size: 12px;
+          font-size: 11px;
           font-weight: 500;
-          line-height: 1.6;
+          line-height: 1.5;
         }}
         .help-example {{
           display: block;
-          margin-top: 8px;
-          padding-top: 8px;
+          margin-top: 6px;
+          padding-top: 6px;
           border-top: 1px solid #edf2f8;
           color: #334155;
-          font-size: 12px;
+          font-size: 11px;
           font-weight: 600;
         }}
         .help-example code {{
           font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
-          font-size: 11px;
+          font-size: 10px;
         }}
         .form-grid .full {{
           grid-column: 1 / -1;
@@ -802,88 +841,158 @@ def render_admin_page(
         .form-grid select {{
           width: 100%;
           border: 1px solid #d2d8e0;
-          border-radius: 12px;
-          padding: 10px 12px;
+          border-radius: 10px;
+          padding: 8px 10px;
           font: inherit;
           background: #fff;
         }}
         .form-grid textarea {{
-          min-height: 92px;
+          min-height: 78px;
           resize: vertical;
           font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
-          font-size: 13px;
+          font-size: 12px;
         }}
         .check-grid {{
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 10px;
+          gap: 8px;
         }}
         .check-item {{
           display: flex;
-          gap: 10px;
+          gap: 8px;
           align-items: flex-start;
-          padding: 10px 12px;
-          border-radius: 14px;
+          padding: 8px 10px;
+          border-radius: 12px;
           background: #f8fafd;
           border: 1px solid #e3e9f1;
         }}
         .check-item input {{
           width: auto;
-          margin-top: 3px;
+          margin-top: 2px;
         }}
         .muted {{
           color: var(--muted);
-          font-size: 13px;
-          line-height: 1.7;
+          font-size: 12px;
+          line-height: 1.5;
         }}
         .detail-box {{
           background: #f8fafd;
           border: 1px solid #e4e9f0;
-          border-radius: 16px;
-          padding: 14px;
+          border-radius: 12px;
+          padding: 10px;
         }}
         .detail-box pre {{
           margin: 0;
           white-space: pre-wrap;
           word-break: break-word;
           font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
-          font-size: 12px;
+          font-size: 11px;
+        }}
+        .output-flow {{
+          border: 1px solid #dbe5f2;
+          border-radius: 14px;
+          background: linear-gradient(180deg, #f8fafd 0%, #fff 100%);
+          padding: 12px;
+        }}
+        .output-flow-head {{
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          margin-bottom: 10px;
+        }}
+        .output-flow-title {{
+          font-weight: 800;
+          font-size: 13px;
+        }}
+        .output-flow-subtitle {{
+          color: var(--muted);
+          font-size: 11px;
+          margin-top: 3px;
+        }}
+        .output-rule {{
+          display: none;
+        }}
+        .output-rule.is-active {{
+          display: block;
+        }}
+        .pseudo-code {{
+          margin: 0;
+          padding: 10px;
+          border-radius: 10px;
+          background: #111827;
+          color: #e5e7eb;
+          border: 1px solid #0f172a;
+          font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+          font-size: 11px;
+          line-height: 1.55;
+          white-space: pre-wrap;
+          word-break: break-word;
+        }}
+        .pseudo-code .keyword {{
+          color: #93c5fd;
+        }}
+        .pseudo-code .value {{
+          color: #86efac;
+        }}
+        .pseudo-code .fallback {{
+          color: #fde68a;
+        }}
+        .output-mode-note {{
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 8px;
+          margin-top: 10px;
+        }}
+        .output-mode-note div {{
+          border: 1px solid #e3e9f1;
+          border-radius: 10px;
+          background: #fff;
+          padding: 8px;
+          font-size: 11px;
+          color: var(--muted);
+        }}
+        .output-mode-note strong {{
+          display: block;
+          color: var(--ink);
+          font-size: 11px;
+          margin-bottom: 3px;
         }}
         .stack {{
           display: flex;
           flex-direction: column;
-          gap: 12px;
+          gap: 10px;
         }}
         .auth-method-card {{
           border: 1px solid #dbe5f2;
-          border-radius: 18px;
+          border-radius: 14px;
           background: #f8fafd;
-          padding: 14px;
+          padding: 12px;
         }}
         .auth-method-head {{
           display: flex;
           justify-content: space-between;
-          gap: 12px;
+          gap: 10px;
           align-items: center;
-          margin-bottom: 12px;
+          margin-bottom: 10px;
         }}
         .scope-grid {{
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 10px;
+          gap: 8px;
         }}
         .mini-check {{
           display: flex;
-          gap: 10px;
+          gap: 8px;
           align-items: flex-start;
-          padding: 10px 12px;
+          padding: 8px 10px;
           border: 1px solid #e1e7ef;
-          border-radius: 14px;
+          border-radius: 12px;
           background: #fff;
         }}
         .mini-check input {{
           width: auto;
-          margin-top: 3px;
+          margin-top: 2px;
         }}
         @media (max-width: 900px) {{
           .hero, .section-head {{
@@ -895,6 +1004,9 @@ def render_admin_page(
             align-items: flex-start;
           }}
           .form-grid, .check-grid, .scope-grid {{
+            grid-template-columns: 1fr;
+          }}
+          .output-mode-note {{
             grid-template-columns: 1fr;
           }}
           .tabs {{
@@ -922,6 +1034,7 @@ def render_admin_page(
           </div>
         </div>
         {flash}
+        <div id="admin-flash"></div>
         <div class="panel">
           <div class="tabs">
             <button class="tab active" data-tab="live">Live</button>
@@ -1012,12 +1125,13 @@ def render_admin_page(
       </div>
 
       <script>
-        const STATE = {state_json};
-        const permissions = new Set(STATE.principal.permissions);
+        let STATE = {state_json};
+        let permissions = new Set(STATE.principal.permissions);
         const overlay = document.getElementById("modal-overlay");
         const modalTitle = document.getElementById("modal-title");
         const modalBody = document.getElementById("modal-body");
         const modalClose = document.getElementById("modal-close");
+        const adminFlash = document.getElementById("admin-flash");
 
         function esc(value) {{
           return String(value ?? "")
@@ -1187,29 +1301,204 @@ def render_admin_page(
           if (event.target === overlay) closeModal();
         }});
 
-        document.querySelectorAll(".tab[data-tab]").forEach((tab) => {{
-          tab.addEventListener("click", () => {{
-            document.querySelectorAll(".tab[data-tab]").forEach((item) => item.classList.remove("active"));
-            document.querySelectorAll(".section").forEach((item) => item.classList.remove("active"));
-            tab.classList.add("active");
-            document.querySelector(`.section[data-section="${{tab.dataset.tab}}"]`).classList.add("active");
+        const VALID_TABS = Array.from(document.querySelectorAll(".tab[data-tab]")).map((tab) => tab.dataset.tab);
+        let activeTab = VALID_TABS.includes(window.location.hash.slice(1)) ? window.location.hash.slice(1) : "live";
+
+        function showAdminNotice(message, type = "ok") {{
+          if (!adminFlash) return;
+          adminFlash.innerHTML = message
+            ? `<div class="flash ${{type === "error" ? "error" : "ok"}}">${{esc(message)}}</div>`
+            : "";
+        }}
+
+        function activateTab(tabName, options = {{ push: false }}) {{
+          const target = VALID_TABS.includes(tabName) ? tabName : "live";
+          activeTab = target;
+          document.querySelectorAll(".tab[data-tab]").forEach((item) => {{
+            item.classList.toggle("active", item.dataset.tab === target);
           }});
+          document.querySelectorAll(".section").forEach((item) => {{
+            item.classList.toggle("active", item.dataset.section === target);
+          }});
+          if (options.push && window.location.hash.slice(1) !== target) {{
+            history.pushState({{ tab: target }}, "", `#${{target}}`);
+          }}
+        }}
+
+        document.querySelectorAll(".tab[data-tab]").forEach((tab) => {{
+          tab.addEventListener("click", () => activateTab(tab.dataset.tab, {{ push: true }}));
         }});
 
-        function postDelete(action, fields) {{
-          if (!confirm("Are you sure?")) return;
-          const form = document.createElement("form");
-          form.method = "post";
-          form.action = action;
-          Object.entries(fields).forEach(([key, value]) => {{
-            const input = document.createElement("input");
-            input.type = "hidden";
-            input.name = key;
-            input.value = value;
-            form.appendChild(input);
+        window.addEventListener("popstate", () => activateTab(window.location.hash.slice(1) || "live"));
+        window.addEventListener("hashchange", () => activateTab(window.location.hash.slice(1) || "live"));
+        activateTab(activeTab, {{ push: false }});
+
+        function applyState(nextState) {{
+          if (!nextState) return;
+          STATE = nextState;
+          permissions = new Set(STATE.principal.permissions);
+          liveRows = Array.isArray(STATE.live?.logs) ? STATE.live.logs : liveRows;
+          renderServices();
+          renderOutputProfiles();
+          renderClients();
+          renderUsers();
+          renderRoles();
+          renderLive();
+          activateTab(activeTab, {{ push: false }});
+        }}
+
+        function formPayload(form) {{
+          return new URLSearchParams(new FormData(form));
+        }}
+
+        async function postAdminMutation(action, body) {{
+          const response = await fetch(action, {{
+            method: "POST",
+            headers: {{
+              "Accept": "application/json",
+              "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+              "X-Requested-With": "XMLHttpRequest",
+            }},
+            body,
           }});
-          document.body.appendChild(form);
-          form.submit();
+          const payload = await response.json().catch(() => ({{}}));
+          if (!response.ok) {{
+            throw new Error(payload.detail || `HTTP ${{response.status}}`);
+          }}
+          applyState(payload.state);
+          showAdminNotice(payload.message || "Saved.");
+          return payload;
+        }}
+
+        function setFieldError(field, message) {{
+          field.setCustomValidity(message || "");
+          let error = field.closest("label")?.querySelector(".field-error");
+          if (!message) {{
+            error?.remove();
+            return;
+          }}
+          if (!error) {{
+            error = document.createElement("div");
+            error.className = "field-error";
+            field.closest("label")?.appendChild(error);
+          }}
+          error.textContent = message;
+        }}
+
+        function clearFormErrors(form) {{
+          form.querySelectorAll(".field-error").forEach((node) => node.remove());
+          form.querySelectorAll("input, textarea, select").forEach((field) => field.setCustomValidity(""));
+        }}
+
+        function hasUnsafeMarkup(value) {{
+          return /<\\s*\\/?\\s*script\\b|on(?:error|load|click|mouseover)\\s*=|javascript\\s*:|<\\s*iframe\\b/i.test(String(value || ""));
+        }}
+
+        function isSafeIdentifier(value) {{
+          return /^[a-zA-Z_][a-zA-Z0-9_-]{{0,63}}$/.test(String(value || ""));
+        }}
+
+        function isSafeJsonpCallback(value) {{
+          return /^[a-zA-Z_$][a-zA-Z0-9_$]*(\\.[a-zA-Z_$][a-zA-Z0-9_$]*)*$/.test(String(value || ""));
+        }}
+
+        function validateAdminForm(form) {{
+          clearFormErrors(form);
+          let firstInvalid = null;
+          const fail = (field, message) => {{
+            setFieldError(field, message);
+            firstInvalid = firstInvalid || field;
+          }};
+
+          form.querySelectorAll("input, textarea, select").forEach((field) => {{
+            if (field.disabled || field.type === "hidden" || field.type === "button" || field.type === "submit") return;
+            const value = String(field.value || "").trim();
+            if (field.required && !value) {{
+              fail(field, "Required.");
+              return;
+            }}
+            if (value && hasUnsafeMarkup(value)) {{
+              fail(field, "Unsafe browser markup is not allowed here.");
+              return;
+            }}
+            if (field.type === "number" && value) {{
+              const numberValue = Number(value);
+              const min = field.min === "" ? null : Number(field.min);
+              const max = field.max === "" ? null : Number(field.max);
+              if (!Number.isFinite(numberValue)) fail(field, "Must be a valid number.");
+              if (min !== null && numberValue < min) fail(field, `Must be at least ${{field.min}}.`);
+              if (max !== null && numberValue > max) fail(field, `Must be at most ${{field.max}}.`);
+            }}
+            if (value && /(^|_)(url|base_url)$/.test(field.name || "") && !/^https?:\\/\\//i.test(value)) {{
+              fail(field, "Use an absolute http(s) URL.");
+            }}
+            if (value && ["service_name", "endpoint_name", "endpoint_slug", "client_slug", "client_code", "profile_slug", "role_name", "success_key", "data_key", "message_key", "error_key"].includes(field.name)) {{
+              if (!isSafeIdentifier(value)) fail(field, "Use letters, numbers, underscore, or dash. Start with a letter or underscore.");
+            }}
+            if (value && field.name === "username" && !/^[a-zA-Z0-9_.@-]{{1,64}}$/.test(value)) {{
+              fail(field, "Use letters, numbers, dot, underscore, dash, or @.");
+            }}
+          }});
+
+          const profileType = form.querySelector('[name="profile_type"]')?.value;
+          if (profileType && !["passthrough", "json_envelope", "jsonp"].includes(profileType)) {{
+            fail(form.querySelector('[name="profile_type"]'), "Invalid output profile mode.");
+          }}
+          const jsonpCallback = form.querySelector('[name="jsonp_default_callback"]');
+          if (profileType === "jsonp" && jsonpCallback?.value && !isSafeJsonpCallback(jsonpCallback.value.trim())) {{
+            fail(jsonpCallback, "Use a JavaScript identifier path, for example callback or window.handleResponse.");
+          }}
+          const methods = form.querySelector('[name="methods"]');
+          if (methods?.value) {{
+            const validMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
+            const invalid = splitList(methods.value).map((item) => item.toUpperCase()).filter((item) => !validMethods.has(item));
+            if (invalid.length) fail(methods, `Invalid method: ${{invalid[0]}}.`);
+          }}
+          const pathField = form.querySelector('[name="gateway_path"]');
+          if (pathField?.value && !pathField.value.trim().startsWith("/")) {{
+            fail(pathField, "Gateway path must start with /.");
+          }}
+
+          if (firstInvalid) {{
+            firstInvalid.reportValidity();
+            firstInvalid.focus();
+            return false;
+          }}
+          return true;
+        }}
+
+        modalBody.addEventListener("submit", async (event) => {{
+          if (event.defaultPrevented) return;
+          const form = event.target;
+          if (!(form instanceof HTMLFormElement)) return;
+          event.preventDefault();
+          showAdminNotice("");
+          if (form.action.endsWith("/__admin/client/save") && !submitClientForm(form)) return;
+          if (!validateAdminForm(form)) return;
+          const submitButton = form.querySelector('[type="submit"]');
+          submitButton?.setAttribute("disabled", "disabled");
+          try {{
+            const payload = await postAdminMutation(form.action, formPayload(form));
+            closeModal();
+            showAdminNotice(payload.message || "Saved.");
+          }} catch (error) {{
+            showAdminNotice(String(error?.message || error), "error");
+          }} finally {{
+            submitButton?.removeAttribute("disabled");
+          }}
+        }});
+
+        async function postDelete(action, fields) {{
+          if (!confirm("Are you sure?")) return;
+          showAdminNotice("");
+          const body = new URLSearchParams();
+          Object.entries(fields).forEach(([key, value]) => body.set(key, value));
+          try {{
+            const payload = await postAdminMutation(action, body);
+            showAdminNotice(payload.message || "Deleted.");
+          }} catch (error) {{
+            showAdminNotice(String(error?.message || error), "error");
+          }}
         }}
 
         function serviceByName(name) {{
@@ -1234,6 +1523,34 @@ def render_admin_page(
 
         function outputProfileBySlug(slug) {{
           return STATE.output_profiles.find((profile) => profile.slug === slug);
+        }}
+
+        function outputProfileRuleSummary(profile) {{
+          if (!profile) return "";
+          if (profile.type === "passthrough") {{
+            return "return response as-is";
+          }}
+          if (profile.type === "jsonp") {{
+            return `callback = query.${{profile.jsonp_callback_param || "callback"}} ?? "${{profile.jsonp_default_callback || "callback"}}"`;
+          }}
+          const successKey = profile.success_key || "success";
+          const dataKey = profile.data_key || "data";
+          return `${{successKey}} = response.${{successKey}} ?? status<400; ${{dataKey}} = response.${{dataKey}} ?? body`;
+        }}
+
+        function syncOutputProfileRules(form) {{
+          const select = form?.querySelector('[name="profile_type"]');
+          if (!select) return;
+          const sync = () => {{
+            form.querySelectorAll("[data-output-rule]").forEach((panel) => {{
+              panel.classList.toggle("is-active", panel.dataset.outputRule === select.value);
+            }});
+            form.querySelectorAll("[data-output-jsonp-field]").forEach((field) => {{
+              field.hidden = select.value !== "jsonp";
+            }});
+          }};
+          select.addEventListener("change", sync);
+          sync();
         }}
 
         function serviceOptions() {{
@@ -1603,7 +1920,7 @@ def render_admin_page(
             <div class="live-table-card">
               <div class="live-head">
                 <div>
-                  <h3 class="section-title" style="font-size:18px; margin-bottom:6px;">Live Request Feed</h3>
+                  <h3 class="section-title" style="font-size:16px; margin-bottom:4px;">Live Request Feed</h3>
                   <div class="section-note">This tab refreshes automatically from <span class="mono">/__monitor/logs</span>.</div>
                 </div>
                 <span class="live-badge ${{badge.className}}">
@@ -1833,6 +2150,7 @@ def render_admin_page(
                   <th>Title</th>
                   <th>Slug</th>
                   <th>Type</th>
+                  <th>Rule</th>
                   <th>Status</th>
                   <th>Actions</th>
                 </tr>
@@ -1844,6 +2162,7 @@ def render_admin_page(
                       <td><strong>${{esc(profile.title)}}</strong></td>
                       <td class="mono">${{esc(profile.slug)}}</td>
                       <td><span class="tag">${{esc(profile.type)}}</span></td>
+                      <td class="mono">${{esc(outputProfileRuleSummary(profile))}}</td>
                       <td><span class="tag ${{profile.enabled ? 'ok' : 'warn'}}">${{profile.enabled ? 'Enabled' : 'Disabled'}}</span></td>
                       <td>
                         <div class="actions">
@@ -2100,9 +2419,9 @@ def render_admin_page(
         function showEndpoints(serviceName) {{
           const service = serviceByName(serviceName);
           openModal(`Endpoints for ${{service.name}}`, `
-            <div class="section-head" style="margin-bottom: 14px;">
+            <div class="section-head" style="margin-bottom: 10px;">
               <div>
-                <div class="section-title" style="font-size:18px;">Endpoints Table</div>
+                <div class="section-title" style="font-size:16px;">Endpoints Table</div>
                 <div class="section-note">${{esc(service.base_url)}}</div>
               </div>
               <div class="actions">
@@ -2759,9 +3078,21 @@ def render_admin_page(
 
         function showOutputProfileForm(slug = "") {{
           const profile = slug ? outputProfileBySlug(slug) : null;
+          const successKey = profile?.success_key || "success";
+          const dataKey = profile?.data_key || "data";
+          const messageKey = profile?.message_key || "message";
+          const errorKey = profile?.error_key || "error";
+          const jsonpParam = profile?.jsonp_callback_param || "callback";
+          const jsonpDefault = profile?.jsonp_default_callback || "callback";
+          const passthroughKeys = (profile?.passthrough_keys || []).join(",");
           openModal(profile ? "Edit Output Profile" : "Add Output Profile", `
-            <form method="post" action="/__admin/output-profile/save" class="form-grid">
+            <form method="post" action="/__admin/output-profile/save" class="form-grid" data-output-profile-form>
               <input type="hidden" name="original_slug" value="${{esc(profile?.slug || "")}}">
+              <input type="hidden" name="success_key" value="${{esc(successKey)}}">
+              <input type="hidden" name="data_key" value="${{esc(dataKey)}}">
+              <input type="hidden" name="message_key" value="${{esc(messageKey)}}">
+              <input type="hidden" name="error_key" value="${{esc(errorKey)}}">
+              <input type="hidden" name="passthrough_keys" value="${{esc(passthroughKeys)}}">
               <label data-help="profile_title">
                 <span>Profile Title</span>
                 <input name="profile_title" value="${{esc(profile?.title || "")}}" required>
@@ -2785,33 +3116,58 @@ def render_admin_page(
                   <div class="muted">Disabled profiles remain saved but are ignored by endpoint output settings.</div>
                 </div>
               </label>
-              <label data-help="success_key">
-                <span>Success Key</span>
-                <input name="success_key" value="${{esc(profile?.success_key || "success")}}">
-              </label>
-              <label data-help="data_key">
-                <span>Data Key</span>
-                <input name="data_key" value="${{esc(profile?.data_key || "data")}}">
-              </label>
-              <label data-help="message_key">
-                <span>Message Key</span>
-                <input name="message_key" value="${{esc(profile?.message_key || "message")}}">
-              </label>
-              <label data-help="error_key">
-                <span>Error Key</span>
-                <input name="error_key" value="${{esc(profile?.error_key || "error")}}">
-              </label>
-              <label data-help="jsonp_callback_param">
+              <div class="output-flow full">
+                <div class="output-flow-head">
+                  <div>
+                    <div class="output-flow-title">Response shaping rule</div>
+                    <div class="output-flow-subtitle">The selected mode is stored as config, but the envelope contract reads like code.</div>
+                  </div>
+                  <span class="tag">pseudo-code</span>
+                </div>
+                <div class="output-rule" data-output-rule="passthrough">
+                  <pre class="pseudo-code"><code><span class="keyword">return</span> upstream.response
+
+# No wrapping, no JSON editing, no key rewriting.</code></pre>
+                  <div class="output-mode-note">
+                    <div><strong>Best for</strong> Images, files, raw APIs, existing contracts.</div>
+                    <div><strong>Headers</strong> Profile headers can still be merged.</div>
+                    <div><strong>Body</strong> The response body is untouched.</div>
+                  </div>
+                </div>
+                <div class="output-rule" data-output-rule="json_envelope">
+                  <pre class="pseudo-code"><code><span class="keyword">if</span> response has "${{esc(successKey)}}" and "${{esc(dataKey)}}":
+  <span class="keyword">return</span> response
+
+<span class="keyword">return</span> {{
+  "${{esc(successKey)}}": response["${{esc(successKey)}}"] ?? <span class="fallback">(status &lt; 400)</span>,
+  "${{esc(dataKey)}}": response["${{esc(dataKey)}}"] ?? <span class="fallback">response.body</span>,
+  "${{esc(messageKey)}}": response["${{esc(messageKey)}}"] ?? <span class="fallback">auto_message(response)</span>,
+  "${{esc(errorKey)}}": response["${{esc(errorKey)}}"] ?? <span class="fallback">auto_error(response)</span>
+}}</code></pre>
+                  <div class="output-mode-note">
+                    <div><strong>Success</strong> Uses response.${{esc(successKey)}} when present, otherwise HTTP status.</div>
+                    <div><strong>Data</strong> Uses response.${{esc(dataKey)}} when present, otherwise the body.</div>
+                    <div><strong>Existing envelope</strong> Existing ${{esc(successKey)}} + ${{esc(dataKey)}} responses are not double-wrapped.</div>
+                  </div>
+                </div>
+                <div class="output-rule" data-output-rule="jsonp">
+                  <pre class="pseudo-code"><code>callback = query["${{esc(jsonpParam)}}"] ?? <span class="value">"${{esc(jsonpDefault)}}"</span>
+
+<span class="keyword">return</span> callback + "(" + json(response.body) + ");"</code></pre>
+                  <div class="output-mode-note">
+                    <div><strong>Best for</strong> Browser clients that still need JSONP.</div>
+                    <div><strong>Callback param</strong> Configure the query key below.</div>
+                    <div><strong>Body</strong> The parsed response body is wrapped in JavaScript.</div>
+                  </div>
+                </div>
+              </div>
+              <label data-help="jsonp_callback_param" data-output-jsonp-field>
                 <span>JSONP Callback Param</span>
-                <input name="jsonp_callback_param" value="${{esc(profile?.jsonp_callback_param || "callback")}}">
+                <input name="jsonp_callback_param" value="${{esc(jsonpParam)}}">
               </label>
-              <label data-help="jsonp_default_callback">
+              <label data-help="jsonp_default_callback" data-output-jsonp-field>
                 <span>JSONP Default Callback</span>
-                <input name="jsonp_default_callback" value="${{esc(profile?.jsonp_default_callback || "callback")}}">
-              </label>
-              <label class="full" data-help="passthrough_keys">
-                <span>Existing Envelope Keys (CSV or newline)</span>
-                <textarea name="passthrough_keys">${{esc((profile?.passthrough_keys || []).join('\\n'))}}</textarea>
+                <input name="jsonp_default_callback" value="${{esc(jsonpDefault)}}">
               </label>
               <label class="full" data-help="output_headers_yaml">
                 <span>Profile Headers (JSON/YAML Mapping)</span>
@@ -2822,6 +3178,7 @@ def render_admin_page(
               </div>
             </form>
           `);
+          syncOutputProfileRules(modalBody.querySelector("[data-output-profile-form]"));
         }}
 
         function showRoleView(name) {{
@@ -3350,6 +3707,35 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 values.append(item)
         return values
 
+    def _validate_output_key(self, value: str, label: str) -> str:
+        key = value.strip()
+        if not key:
+            raise ValueError(f"{label} is required.")
+        if len(key) > 64:
+            raise ValueError(f"{label} must be 64 characters or fewer.")
+        if not (key[0].isalpha() or key[0] == "_"):
+            raise ValueError(f"{label} must start with a letter or underscore.")
+        if any(not (char.isalnum() or char in {"_", "-"}) for char in key):
+            raise ValueError(f"{label} can only contain letters, numbers, underscore, or dash.")
+        return key
+
+    def _validate_jsonp_callback_param(self, value: str) -> str:
+        param = value.strip() or "callback"
+        if len(param) > 64 or any(char in param for char in "<>\"'();={}[]"):
+            raise ValueError("JSONP callback param contains unsafe characters.")
+        return param
+
+    def _validate_jsonp_default_callback(self, value: str) -> str:
+        callback = value.strip() or "callback"
+        if len(callback) > 128:
+            raise ValueError("JSONP default callback is too long.")
+        for segment in callback.split("."):
+            if not segment or not (segment[0].isalpha() or segment[0] in {"_", "$"}):
+                raise ValueError("JSONP default callback must be a valid JavaScript identifier path.")
+            if any(not (char.isalnum() or char in {"_", "$"}) for char in segment):
+                raise ValueError("JSONP default callback must be a valid JavaScript identifier path.")
+        return callback
+
     def _parse_json_value(self, raw: str, label: str) -> Any:
         text = raw.strip()
         if not text:
@@ -3454,6 +3840,31 @@ class GatewayHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def _wants_admin_json(self) -> bool:
+        accept = str(self.headers.get("Accept", "")).lower()
+        requested_with = str(self.headers.get("X-Requested-With", "")).lower()
+        return requested_with == "xmlhttprequest" or "application/json" in accept
+
+    def _send_admin_mutation_success(self, message: str) -> None:
+        if not self._wants_admin_json():
+            self._redirect(build_status_query(message=message))
+            return
+        principal = self._authenticate_principal()
+        document = load_config_document(runtime.config_path)
+        self._send_json(
+            {
+                "message": message,
+                "state": build_admin_state(principal=principal, document=document) if principal else None,
+            }
+        )
+
+    def _send_admin_mutation_error(self, error: Exception | str) -> None:
+        detail = str(error)
+        if not self._wants_admin_json():
+            self._redirect(build_status_query(error=detail))
+            return
+        self._send_json({"detail": detail}, status_code=400)
+
     def _handle_oauth_token(self) -> None:
         try:
             header_credentials = self._parse_basic_header(self.headers.get("Authorization", ""))
@@ -3547,9 +3958,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 rate_limit_scope=rate_limit_scope,
             )
             runtime.load()
-            self._redirect(build_status_query(message=message))
+            self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
-            self._redirect(build_status_query(error=str(exc)))
+            self._send_admin_mutation_error(exc)
 
     def _handle_service_delete(self) -> None:
         try:
@@ -3557,9 +3968,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
             service_name = str(form.get("service_name", "")).strip()
             message = delete_service(runtime.config_path, service_name=service_name)
             runtime.load()
-            self._redirect(build_status_query(message=message))
+            self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
-            self._redirect(build_status_query(error=str(exc)))
+            self._send_admin_mutation_error(exc)
 
     def _handle_client_save(self) -> None:
         try:
@@ -3596,9 +4007,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 auth_methods=auth_methods,
             )
             runtime.load()
-            self._redirect(build_status_query(message=message))
+            self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
-            self._redirect(build_status_query(error=str(exc)))
+            self._send_admin_mutation_error(exc)
 
     def _handle_client_delete(self) -> None:
         try:
@@ -3606,9 +4017,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
             client_slug = str(form.get("client_slug", "")).strip().lower()
             message = delete_client(runtime.config_path, client_slug=client_slug)
             runtime.load()
-            self._redirect(build_status_query(message=message))
+            self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
-            self._redirect(build_status_query(error=str(exc)))
+            self._send_admin_mutation_error(exc)
 
     def _handle_endpoint_save(self) -> None:
         try:
@@ -3690,9 +4101,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 success_hook_include_request_body=success_hook_include_request_body,
             )
             runtime.load()
-            self._redirect(build_status_query(message=message))
+            self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
-            self._redirect(build_status_query(error=str(exc)))
+            self._send_admin_mutation_error(exc)
 
     def _handle_endpoint_delete(self) -> None:
         try:
@@ -3705,9 +4116,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 endpoint_name=endpoint_name,
             )
             runtime.load()
-            self._redirect(build_status_query(message=message))
+            self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
-            self._redirect(build_status_query(error=str(exc)))
+            self._send_admin_mutation_error(exc)
 
     def _handle_output_profile_save(self) -> None:
         try:
@@ -3716,16 +4127,20 @@ class GatewayHandler(BaseHTTPRequestHandler):
             profile_slug = str(form.get("profile_slug", "")).strip().lower()
             profile_title = str(form.get("profile_title", "")).strip()
             profile_type = str(form.get("profile_type", "passthrough")).strip().lower()
-            success_key = str(form.get("success_key", "success")).strip() or "success"
-            data_key = str(form.get("data_key", "data")).strip() or "data"
-            message_key = str(form.get("message_key", "message")).strip() or "message"
-            error_key = str(form.get("error_key", "error")).strip() or "error"
+            success_key = self._validate_output_key(str(form.get("success_key", "success")), "Success key")
+            data_key = self._validate_output_key(str(form.get("data_key", "data")), "Data key")
+            message_key = self._validate_output_key(str(form.get("message_key", "message")), "Message key")
+            error_key = self._validate_output_key(str(form.get("error_key", "error")), "Error key")
             passthrough_keys = self._parse_name_list(str(form.get("passthrough_keys", "")))
-            jsonp_callback_param = (
-                str(form.get("jsonp_callback_param", "callback")).strip() or "callback"
+            passthrough_keys = [
+                self._validate_output_key(item, "Existing envelope key")
+                for item in passthrough_keys
+            ]
+            jsonp_callback_param = self._validate_jsonp_callback_param(
+                str(form.get("jsonp_callback_param", "callback"))
             )
-            jsonp_default_callback = (
-                str(form.get("jsonp_default_callback", "callback")).strip() or "callback"
+            jsonp_default_callback = self._validate_jsonp_default_callback(
+                str(form.get("jsonp_default_callback", "callback"))
             )
             headers = self._parse_yaml_mapping(str(form.get("headers_yaml", "")), "Profile headers")
 
@@ -3753,9 +4168,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 headers=headers,
             )
             runtime.load()
-            self._redirect(build_status_query(message=message))
+            self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
-            self._redirect(build_status_query(error=str(exc)))
+            self._send_admin_mutation_error(exc)
 
     def _handle_output_profile_delete(self) -> None:
         try:
@@ -3763,9 +4178,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
             profile_slug = str(form.get("profile_slug", "")).strip().lower()
             message = delete_output_profile(runtime.config_path, profile_slug=profile_slug)
             runtime.load()
-            self._redirect(build_status_query(message=message))
+            self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
-            self._redirect(build_status_query(error=str(exc)))
+            self._send_admin_mutation_error(exc)
 
     def _handle_role_save(self) -> None:
         try:
@@ -3785,9 +4200,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 permissions=permissions,
             )
             security.load()
-            self._redirect(build_status_query(message=message))
+            self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
-            self._redirect(build_status_query(error=str(exc)))
+            self._send_admin_mutation_error(exc)
 
     def _handle_role_delete(self) -> None:
         try:
@@ -3795,9 +4210,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
             role_name = str(form.get("role_name", "")).strip()
             message = delete_role(security.config_path, role_name=role_name)
             security.load()
-            self._redirect(build_status_query(message=message))
+            self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
-            self._redirect(build_status_query(error=str(exc)))
+            self._send_admin_mutation_error(exc)
 
     def _handle_user_save(self) -> None:
         try:
@@ -3821,9 +4236,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 enabled=enabled,
             )
             security.load()
-            self._redirect(build_status_query(message=message))
+            self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
-            self._redirect(build_status_query(error=str(exc)))
+            self._send_admin_mutation_error(exc)
 
     def _handle_user_delete(self) -> None:
         try:
@@ -3831,9 +4246,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
             username = str(form.get("username", "")).strip()
             message = delete_user(security.config_path, username=username)
             security.load()
-            self._redirect(build_status_query(message=message))
+            self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
-            self._redirect(build_status_query(error=str(exc)))
+            self._send_admin_mutation_error(exc)
 
     def _handle_admin_config_get(self, parsed) -> None:
         self._send_config_document(load_config_document(runtime.config_path), parsed=parsed)
@@ -3965,16 +4380,20 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 profile_title=profile_title,
                 enabled=bool(payload.get("enabled", True)),
                 profile_type=profile_type,
-                success_key=str(payload.get("success_key", "success")).strip() or "success",
-                data_key=str(payload.get("data_key", "data")).strip() or "data",
-                message_key=str(payload.get("message_key", "message")).strip() or "message",
-                error_key=str(payload.get("error_key", "error")).strip() or "error",
-                passthrough_keys=[str(item).strip() for item in passthrough_keys if str(item).strip()],
-                jsonp_callback_param=(
-                    str(payload.get("jsonp_callback_param", "callback")).strip() or "callback"
+                success_key=self._validate_output_key(str(payload.get("success_key", "success")), "Success key"),
+                data_key=self._validate_output_key(str(payload.get("data_key", "data")), "Data key"),
+                message_key=self._validate_output_key(str(payload.get("message_key", "message")), "Message key"),
+                error_key=self._validate_output_key(str(payload.get("error_key", "error")), "Error key"),
+                passthrough_keys=[
+                    self._validate_output_key(str(item), "Existing envelope key")
+                    for item in passthrough_keys
+                    if str(item).strip()
+                ],
+                jsonp_callback_param=self._validate_jsonp_callback_param(
+                    str(payload.get("jsonp_callback_param", "callback"))
                 ),
-                jsonp_default_callback=(
-                    str(payload.get("jsonp_default_callback", "callback")).strip() or "callback"
+                jsonp_default_callback=self._validate_jsonp_default_callback(
+                    str(payload.get("jsonp_default_callback", "callback"))
                 ),
                 headers=headers,
             )

@@ -82,10 +82,23 @@ clients:
         cache_ttl_seconds: 60
 
 output_profiles:
+  raw_passthrough:
+    title: Raw Passthrough
+    enabled: true
+    type: passthrough
+    headers:
+      X-NapiGate-Output: passthrough
+
   standard_json:
     title: Standard JSON Envelope
     enabled: true
     type: json_envelope
+    # Pseudo-rule used by the admin UI:
+    # if response has "success" and "data": return response as-is
+    # success = response["success"] ?? status_code < 400
+    # data    = response["data"]    ?? response.body
+    # message = response["message"] ?? auto_message(response)
+    # error   = response["error"]   ?? auto_error(response)
     success_key: success
     data_key: data
     message_key: message
@@ -163,6 +176,7 @@ services:
           - GET
         gateway_path: /demo/ip
         upstream_path: /ip
+        output_profile: raw_passthrough
         response_cache:
           enabled: true
           ttl_seconds: 60
@@ -234,5 +248,6 @@ services:
           - GET
         gateway_path: /demo/users/{id}
         upstream_path: /anything/users/{{ path.id }}
+        output_profile: partner_jsonp
         headers:
           X-User-Id: "{{ path.id }}"

@@ -1,9 +1,11 @@
 .venv/
 __pycache__/
 *.pyc
-data/
-logs/
 .idea
 .env
 config/services.yaml
 config/security.yaml
+logs/*
+!logs/.gitkeep
+data/*
+!data/.gitkeep

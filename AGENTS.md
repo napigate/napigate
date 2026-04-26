@@ -339,7 +339,9 @@ Common:
   - `passthrough`
   - `json_envelope`
   - `jsonp`
+- `passthrough` returns the upstream or local response body unchanged, while still allowing profile headers to be merged.
 - `json_envelope` does not double-wrap payloads that already contain the configured `passthrough_keys`.
+- When `json_envelope` builds an envelope, it uses existing response values such as `success`, `data`, `message`, and `error` when present, and falls back to HTTP status, the raw body, inferred messages, or generated errors when they are missing.
 - Image and opaque binary responses should usually stay on `passthrough`.
 
 ## 6.9) Response Cache Behavior
@@ -484,6 +486,8 @@ Common:
   - `Roles`
   - `Logout`
 - Live is the first tab.
+- Admin tabs update the URL hash, for example `/__admin#output`, without reloading the page.
+- Admin modal save/delete actions use AJAX when JavaScript is available, refresh the in-page admin state, and preserve the active tab instead of returning to Live.
 - Inactive tabs are dark with white text by design.
 - Client forms support:
   - slug, title, and code
@@ -496,7 +500,9 @@ Common:
 - OAuth methods can request live tokens from the UI.
 - Services and endpoints remain modal-based CRUD.
 - Output profiles now have their own tab and modal CRUD.
+- Output profile forms show response shaping as pseudo-code instead of raw success/data/message/error key inputs; `passthrough` is the raw unmodified-output mode.
 - Admin forms now include inline tooltip help and examples for the visible input fields.
+- Admin modal forms include client-side validation for required fields, numbers, URLs, identifiers, obvious browser-markup injection, JSONP callback names, and output-profile pseudo-code key safety; server-side validation also rejects unsafe output envelope keys and JSONP callback values.
 - Endpoint forms now also expose:
   - slug
   - output profile selection
