@@ -127,6 +127,109 @@ observability:
         env: demo
         app: napigate
 
+routes:
+  - name: status_ok
+    slug: status-ok
+    methods:
+      - GET
+    gateway_path: /demo/status
+    strategy: single
+    targets:
+      - service: status
+        endpoint: status_ok
+
+  - name: public_ip
+    slug: public-ip
+    methods:
+      - GET
+    gateway_path: /demo/ip
+    strategy: single
+    targets:
+      - service: public_httpbin
+        endpoint: public_ip
+    output_profile: raw_passthrough
+    response_cache:
+      enabled: true
+      ttl_seconds: 60
+      vary_by_client: false
+      methods:
+        - GET
+
+  - name: public_ip_round_robin
+    slug: public-ip-round-robin
+    methods:
+      - GET
+    gateway_path: /demo/ip/round-robin
+    strategy: round_robin
+    targets:
+      - service: public_httpbin
+        endpoint: public_ip
+      - service: public_httpbin
+        endpoint: public_ip_backup
+    output_profile: raw_passthrough
+
+  - name: public_ip_failover
+    slug: public-ip-failover
+    methods:
+      - GET
+    gateway_path: /demo/ip/failover
+    strategy: failover
+    targets:
+      - service: public_httpbin
+        endpoint: public_ip
+      - service: public_httpbin
+        endpoint: public_ip_backup
+    output_profile: raw_passthrough
+
+  - name: public_ip_parallel_race
+    slug: public-ip-parallel-race
+    methods:
+      - GET
+    gateway_path: /demo/ip/parallel
+    strategy: parallel_race
+    targets:
+      - service: public_httpbin
+        endpoint: public_ip
+      - service: public_httpbin
+        endpoint: public_ip_backup
+    output_profile: raw_passthrough
+
+  - name: protected_headers
+    slug: protected-headers
+    methods:
+      - GET
+    gateway_path: /demo/headers
+    strategy: single
+    targets:
+      - service: protected_httpbin
+        endpoint: protected_headers
+    output_profile: standard_json
+    response_cache:
+      enabled: true
+      ttl_seconds: 60
+      vary_headers:
+        - Accept-Language
+      methods:
+        - GET
+    success_hook:
+      enabled: false
+      url: https://billing.example.com/hooks/usage
+      timeout_seconds: 5
+      event_type: financial
+      headers:
+        X-NapiGate-Signature: demo
+
+  - name: user_by_id
+    slug: user-by-id
+    methods:
+      - GET
+    gateway_path: /demo/users/{id}
+    strategy: single
+    targets:
+      - service: protected_httpbin
+        endpoint: user_by_id
+    output_profile: partner_jsonp
+
 services:
   status:
     base_url: https://example.invalid
@@ -140,9 +243,6 @@ services:
     endpoints:
       - name: status_ok
         slug: status-ok
-        methods:
-          - GET
-        gateway_path: /demo/status
         response:
           status_code: 200
           content_type: text/plain; charset=utf-8
@@ -172,17 +272,10 @@ services:
     endpoints:
       - name: public_ip
         slug: public-ip
-        methods:
-          - GET
-        gateway_path: /demo/ip
         upstream_path: /ip
-        output_profile: raw_passthrough
-        response_cache:
-          enabled: true
-          ttl_seconds: 60
-          vary_by_client: false
-          methods:
-            - GET
+      - name: public_ip_backup
+        slug: public-ip-backup
+        upstream_path: /ip
 
   protected_httpbin:
     base_url: https://httpbin.org
@@ -204,25 +297,7 @@ services:
     endpoints:
       - name: protected_headers
         slug: protected-headers
-        methods:
-          - GET
-        gateway_path: /demo/headers
         upstream_path: /anything/secure
-        output_profile: standard_json
-        response_cache:
-          enabled: true
-          ttl_seconds: 60
-          vary_headers:
-            - Accept-Language
-          methods:
-            - GET
-        success_hook:
-          enabled: false
-          url: https://billing.example.com/hooks/usage
-          timeout_seconds: 5
-          event_type: financial
-          headers:
-            X-NapiGate-Signature: demo
         pre_call:
           cache_ttl_seconds: 300
           code: |
@@ -244,10 +319,6 @@ services:
 
       - name: user_by_id
         slug: user-by-id
-        methods:
-          - GET
-        gateway_path: /demo/users/{id}
         upstream_path: /anything/users/{{ path.id }}
-        output_profile: partner_jsonp
         headers:
           X-User-Id: "{{ path.id }}"

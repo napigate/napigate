@@ -181,6 +181,60 @@ def delete_client(config_path: Path, *, client_slug: str) -> str:
     return f"Client '{client_slug}' deleted."
 
 
+def _legacy_routes_from_endpoints(document: dict[str, Any]) -> list[dict[str, Any]]:
+    routes: list[dict[str, Any]] = []
+    for service_name, service_data in (document.get("services") or {}).items():
+        if not isinstance(service_data, dict):
+            continue
+        for endpoint in service_data.get("endpoints") or []:
+            if not isinstance(endpoint, dict):
+                continue
+            gateway_path = str(endpoint.get("gateway_path", "")).strip()
+            if not gateway_path:
+                continue
+            route: dict[str, Any] = {
+                "name": str(endpoint.get("name", "")),
+                "slug": str(endpoint.get("slug", endpoint.get("name", ""))).strip().lower(),
+                "methods": list(endpoint.get("methods") or ["GET"]),
+                "gateway_path": gateway_path,
+                "strategy": "single",
+                "targets": [
+                    {
+                        "service": str(service_name),
+                        "endpoint": str(endpoint.get("name", "")),
+                    }
+                ],
+            }
+            for key in ("output_profile", "response_cache", "success_hook"):
+                if endpoint.get(key):
+                    route[key] = endpoint[key]
+            routes.append(route)
+    return routes
+
+
+def _ensure_routes_list(document: dict[str, Any]) -> list[dict[str, Any]]:
+    routes = document.setdefault("routes", [])
+    if not isinstance(routes, list):
+        raise ValueError("Config routes block must be a list.")
+    if routes:
+        return list(routes)
+    return _legacy_routes_from_endpoints(document)
+
+
+def _strip_endpoint_route_fields(document: dict[str, Any]) -> None:
+    for service_data in (document.get("services") or {}).values():
+        if not isinstance(service_data, dict):
+            continue
+        for endpoint in service_data.get("endpoints") or []:
+            if not isinstance(endpoint, dict):
+                continue
+            endpoint.pop("methods", None)
+            endpoint.pop("gateway_path", None)
+            endpoint.pop("output_profile", None)
+            endpoint.pop("response_cache", None)
+            endpoint.pop("success_hook", None)
+
+
 def save_endpoint(
     config_path: Path,
     *,
@@ -189,25 +243,12 @@ def save_endpoint(
     original_slug: str,
     endpoint_name: str,
     endpoint_slug: str,
-    methods: list[str],
-    gateway_path: str,
     upstream_path: str,
     headers: dict[str, Any],
     query: dict[str, Any],
     pre_call_code: str,
     pre_call_cache_ttl: int,
     pre_call_cache_key: str,
-    output_profile: str,
-    response_cache_ttl: int,
-    response_cache_vary_by_client: bool,
-    response_cache_vary_headers: list[str],
-    response_cache_methods: list[str],
-    success_hook_url: str,
-    success_hook_timeout_seconds: float,
-    success_hook_event_type: str,
-    success_hook_headers: dict[str, Any],
-    success_hook_include_response_body: bool,
-    success_hook_include_request_body: bool,
 ) -> str:
     document = load_config_document(config_path)
     services = document.setdefault("services", {})
@@ -249,8 +290,8 @@ def save_endpoint(
     payload: dict[str, Any] = dict(existing_endpoint)
     payload["name"] = endpoint_name
     payload["slug"] = endpoint_slug
-    payload["methods"] = methods
-    payload["gateway_path"] = gateway_path
+    payload.pop("methods", None)
+    payload.pop("gateway_path", None)
     if upstream_path:
         payload["upstream_path"] = upstream_path
     else:
@@ -272,35 +313,9 @@ def save_endpoint(
         payload["pre_call"] = pre_call_payload
     else:
         payload.pop("pre_call", None)
-    if output_profile:
-        payload["output_profile"] = output_profile
-    else:
-        payload.pop("output_profile", None)
-    if response_cache_ttl > 0:
-        payload["response_cache"] = {
-            "enabled": True,
-            "ttl_seconds": response_cache_ttl,
-            "vary_by_client": response_cache_vary_by_client,
-        }
-        if response_cache_vary_headers:
-            payload["response_cache"]["vary_headers"] = response_cache_vary_headers
-        if response_cache_methods:
-            payload["response_cache"]["methods"] = response_cache_methods
-    else:
-        payload.pop("response_cache", None)
-    if success_hook_url:
-        payload["success_hook"] = {
-            "enabled": True,
-            "url": success_hook_url,
-            "timeout_seconds": success_hook_timeout_seconds,
-            "event_type": success_hook_event_type or "financial",
-            "include_response_body": success_hook_include_response_body,
-            "include_request_body": success_hook_include_request_body,
-        }
-        if success_hook_headers:
-            payload["success_hook"]["headers"] = success_hook_headers
-    else:
-        payload.pop("success_hook", None)
+    payload.pop("output_profile", None)
+    payload.pop("response_cache", None)
+    payload.pop("success_hook", None)
 
     for index, item in enumerate(endpoints):
         if not isinstance(item, dict):
@@ -317,6 +332,108 @@ def save_endpoint(
     service["endpoints"] = endpoints
     save_config_document(config_path, document)
     return f"Endpoint '{endpoint_name}' saved in '{service_name}'."
+
+
+def save_route(
+    config_path: Path,
+    *,
+    original_slug: str,
+    route_name: str,
+    route_slug: str,
+    methods: list[str],
+    gateway_path: str,
+    strategy: str,
+    targets: list[dict[str, Any]],
+    output_profile: str,
+    response_cache_ttl: int,
+    response_cache_vary_by_client: bool,
+    response_cache_vary_headers: list[str],
+    response_cache_methods: list[str],
+    success_hook_url: str,
+    success_hook_timeout_seconds: float,
+    success_hook_event_type: str,
+    success_hook_headers: dict[str, Any],
+    success_hook_include_response_body: bool,
+    success_hook_include_request_body: bool,
+) -> str:
+    document = load_config_document(config_path)
+    routes = _ensure_routes_list(document)
+
+    payload: dict[str, Any] = {
+        "name": route_name,
+        "slug": route_slug,
+        "methods": methods,
+        "gateway_path": gateway_path,
+        "strategy": strategy,
+        "targets": targets,
+    }
+    if output_profile:
+        payload["output_profile"] = output_profile
+    if response_cache_ttl > 0:
+        payload["response_cache"] = {
+            "enabled": True,
+            "ttl_seconds": response_cache_ttl,
+            "vary_by_client": response_cache_vary_by_client,
+        }
+        if response_cache_vary_headers:
+            payload["response_cache"]["vary_headers"] = response_cache_vary_headers
+        if response_cache_methods:
+            payload["response_cache"]["methods"] = response_cache_methods
+    if success_hook_url:
+        payload["success_hook"] = {
+            "enabled": True,
+            "url": success_hook_url,
+            "timeout_seconds": success_hook_timeout_seconds,
+            "event_type": success_hook_event_type or "financial",
+            "include_response_body": success_hook_include_response_body,
+            "include_request_body": success_hook_include_request_body,
+        }
+        if success_hook_headers:
+            payload["success_hook"]["headers"] = success_hook_headers
+
+    target_slug = original_slug or route_slug
+    existing_index = None
+    for index, item in enumerate(routes):
+        if not isinstance(item, dict):
+            continue
+        item_slug = str(item.get("slug", item.get("name", ""))).strip().lower()
+        if item_slug == target_slug:
+            existing_index = index
+            break
+
+    for index, item in enumerate(routes):
+        if not isinstance(item, dict):
+            continue
+        item_slug = str(item.get("slug", item.get("name", ""))).strip().lower()
+        if item_slug == route_slug and index != existing_index:
+            raise ValueError(f"Route slug '{route_slug}' already exists.")
+
+    if existing_index is None:
+        routes.append(payload)
+    else:
+        routes[existing_index] = payload
+
+    document["routes"] = routes
+    _strip_endpoint_route_fields(document)
+    save_config_document(config_path, document)
+    return f"Route '{route_name}' saved."
+
+
+def delete_route(config_path: Path, *, route_slug: str) -> str:
+    document = load_config_document(config_path)
+    routes = _ensure_routes_list(document)
+    filtered = [
+        item
+        for item in routes
+        if str(item.get("slug", item.get("name", ""))).strip().lower() != route_slug
+    ]
+    if len(filtered) == len(routes):
+        raise ValueError(f"Route '{route_slug}' does not exist.")
+
+    document["routes"] = filtered
+    _strip_endpoint_route_fields(document)
+    save_config_document(config_path, document)
+    return f"Route '{route_slug}' deleted."
 
 
 def delete_endpoint(config_path: Path, *, service_name: str, endpoint_name: str) -> str:
@@ -400,15 +517,23 @@ def delete_output_profile(config_path: Path, *, profile_slug: str) -> str:
     if profile_slug not in profiles:
         raise ValueError(f"Output profile '{profile_slug}' does not exist.")
 
-    services = document.get("services") or {}
-    for service_name, service_data in services.items():
-        for endpoint in (service_data.get("endpoints") or []):
-            if not isinstance(endpoint, dict):
-                continue
-            if str(endpoint.get("output_profile", "")).strip() == profile_slug:
-                raise ValueError(
-                    f"Output profile '{profile_slug}' is still used by endpoint '{service_name}.{endpoint.get('name', '')}'."
-                )
+    if not document.get("routes"):
+        services = document.get("services") or {}
+        for service_name, service_data in services.items():
+            for endpoint in (service_data.get("endpoints") or []):
+                if not isinstance(endpoint, dict):
+                    continue
+                if str(endpoint.get("output_profile", "")).strip() == profile_slug:
+                    raise ValueError(
+                        f"Output profile '{profile_slug}' is still used by endpoint '{service_name}.{endpoint.get('name', '')}'."
+                    )
+    for route in _ensure_routes_list(document):
+        if not isinstance(route, dict):
+            continue
+        if str(route.get("output_profile", "")).strip() == profile_slug:
+            raise ValueError(
+                f"Output profile '{profile_slug}' is still used by route '{route.get('name', '')}'."
+            )
 
     profiles.pop(profile_slug)
     save_config_document(config_path, document)

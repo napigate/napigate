@@ -26,7 +26,7 @@ ALL_PERMISSIONS = {
 PERMISSION_LABELS = {
     "monitor_access": "Access monitor",
     "admin_access": "Access admin panel",
-    "services_manage": "View and manage services and endpoints",
+    "services_manage": "View and manage services, routes, and endpoints",
     "security_manage": "Manage users and roles",
 }
 DEFAULT_SECURITY_DOCUMENT: dict[str, Any] = {

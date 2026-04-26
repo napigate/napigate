@@ -4,14 +4,15 @@ NapiGate is a lightweight, config-driven Python API gateway built for small and 
 
 ## Highlights
 
-- YAML-defined services and endpoints
+- YAML-defined services, endpoint targets, and gateway routes
+- route strategies for `single`, `round_robin`, `failover`, and `parallel_race`
 - reusable output profiles for passthrough, JSON envelope, and JSONP responses
 - Top-level client model with scoped access
 - stable client and endpoint slugs for admin APIs and external automation
 - Multiple auth methods per client
 - Trusted `pre_call` hooks for downstream preparation
 - Trusted `external_service` auth scripts for custom validation
-- endpoint response caching and async success hooks
+- route response caching and async success hooks
 - optional structured request-log forwarding to HTTP JSON sinks or Loki
 - Built-in monitor UI, JSON logs endpoint, and live stream
 - File-backed users and roles for admin access
@@ -182,6 +183,9 @@ output_profiles:
   profile_slug:
     ...
 
+routes:
+  - ...
+
 observability:
   log_aggregators:
     sink_code:
@@ -253,7 +257,7 @@ Method-specific fields:
 - `oauth_client_credentials`: `client_id`, `client_secret`, `token_ttl_seconds`
 - `external_service`: `script`, `cache_ttl_seconds`, `cache_key`
 
-### Services And Endpoints
+### Services, Endpoints, And Routes
 
 Services remain fully config-driven:
 
@@ -272,20 +276,44 @@ Endpoint fields:
 
 - `name`
 - `slug`
-- `methods`
-- `gateway_path`
 - `upstream_path`
 - `response`
-- `output_profile`
-- `response_cache`
-- `success_hook`
 - `headers`
 - `query`
 - `pre_call`
 
+Route fields:
+
+- `name`
+- `slug`
+- `methods`
+- `gateway_path`
+- `strategy`
+- `targets[]`
+- `output_profile`
+- `response_cache`
+- `success_hook`
+
+Route strategies:
+
+- `single`
+- `round_robin`
+- `failover`
+- `parallel_race`
+
 `response` can be used for direct gateway replies without an upstream call:
 
 ```yaml
+routes:
+  - name: status_ok
+    slug: status-ok
+    methods: [GET]
+    gateway_path: /demo/status
+    strategy: single
+    targets:
+      - service: status
+        endpoint: status_ok
+
 services:
   status:
     base_url: https://example.invalid
@@ -293,8 +321,6 @@ services:
       required: false
     endpoints:
       - name: status_ok
-        methods: [GET]
-        gateway_path: /demo/status
         response:
           status_code: 200
           content_type: text/plain; charset=utf-8
@@ -312,16 +338,17 @@ Important contract notes:
 
 - `auth.required` is service-level only.
 - If `response` is defined, NapiGate returns it before any upstream proxy call.
-- `output_profile` applies after local responses or upstream responses are built.
-- `response_cache` only stores successful responses for configured methods.
-- `success_hook` is async and fires only after successful responses.
+- `output_profile` is route-level and applies after local responses or upstream responses are built.
+- `response_cache` is route-level and only stores successful responses for configured methods.
+- `success_hook` is route-level, async, and fires only after successful responses.
+- Legacy endpoint-local `gateway_path`, `output_profile`, `response_cache`, and `success_hook` still load as single-target routes for migration, but new config should use `routes[]`.
 - Old service-local clients are rejected during validation.
 - Old endpoint-level auth is rejected during validation.
 - Protected endpoints must be reachable by at least one enabled client scope.
 
 ### Output Profiles
 
-Output profiles are top-level reusable response contracts. Endpoints can opt into one profile by slug.
+Output profiles are top-level reusable response contracts. Routes can opt into one profile by slug.
 
 Supported profile types:
 
@@ -351,7 +378,7 @@ Common output profile fields:
 
 ### Response Caching
 
-Endpoint-level response caching uses in-memory TTL storage:
+Route-level response caching uses in-memory TTL storage:
 
 ```yaml
 response_cache:
@@ -374,7 +401,7 @@ response_cache:
 
 ### Async Success Hooks
 
-Endpoints can publish a best-effort async event after successful responses:
+Routes can publish a best-effort async event after successful responses:
 
 ```yaml
 success_hook:

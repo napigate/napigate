@@ -151,9 +151,9 @@ class RouteAuthConfig:
 class EndpointConfig:
     name: str
     slug: str
-    methods: list[str]
-    gateway_path: str
     upstream_path: str
+    methods: list[str] = field(default_factory=lambda: ["GET"])
+    gateway_path: str = ""
     headers: dict[str, Any] = field(default_factory=dict)
     query: dict[str, Any] = field(default_factory=dict)
     pre_call: PreCallConfig | None = None
@@ -162,6 +162,27 @@ class EndpointConfig:
     response_cache: ResponseCacheConfig = field(default_factory=ResponseCacheConfig)
     success_hook: SuccessHookConfig | None = None
     compiled_pattern: re.Pattern[str] | None = None
+
+
+@dataclass(slots=True)
+class RouteTargetConfig:
+    service: str
+    endpoint: str
+
+
+@dataclass(slots=True)
+class RouteConfig:
+    name: str
+    slug: str
+    methods: list[str]
+    gateway_path: str
+    strategy: str = "single"
+    targets: list[RouteTargetConfig] = field(default_factory=list)
+    output_profile: str | None = None
+    response_cache: ResponseCacheConfig = field(default_factory=ResponseCacheConfig)
+    success_hook: SuccessHookConfig | None = None
+    compiled_pattern: re.Pattern[str] | None = None
+    legacy_endpoint_config: bool = False
 
 
 @dataclass(slots=True)
@@ -183,6 +204,7 @@ class ServiceConfig:
 class GatewayConfig:
     clients: dict[str, ClientConfig] = field(default_factory=dict)
     services: list[ServiceConfig] = field(default_factory=list)
+    routes: list[RouteConfig] = field(default_factory=list)
     output_profiles: dict[str, OutputProfileConfig] = field(default_factory=dict)
     log_aggregators: list[LogAggregatorConfig] = field(default_factory=list)
 
@@ -734,6 +756,12 @@ def load_config_document(config_path: Path | str = CONFIG_PATH) -> dict[str, Any
     elif not isinstance(observability_block, dict):
         raise ValueError("Config 'observability' must be a mapping.")
 
+    routes_block = raw.get("routes")
+    if routes_block is None:
+        raw["routes"] = []
+    elif not isinstance(routes_block, list):
+        raise ValueError("Config 'routes' must be a list.")
+
     return raw
 
 
@@ -834,10 +862,6 @@ def _load_services_block(
                 label=f"response for endpoint '{name}' in service '{service_name}'",
             )
 
-            if not gateway_path:
-                raise ValueError(
-                    f"Endpoint '{name}' in service '{service_name}' needs gateway_path."
-                )
             if not upstream_path and response is None:
                 raise ValueError(
                     f"Endpoint '{name}' in service '{service_name}' needs upstream_path or response."
@@ -897,7 +921,7 @@ def _load_services_block(
                 output_profile=output_profile,
                 response_cache=response_cache,
                 success_hook=success_hook,
-                compiled_pattern=compile_gateway_path(gateway_path),
+                compiled_pattern=compile_gateway_path(gateway_path) if gateway_path else None,
             )
             service.endpoints.append(endpoint)
 
@@ -941,6 +965,141 @@ def _load_services_block(
     return services
 
 
+def _endpoint_lookup(services: list[ServiceConfig]) -> dict[tuple[str, str], EndpointConfig]:
+    lookup: dict[tuple[str, str], EndpointConfig] = {}
+    for service in services:
+        for endpoint in service.endpoints:
+            lookup[(service.name, endpoint.name)] = endpoint
+            lookup[(service.name, endpoint.slug)] = endpoint
+    return lookup
+
+
+def _load_route_targets(value: Any, *, label: str) -> list[RouteTargetConfig]:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{label}.targets must be a non-empty list.")
+    targets: list[RouteTargetConfig] = []
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"{label}.targets[{index}] must be a mapping.")
+        service_name = str(item.get("service", "")).strip()
+        endpoint_name = str(item.get("endpoint", "")).strip()
+        if not service_name or not endpoint_name:
+            raise ValueError(f"{label}.targets[{index}] needs service and endpoint.")
+        target = RouteTargetConfig(service=service_name, endpoint=endpoint_name)
+        if target not in targets:
+            targets.append(target)
+    return targets
+
+
+def _load_routes_block(
+    routes_block: Any,
+    *,
+    services: list[ServiceConfig],
+    output_profiles: dict[str, OutputProfileConfig],
+) -> list[RouteConfig]:
+    endpoint_lookup = _endpoint_lookup(services)
+    routes: list[RouteConfig] = []
+    route_slugs: set[str] = set()
+    route_paths: set[tuple[str, str]] = set()
+
+    if routes_block in (None, []):
+        for service in services:
+            for endpoint in service.endpoints:
+                if not endpoint.gateway_path:
+                    continue
+                route = RouteConfig(
+                    name=endpoint.name,
+                    slug=endpoint.slug,
+                    methods=endpoint.methods,
+                    gateway_path=endpoint.gateway_path,
+                    strategy="single",
+                    targets=[RouteTargetConfig(service=service.name, endpoint=endpoint.name)],
+                    output_profile=endpoint.output_profile,
+                    response_cache=endpoint.response_cache,
+                    success_hook=endpoint.success_hook,
+                    compiled_pattern=compile_gateway_path(endpoint.gateway_path),
+                    legacy_endpoint_config=True,
+                )
+                routes.append(route)
+        return routes
+
+    if not isinstance(routes_block, list):
+        raise ValueError("Config 'routes' must be a list.")
+
+    allowed_strategies = {"single", "round_robin", "failover", "parallel_race"}
+    for index, route_data in enumerate(routes_block, start=1):
+        if not isinstance(route_data, dict):
+            raise ValueError(f"Route #{index} must be a mapping.")
+
+        name = str(route_data.get("name") or f"route_{index}").strip()
+        slug = _normalize_slug(route_data.get("slug"), label=f"Route '{name}' slug", fallback=name)
+        if slug in route_slugs:
+            raise ValueError(f"Duplicate route slug '{slug}'.")
+        route_slugs.add(slug)
+
+        methods = _normalize_methods(route_data.get("methods", route_data.get("method", "GET")))
+        gateway_path = str(route_data.get("gateway_path", "")).strip()
+        if not gateway_path:
+            raise ValueError(f"Route '{name}' needs gateway_path.")
+        strategy = str(route_data.get("strategy", "single")).strip().lower() or "single"
+        if strategy == "parallel":
+            strategy = "parallel_race"
+        if strategy not in allowed_strategies:
+            raise ValueError(
+                f"Route '{name}' strategy must be single, round_robin, failover, or parallel_race."
+            )
+
+        targets = _load_route_targets(route_data.get("targets"), label=f"Route '{name}'")
+        if strategy == "single" and len(targets) != 1:
+            raise ValueError(f"Route '{name}' with strategy single must define exactly one target.")
+        if strategy in {"round_robin", "failover", "parallel_race"} and len(targets) < 2:
+            raise ValueError(f"Route '{name}' strategy {strategy} needs at least two targets.")
+
+        for target in targets:
+            if (target.service, target.endpoint) not in endpoint_lookup:
+                raise ValueError(
+                    f"Route '{name}' references unknown endpoint '{target.service}.{target.endpoint}'."
+                )
+
+        for method in methods:
+            path_key = (method, gateway_path)
+            if path_key in route_paths:
+                raise ValueError(f"Duplicate route for {method} {gateway_path}.")
+            route_paths.add(path_key)
+
+        output_profile = str(route_data.get("output_profile", "")).strip().lower() or None
+        if output_profile is not None and output_profile not in output_profiles:
+            raise ValueError(f"Route '{name}' references unknown output_profile '{output_profile}'.")
+
+        response_cache = _load_response_cache_config(
+            route_data.get("response_cache"),
+            label=f"response_cache for route '{name}'",
+        )
+        success_hook = _load_success_hook_config(
+            route_data.get("success_hook"),
+            label=f"success_hook for route '{name}'",
+        )
+        if success_hook is not None and success_hook.enabled and not success_hook.url:
+            raise ValueError(f"success_hook for route '{name}' needs url.")
+
+        routes.append(
+            RouteConfig(
+                name=name,
+                slug=slug,
+                methods=methods,
+                gateway_path=gateway_path,
+                strategy=strategy,
+                targets=targets,
+                output_profile=output_profile,
+                response_cache=response_cache,
+                success_hook=success_hook,
+                compiled_pattern=compile_gateway_path(gateway_path),
+            )
+        )
+
+    return routes
+
+
 def load_gateway_config(config_path: Path | str = CONFIG_PATH) -> GatewayConfig:
     config_path = Path(config_path)
     raw = load_config_document(config_path)
@@ -952,9 +1111,15 @@ def load_gateway_config(config_path: Path | str = CONFIG_PATH) -> GatewayConfig:
         clients=clients,
         output_profiles=output_profiles,
     )
+    routes = _load_routes_block(
+        raw.get("routes") or [],
+        services=services,
+        output_profiles=output_profiles,
+    )
     return GatewayConfig(
         clients=clients,
         services=services,
+        routes=routes,
         output_profiles=output_profiles,
         log_aggregators=log_aggregators,
     )

@@ -5,6 +5,31 @@ from typing import Any
 from gateway.security import AuthenticatedPrincipal
 
 
+def serialize_response_cache(source: dict[str, Any] | None) -> dict[str, Any]:
+    cache = source or {}
+    return {
+        "enabled": bool(cache.get("enabled", False)),
+        "ttl_seconds": int(cache.get("ttl_seconds", 0) or 0),
+        "vary_by_client": bool(cache.get("vary_by_client", True)),
+        "vary_headers": list(cache.get("vary_headers") or []),
+        "methods": list(cache.get("methods") or ["GET"]),
+    }
+
+
+def serialize_success_hook(source: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(source, dict):
+        return None
+    return {
+        "enabled": bool(source.get("enabled", False)),
+        "url": str(source.get("url", "") or ""),
+        "timeout_seconds": float(source.get("timeout_seconds", 5) or 5),
+        "headers": source.get("headers") or {},
+        "include_response_body": bool(source.get("include_response_body", False)),
+        "include_request_body": bool(source.get("include_request_body", False)),
+        "event_type": str(source.get("event_type", "financial") or "financial"),
+    }
+
+
 def serialize_services(document: dict[str, Any]) -> list[dict[str, Any]]:
     services_state: list[dict[str, Any]] = []
     services = document.get("services") or {}
@@ -17,8 +42,6 @@ def serialize_services(document: dict[str, Any]) -> list[dict[str, Any]]:
                 {
                     "name": str(endpoint.get("name", "")),
                     "slug": str(endpoint.get("slug", endpoint.get("name", ""))).strip().lower(),
-                    "methods": list(endpoint.get("methods") or ["GET"]),
-                    "gateway_path": str(endpoint.get("gateway_path", "")),
                     "upstream_path": str(endpoint.get("upstream_path", "")),
                     "headers": endpoint.get("headers") or {},
                     "query": endpoint.get("query") or {},
@@ -35,27 +58,6 @@ def serialize_services(document: dict[str, Any]) -> list[dict[str, Any]]:
                             "headers": response.get("headers") or {},
                         }
                         if isinstance(response, dict)
-                        else None
-                    ),
-                    "output_profile": str(endpoint.get("output_profile", "") or ""),
-                    "response_cache": {
-                        "enabled": bool((endpoint.get("response_cache") or {}).get("enabled", False)),
-                        "ttl_seconds": int((endpoint.get("response_cache") or {}).get("ttl_seconds", 0) or 0),
-                        "vary_by_client": bool((endpoint.get("response_cache") or {}).get("vary_by_client", True)),
-                        "vary_headers": list((endpoint.get("response_cache") or {}).get("vary_headers") or []),
-                        "methods": list((endpoint.get("response_cache") or {}).get("methods") or ["GET"]),
-                    },
-                    "success_hook": (
-                        {
-                            "enabled": bool((endpoint.get("success_hook") or {}).get("enabled", False)),
-                            "url": str((endpoint.get("success_hook") or {}).get("url", "") or ""),
-                            "timeout_seconds": float((endpoint.get("success_hook") or {}).get("timeout_seconds", 5) or 5),
-                            "headers": (endpoint.get("success_hook") or {}).get("headers") or {},
-                            "include_response_body": bool((endpoint.get("success_hook") or {}).get("include_response_body", False)),
-                            "include_request_body": bool((endpoint.get("success_hook") or {}).get("include_request_body", False)),
-                            "event_type": str((endpoint.get("success_hook") or {}).get("event_type", "financial") or "financial"),
-                        }
-                        if isinstance(endpoint.get("success_hook"), dict)
                         else None
                     ),
                 }
@@ -93,6 +95,56 @@ def serialize_services(document: dict[str, Any]) -> list[dict[str, Any]]:
         )
 
     return services_state
+
+
+def serialize_routes(document: dict[str, Any]) -> list[dict[str, Any]]:
+    routes_block = document.get("routes") or []
+    routes_state: list[dict[str, Any]] = []
+    if isinstance(routes_block, list) and routes_block:
+        for route in routes_block:
+            if not isinstance(route, dict):
+                continue
+            routes_state.append(
+                {
+                    "name": str(route.get("name", "")),
+                    "slug": str(route.get("slug", route.get("name", ""))).strip().lower(),
+                    "methods": list(route.get("methods") or ["GET"]),
+                    "gateway_path": str(route.get("gateway_path", "")),
+                    "strategy": str(route.get("strategy", "single") or "single"),
+                    "targets": [
+                        {
+                            "service": str(target.get("service", "")),
+                            "endpoint": str(target.get("endpoint", "")),
+                        }
+                        for target in (route.get("targets") or [])
+                        if isinstance(target, dict)
+                    ],
+                    "output_profile": str(route.get("output_profile", "") or ""),
+                    "response_cache": serialize_response_cache(route.get("response_cache")),
+                    "success_hook": serialize_success_hook(route.get("success_hook")),
+                }
+            )
+        return routes_state
+
+    for service_name, service_data in (document.get("services") or {}).items():
+        for endpoint in service_data.get("endpoints") or []:
+            if not isinstance(endpoint, dict) or not endpoint.get("gateway_path"):
+                continue
+            name = str(endpoint.get("name", ""))
+            routes_state.append(
+                {
+                    "name": name,
+                    "slug": str(endpoint.get("slug", name)).strip().lower(),
+                    "methods": list(endpoint.get("methods") or ["GET"]),
+                    "gateway_path": str(endpoint.get("gateway_path", "")),
+                    "strategy": "single",
+                    "targets": [{"service": str(service_name), "endpoint": name}],
+                    "output_profile": str(endpoint.get("output_profile", "") or ""),
+                    "response_cache": serialize_response_cache(endpoint.get("response_cache")),
+                    "success_hook": serialize_success_hook(endpoint.get("success_hook")),
+                }
+            )
+    return routes_state
 
 
 def serialize_clients(document: dict[str, Any]) -> list[dict[str, Any]]:
@@ -189,6 +241,7 @@ def build_admin_page_state(
 ) -> dict[str, Any]:
     return {
         "services": serialize_services(document),
+        "routes": serialize_routes(document),
         "clients": serialize_clients(document),
         "output_profiles": serialize_output_profiles(document),
         "security": security_state,

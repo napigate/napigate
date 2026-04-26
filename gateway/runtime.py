@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.cookies import SimpleCookie
 import ipaddress
 from dataclasses import dataclass
@@ -24,7 +25,10 @@ from gateway.config import (
     ClientConfig,
     EndpointConfig,
     OutputProfileConfig,
+    ResponseCacheConfig,
+    RouteConfig,
     ServiceConfig,
+    SuccessHookConfig,
     StaticResponseConfig,
     load_gateway_config,
 )
@@ -87,9 +91,18 @@ class OutgoingResponse:
 
 @dataclass(slots=True)
 class MatchedEndpoint:
+    route: RouteConfig
     service: ServiceConfig
     endpoint: EndpointConfig
     path_params: dict[str, str]
+
+
+@dataclass(slots=True)
+class TargetExecutionResult:
+    matched: MatchedEndpoint
+    response: OutgoingResponse
+    upstream_url: str
+    response_source: str
 
 
 @dataclass(slots=True)
@@ -117,6 +130,7 @@ class GatewayRuntime:
     def __init__(self, config_path: Path | str = "config/services.yaml") -> None:
         self.config_path = Path(config_path)
         self.services: list[ServiceConfig] = []
+        self.routes: list[RouteConfig] = []
         self.clients: dict[str, ClientConfig] = {}
         self.output_profiles: dict[str, OutputProfileConfig] = {}
         self.log_store = RequestLogStore()
@@ -125,29 +139,34 @@ class GatewayRuntime:
         self.response_cache: dict[str, CacheValue] = {}
         self.rate_limit_hits: dict[str, deque[float]] = {}
         self._config_signature: tuple[int, int] | None = None
+        self._route_round_robin: dict[str, int] = {}
         self._lock = threading.RLock()
         self.dispatcher = IntegrationDispatcher()
 
     def load(self) -> None:
         gateway_config = load_gateway_config(self.config_path)
         services = gateway_config.services
+        routes = gateway_config.routes
         clients = gateway_config.clients
         output_profiles = gateway_config.output_profiles
         signature = self._file_signature(self.config_path)
         with self._lock:
             self.services = services
+            self.routes = routes
             self.clients = clients
             self.output_profiles = output_profiles
             self.pre_call_cache.clear()
             self.auth_cache.clear()
             self.response_cache.clear()
             self.rate_limit_hits.clear()
+            self._route_round_robin.clear()
             self._config_signature = signature
         self.dispatcher.configure(log_aggregators=gateway_config.log_aggregators)
         self.log_store.cleanup_old()
         LOGGER.info(
-            "Loaded %s services, %s gateway clients, and %s output profiles from %s",
+            "Loaded %s services, %s routes, %s gateway clients, and %s output profiles from %s",
             len(services),
+            len(routes),
             len(clients),
             len(output_profiles),
             self.config_path,
@@ -173,35 +192,90 @@ class GatewayRuntime:
     def match(self, method: str, path: str) -> MatchedEndpoint | None:
         method_upper = method.upper()
         with self._lock:
-            services = list(self.services)
+            routes = list(self.routes)
 
-        for service in services:
-            for endpoint in service.endpoints:
-                if method_upper not in endpoint.methods:
-                    continue
-                match = endpoint.compiled_pattern.match(path) if endpoint.compiled_pattern else None
-                if match:
-                    return MatchedEndpoint(
-                        service=service,
-                        endpoint=endpoint,
-                        path_params=match.groupdict(),
-                    )
+        for route in routes:
+            if method_upper not in route.methods:
+                continue
+            match = route.compiled_pattern.match(path) if route.compiled_pattern else None
+            if not match:
+                continue
+            selected = self._select_route_target(route)
+            if selected is None:
+                continue
+            service, endpoint = selected
+            return MatchedEndpoint(
+                route=route,
+                service=service,
+                endpoint=endpoint,
+                path_params=match.groupdict(),
+            )
         return None
 
     def match_any(self, path: str) -> MatchedEndpoint | None:
         with self._lock:
-            services = list(self.services)
+            routes = list(self.routes)
 
-        for service in services:
-            for endpoint in service.endpoints:
-                match = endpoint.compiled_pattern.match(path) if endpoint.compiled_pattern else None
-                if match:
-                    return MatchedEndpoint(
-                        service=service,
-                        endpoint=endpoint,
-                        path_params=match.groupdict(),
-                    )
+        for route in routes:
+            match = route.compiled_pattern.match(path) if route.compiled_pattern else None
+            if not match:
+                continue
+            selected = self._first_route_target(route)
+            if selected is None:
+                continue
+            service, endpoint = selected
+            return MatchedEndpoint(
+                route=route,
+                service=service,
+                endpoint=endpoint,
+                path_params=match.groupdict(),
+            )
         return None
+
+    def _endpoint_lookup(self) -> dict[tuple[str, str], tuple[ServiceConfig, EndpointConfig]]:
+        lookup: dict[tuple[str, str], tuple[ServiceConfig, EndpointConfig]] = {}
+        for service in self.services:
+            for endpoint in service.endpoints:
+                lookup[(service.name, endpoint.name)] = (service, endpoint)
+                lookup[(service.name, endpoint.slug)] = (service, endpoint)
+        return lookup
+
+    def _route_targets(self, route: RouteConfig) -> list[tuple[ServiceConfig, EndpointConfig]]:
+        with self._lock:
+            lookup = self._endpoint_lookup()
+        targets: list[tuple[ServiceConfig, EndpointConfig]] = []
+        for target in route.targets:
+            resolved = lookup.get((target.service, target.endpoint))
+            if resolved is not None:
+                targets.append(resolved)
+        return targets
+
+    def _first_route_target(self, route: RouteConfig) -> tuple[ServiceConfig, EndpointConfig] | None:
+        targets = self._route_targets(route)
+        return targets[0] if targets else None
+
+    def _select_route_target(self, route: RouteConfig) -> tuple[ServiceConfig, EndpointConfig] | None:
+        targets = self._route_targets(route)
+        if not targets:
+            return None
+        if route.strategy != "round_robin" or len(targets) == 1:
+            return targets[0]
+
+        with self._lock:
+            index = self._route_round_robin.get(route.slug, 0)
+            self._route_round_robin[route.slug] = index + 1
+        return targets[index % len(targets)]
+
+    def _target_matches_for_route(self, matched: MatchedEndpoint) -> list[MatchedEndpoint]:
+        return [
+            MatchedEndpoint(
+                route=matched.route,
+                service=service,
+                endpoint=endpoint,
+                path_params=dict(matched.path_params),
+            )
+            for service, endpoint in self._route_targets(matched.route)
+        ]
 
     def handle_options(self, request: IncomingRequest) -> OutgoingResponse | None:
         matched = self.match_any(request.path)
@@ -246,9 +320,8 @@ class GatewayRuntime:
         status_code = 500
         error_message = ""
         upstream_url = ""
+        log_matched = matched
         authenticated_client: AuthenticatedClient | None = None
-
-        variables = dict(matched.service.variables)
 
         try:
             authenticated_client = self._authenticate_client(matched=matched, request=request)
@@ -279,124 +352,30 @@ class GatewayRuntime:
                     response_source="cache",
                 )
                 return cached_response
-            context = self._build_template_context(
+
+            result = self._execute_route(
                 matched=matched,
                 request=request,
-                variables=variables,
-                authenticated_client=authenticated_client,
-            )
-
-            if matched.endpoint.pre_call:
-                self._run_pre_call(
-                    matched=matched,
-                    request=request,
-                    context=context,
-                    variables=variables,
-                )
-
-            context = self._build_template_context(
-                matched=matched,
-                request=request,
-                variables=variables,
-                authenticated_client=authenticated_client,
-            )
-
-            if matched.endpoint.response is not None:
-                upstream_url = "local://response"
-                direct_response = self._build_static_response(
-                    response_config=matched.endpoint.response,
-                    context=context,
-                    request_id=request_id,
-                )
-                direct_response = self._apply_output_profile(
-                    matched=matched,
-                    request=request,
-                    response=direct_response,
-                )
-                self._store_cached_response(
-                    matched=matched,
-                    request=request,
-                    authenticated_client=authenticated_client,
-                    response=direct_response,
-                )
-                direct_response.headers = self.merge_response_headers(
-                    direct_response.headers,
-                    self._build_cors_headers(matched, request),
-                )
-                status_code = direct_response.status_code
-                self._emit_success_hook(
-                    matched=matched,
-                    request=request,
-                    authenticated_client=authenticated_client,
-                    response=direct_response,
-                    request_id=request_id,
-                    response_source="local",
-                )
-                return direct_response
-
-            upstream_path = self.render_template(matched.endpoint.upstream_path, context)
-            upstream_url = self._join_url(matched.service.base_url, str(upstream_path))
-
-            rendered_service_headers = self.render_data(matched.service.headers, context)
-            rendered_endpoint_headers = self.render_data(matched.endpoint.headers, context)
-            request_headers = self._prepare_request_headers(
-                incoming_headers=request.headers,
-                service_headers=rendered_service_headers,
-                endpoint_headers=rendered_endpoint_headers,
                 authenticated_client=authenticated_client,
                 request_id=request_id,
             )
-            request_headers["X-NapiGate-Endpoint-Slug"] = matched.endpoint.slug
+            log_matched = result.matched
+            upstream_url = result.upstream_url
 
-            rendered_query = self.render_data(matched.endpoint.query, context)
-            final_query = self._merge_query_params(
-                request.query,
-                rendered_query,
-                authenticated_client=authenticated_client,
+            result.response.headers = self.merge_response_headers(
+                result.response.headers,
+                self._build_cors_headers(result.matched, request),
             )
-
-            response = self._send_request(
-                matched.service,
-                request.method,
-                upstream_url,
-                headers=request_headers,
-                params=final_query,
-                data=request.body or None,
-                timeout=matched.service.timeout_seconds,
-                verify=matched.service.verify_ssl,
-                allow_redirects=False,
-            )
-
-            status_code = response.status_code
-            outgoing_response = OutgoingResponse(
-                status_code=response.status_code,
-                headers=self._prepare_response_headers(response.headers, request_id),
-                body=response.content,
-            )
-            outgoing_response = self._apply_output_profile(
-                matched=matched,
-                request=request,
-                response=outgoing_response,
-            )
-            self._store_cached_response(
-                matched=matched,
-                request=request,
-                authenticated_client=authenticated_client,
-                response=outgoing_response,
-            )
-            outgoing_response.headers = self.merge_response_headers(
-                outgoing_response.headers,
-                self._build_cors_headers(matched, request),
-            )
+            status_code = result.response.status_code
             self._emit_success_hook(
-                matched=matched,
+                matched=result.matched,
                 request=request,
                 authenticated_client=authenticated_client,
-                response=outgoing_response,
+                response=result.response,
                 request_id=request_id,
-                response_source="upstream",
+                response_source=result.response_source,
             )
-            return outgoing_response
+            return result.response
         except GatewayError as exc:
             status_code = exc.status_code
             error_message = exc.detail
@@ -416,12 +395,260 @@ class GatewayRuntime:
             self._write_log(
                 request_id=request_id,
                 request=request,
-                matched=matched,
+                matched=log_matched,
                 upstream_url=upstream_url,
                 status_code=status_code,
                 duration_ms=duration_ms,
                 error_message=error_message,
             )
+
+    def _execute_route(
+        self,
+        *,
+        matched: MatchedEndpoint,
+        request: IncomingRequest,
+        authenticated_client: AuthenticatedClient | None,
+        request_id: str,
+    ) -> TargetExecutionResult:
+        if matched.route.strategy in {"single", "round_robin"}:
+            return self._execute_target(
+                matched=matched,
+                request=request,
+                authenticated_client=authenticated_client,
+                request_id=request_id,
+            )
+
+        targets = self._target_matches_for_route(matched)
+        if not targets:
+            raise GatewayError(502, f"Route '{matched.route.name}' has no usable targets.")
+
+        if matched.route.strategy == "parallel_race":
+            return self._execute_parallel_race(
+                targets=targets,
+                request=request,
+                authenticated_client=authenticated_client,
+                request_id=request_id,
+            )
+
+        return self._execute_failover(
+            targets=targets,
+            request=request,
+            authenticated_client=authenticated_client,
+            request_id=request_id,
+        )
+
+    def _execute_failover(
+        self,
+        *,
+        targets: list[MatchedEndpoint],
+        request: IncomingRequest,
+        authenticated_client: AuthenticatedClient | None,
+        request_id: str,
+    ) -> TargetExecutionResult:
+        last_response: TargetExecutionResult | None = None
+        last_error: Exception | None = None
+        for target in targets:
+            try:
+                result = self._execute_target(
+                    matched=target,
+                    request=request,
+                    authenticated_client=authenticated_client,
+                    request_id=request_id,
+                )
+                if result.response.status_code < 500:
+                    return result
+                last_response = result
+            except GatewayError as exc:
+                if exc.status_code < 500:
+                    raise
+                last_error = exc
+                LOGGER.warning(
+                    "Route target failed: route=%s service=%s endpoint=%s status=%s detail=%s",
+                    target.route.slug,
+                    target.service.name,
+                    target.endpoint.name,
+                    exc.status_code,
+                    exc.detail,
+                )
+            except requests.RequestException as exc:
+                last_error = exc
+                LOGGER.warning(
+                    "Route target HTTP error: route=%s service=%s endpoint=%s error=%s",
+                    target.route.slug,
+                    target.service.name,
+                    target.endpoint.name,
+                    exc,
+                )
+
+        if last_response is not None:
+            return last_response
+        if isinstance(last_error, GatewayError):
+            raise last_error
+        if last_error is not None:
+            raise GatewayError(502, "All route targets failed.") from last_error
+        raise GatewayError(502, "All route targets failed.")
+
+    def _execute_parallel_race(
+        self,
+        *,
+        targets: list[MatchedEndpoint],
+        request: IncomingRequest,
+        authenticated_client: AuthenticatedClient | None,
+        request_id: str,
+    ) -> TargetExecutionResult:
+        last_response: TargetExecutionResult | None = None
+        last_error: Exception | None = None
+        worker_count = max(1, min(len(targets), 8))
+        executor = ThreadPoolExecutor(max_workers=worker_count)
+        futures = [
+            executor.submit(
+                self._execute_target,
+                matched=target,
+                request=request,
+                authenticated_client=authenticated_client,
+                request_id=request_id,
+            )
+            for target in targets
+        ]
+        try:
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    if result.response.status_code < 500:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        return result
+                    last_response = result
+                except GatewayError as exc:
+                    if exc.status_code < 500:
+                        raise
+                    last_error = exc
+                except requests.RequestException as exc:
+                    last_error = exc
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+        if last_response is not None:
+            return last_response
+        if isinstance(last_error, GatewayError):
+            raise last_error
+        if last_error is not None:
+            raise GatewayError(502, "All parallel route targets failed.") from last_error
+        raise GatewayError(502, "All parallel route targets failed.")
+
+    def _execute_target(
+        self,
+        *,
+        matched: MatchedEndpoint,
+        request: IncomingRequest,
+        authenticated_client: AuthenticatedClient | None,
+        request_id: str,
+    ) -> TargetExecutionResult:
+        variables = dict(matched.service.variables)
+        context = self._build_template_context(
+            matched=matched,
+            request=request,
+            variables=variables,
+            authenticated_client=authenticated_client,
+        )
+
+        if matched.endpoint.pre_call:
+            self._run_pre_call(
+                matched=matched,
+                request=request,
+                context=context,
+                variables=variables,
+            )
+
+        context = self._build_template_context(
+            matched=matched,
+            request=request,
+            variables=variables,
+            authenticated_client=authenticated_client,
+        )
+
+        if matched.endpoint.response is not None:
+            upstream_url = "local://response"
+            direct_response = self._build_static_response(
+                response_config=matched.endpoint.response,
+                context=context,
+                request_id=request_id,
+            )
+            direct_response = self._apply_output_profile(
+                matched=matched,
+                request=request,
+                response=direct_response,
+            )
+            direct_response = self._tag_route_response(matched=matched, response=direct_response)
+            self._store_cached_response(
+                matched=matched,
+                request=request,
+                authenticated_client=authenticated_client,
+                response=direct_response,
+            )
+            return TargetExecutionResult(
+                matched=matched,
+                response=direct_response,
+                upstream_url=upstream_url,
+                response_source="local",
+            )
+
+        upstream_path = self.render_template(matched.endpoint.upstream_path, context)
+        upstream_url = self._join_url(matched.service.base_url, str(upstream_path))
+
+        rendered_service_headers = self.render_data(matched.service.headers, context)
+        rendered_endpoint_headers = self.render_data(matched.endpoint.headers, context)
+        request_headers = self._prepare_request_headers(
+            incoming_headers=request.headers,
+            service_headers=rendered_service_headers,
+            endpoint_headers=rendered_endpoint_headers,
+            authenticated_client=authenticated_client,
+            request_id=request_id,
+        )
+        request_headers["X-NapiGate-Endpoint-Slug"] = matched.endpoint.slug
+        request_headers["X-NapiGate-Route-Slug"] = matched.route.slug
+
+        rendered_query = self.render_data(matched.endpoint.query, context)
+        final_query = self._merge_query_params(
+            request.query,
+            rendered_query,
+            authenticated_client=authenticated_client,
+        )
+
+        response = self._send_request(
+            matched.service,
+            request.method,
+            upstream_url,
+            headers=request_headers,
+            params=final_query,
+            data=request.body or None,
+            timeout=matched.service.timeout_seconds,
+            verify=matched.service.verify_ssl,
+            allow_redirects=False,
+        )
+
+        outgoing_response = OutgoingResponse(
+            status_code=response.status_code,
+            headers=self._prepare_response_headers(response.headers, request_id),
+            body=response.content,
+        )
+        outgoing_response = self._apply_output_profile(
+            matched=matched,
+            request=request,
+            response=outgoing_response,
+        )
+        outgoing_response = self._tag_route_response(matched=matched, response=outgoing_response)
+        self._store_cached_response(
+            matched=matched,
+            request=request,
+            authenticated_client=authenticated_client,
+            response=outgoing_response,
+        )
+        return TargetExecutionResult(
+            matched=matched,
+            response=outgoing_response,
+            upstream_url=upstream_url,
+            response_source="upstream",
+        )
 
     def list_logs(self, limit: int = 200) -> list[dict[str, Any]]:
         return self.log_store.recent(limit=limit)
@@ -434,9 +661,48 @@ class GatewayRuntime:
         with self._lock:
             return len(self.clients)
 
+    def route_count(self) -> int:
+        with self._lock:
+            return len(self.routes)
+
     def output_profile_count(self) -> int:
         with self._lock:
             return len(self.output_profiles)
+
+    def _route_response_cache_config(self, matched: MatchedEndpoint) -> ResponseCacheConfig:
+        if matched.route.legacy_endpoint_config:
+            return matched.endpoint.response_cache
+        return matched.route.response_cache
+
+    def _route_output_profile_slug(self, matched: MatchedEndpoint) -> str | None:
+        if matched.route.output_profile:
+            return matched.route.output_profile
+        if matched.route.legacy_endpoint_config:
+            return matched.endpoint.output_profile
+        return None
+
+    def _route_success_hook(self, matched: MatchedEndpoint) -> SuccessHookConfig | None:
+        if matched.route.success_hook is not None:
+            return matched.route.success_hook
+        if matched.route.legacy_endpoint_config:
+            return matched.endpoint.success_hook
+        return None
+
+    def _tag_route_response(
+        self,
+        *,
+        matched: MatchedEndpoint,
+        response: OutgoingResponse,
+    ) -> OutgoingResponse:
+        response.headers = self.merge_response_headers(
+            response.headers,
+            {
+                "X-NapiGate-Route-Slug": matched.route.slug,
+                "X-NapiGate-Route-Strategy": matched.route.strategy,
+                "X-NapiGate-Target": f"{matched.service.name}.{matched.endpoint.name}",
+            },
+        )
+        return response
 
     def _get_cached_response(
         self,
@@ -446,7 +712,7 @@ class GatewayRuntime:
         authenticated_client: AuthenticatedClient | None,
         request_id: str,
     ) -> OutgoingResponse | None:
-        cache_config = matched.endpoint.response_cache
+        cache_config = self._route_response_cache_config(matched)
         if (
             not cache_config.enabled
             or cache_config.ttl_seconds <= 0
@@ -486,7 +752,7 @@ class GatewayRuntime:
         authenticated_client: AuthenticatedClient | None,
         response: OutgoingResponse,
     ) -> None:
-        cache_config = matched.endpoint.response_cache
+        cache_config = self._route_response_cache_config(matched)
         if (
             not cache_config.enabled
             or cache_config.ttl_seconds <= 0
@@ -522,19 +788,20 @@ class GatewayRuntime:
         request: IncomingRequest,
         authenticated_client: AuthenticatedClient | None,
     ) -> str:
+        cache_config = self._route_response_cache_config(matched)
         parts = [
-            matched.service.name,
-            matched.endpoint.name,
+            matched.route.slug,
+            matched.route.gateway_path,
             request.method.upper(),
             request.path,
         ]
-        if matched.endpoint.response_cache.vary_by_client:
+        if cache_config.vary_by_client:
             parts.append(
                 f"client={authenticated_client.client_slug if authenticated_client else 'anonymous'}"
             )
         for key in sorted(request.query):
             parts.append(f"query:{key}={request.query[key]}")
-        for header_name in matched.endpoint.response_cache.vary_headers:
+        for header_name in cache_config.vary_headers:
             parts.append(
                 f"header:{header_name.lower()}={self._get_header(request.headers, header_name) or ''}"
             )
@@ -547,7 +814,7 @@ class GatewayRuntime:
         request: IncomingRequest,
         response: OutgoingResponse,
     ) -> OutgoingResponse:
-        profile_slug = matched.endpoint.output_profile
+        profile_slug = self._route_output_profile_slug(matched)
         if not profile_slug:
             return response
 
@@ -685,7 +952,7 @@ class GatewayRuntime:
         request_id: str,
         response_source: str,
     ) -> None:
-        success_hook = matched.endpoint.success_hook
+        success_hook = self._route_success_hook(matched)
         if success_hook is None or not success_hook.enabled or response.status_code >= 400:
             return
 
@@ -693,13 +960,18 @@ class GatewayRuntime:
             "event_type": success_hook.event_type,
             "request_id": request_id,
             "response_source": response_source,
+            "route": {
+                "name": matched.route.name,
+                "slug": matched.route.slug,
+                "gateway_path": matched.route.gateway_path,
+                "strategy": matched.route.strategy,
+            },
             "service": {
                 "name": matched.service.name,
             },
             "endpoint": {
                 "name": matched.endpoint.name,
                 "slug": matched.endpoint.slug,
-                "gateway_path": matched.endpoint.gateway_path,
             },
             "client": (
                 {
@@ -819,7 +1091,7 @@ class GatewayRuntime:
             "endpoint": {
                 "name": matched.endpoint.name,
                 "methods": matched.endpoint.methods,
-                "gateway_path": matched.endpoint.gateway_path,
+                "gateway_path": matched.route.gateway_path,
                 "upstream_path": matched.endpoint.upstream_path,
                 "response": (
                     {
@@ -878,6 +1150,17 @@ class GatewayRuntime:
         }
 
         base_context: dict[str, Any] = {
+            "route": {
+                "name": matched.route.name,
+                "slug": matched.route.slug,
+                "methods": matched.route.methods,
+                "gateway_path": matched.route.gateway_path,
+                "strategy": matched.route.strategy,
+                "targets": [
+                    {"service": target.service, "endpoint": target.endpoint}
+                    for target in matched.route.targets
+                ],
+            },
             "service": {
                 "name": matched.service.name,
                 "base_url": matched.service.base_url,
@@ -889,7 +1172,7 @@ class GatewayRuntime:
             "endpoint": {
                 "name": matched.endpoint.name,
                 "slug": matched.endpoint.slug,
-                "gateway_path": matched.endpoint.gateway_path,
+                "gateway_path": matched.route.gateway_path,
                 "upstream_path": matched.endpoint.upstream_path,
                 "response": (
                     {
@@ -1136,7 +1419,7 @@ class GatewayRuntime:
 
         if preflight:
             allow_methods = cors.allow_methods or list(
-                dict.fromkeys([*matched.endpoint.methods, "OPTIONS"])
+                dict.fromkeys([*matched.route.methods, "OPTIONS"])
             )
             request_headers = [
                 item.strip()
@@ -1240,6 +1523,9 @@ class GatewayRuntime:
                 "request_id": request_id,
                 "method": request.method,
                 "gateway_path": request.path,
+                "route_name": matched.route.name,
+                "route_slug": matched.route.slug,
+                "route_strategy": matched.route.strategy,
                 "service_name": matched.service.name,
                 "endpoint_name": matched.endpoint.name,
                 "endpoint_slug": matched.endpoint.slug,
@@ -1252,10 +1538,11 @@ class GatewayRuntime:
             }
         )
         LOGGER.info(
-            "request_id=%s method=%s path=%s service=%s endpoint=%s status=%s duration_ms=%s upstream=%s error=%s",
+            "request_id=%s method=%s path=%s route=%s service=%s endpoint=%s status=%s duration_ms=%s upstream=%s error=%s",
             request_id,
             request.method,
             request.path,
+            matched.route.slug,
             matched.service.name,
             matched.endpoint.name,
             status_code,
@@ -1316,40 +1603,50 @@ class GatewayRuntime:
         matched: MatchedEndpoint,
         request: IncomingRequest,
     ) -> AuthenticatedClient | None:
-        if not matched.service.auth.required:
+        protected_matches = [
+            target for target in self._target_matches_for_route(matched) if target.service.auth.required
+        ]
+        if not protected_matches:
             return None
 
         with self._lock:
             eligible_clients = [
                 client
                 for client in self.clients.values()
-                if client.enabled and self._client_scope_applies(client, matched=matched)
+                if client.enabled
+                and any(
+                    self._client_scope_applies(client, matched=target)
+                    for target in protected_matches
+                )
             ]
 
         if not eligible_clients:
             raise GatewayError(
                 500,
-                f"Protected route '{matched.service.name}.{matched.endpoint.name}' has no eligible clients.",
+                f"Protected route '{matched.route.name}' has no eligible clients.",
             )
 
         for client in eligible_clients:
             for method in client.auth_methods:
                 if not method.enabled:
                     continue
-                matched_client = self._match_auth_method(
-                    client=client,
-                    method=method,
-                    matched=matched,
-                    request=request,
-                )
-                if matched_client is None:
-                    continue
-                if client.ip_allowlist and not self._ip_allowed(request.client_ip, client.ip_allowlist):
-                    raise GatewayError(
-                        403,
-                        f"Client '{client.code}' is not allowed from IP '{request.client_ip}'.",
+                for auth_match in protected_matches:
+                    if not self._client_scope_applies(client, matched=auth_match):
+                        continue
+                    matched_client = self._match_auth_method(
+                        client=client,
+                        method=method,
+                        matched=auth_match,
+                        request=request,
                     )
-                return matched_client
+                    if matched_client is None:
+                        continue
+                    if client.ip_allowlist and not self._ip_allowed(request.client_ip, client.ip_allowlist):
+                        raise GatewayError(
+                            403,
+                            f"Client '{client.code}' is not allowed from IP '{request.client_ip}'.",
+                        )
+                    return matched_client
 
         raise GatewayError(401, "Client authentication failed.")
 
@@ -1609,10 +1906,16 @@ class GatewayRuntime:
                 "name": matched.service.name,
                 "base_url": matched.service.base_url,
             },
+            "route": {
+                "name": matched.route.name,
+                "slug": matched.route.slug,
+                "gateway_path": matched.route.gateway_path,
+                "strategy": matched.route.strategy,
+            },
             "endpoint": {
                 "name": matched.endpoint.name,
                 "slug": matched.endpoint.slug,
-                "gateway_path": matched.endpoint.gateway_path,
+                "gateway_path": matched.route.gateway_path,
                 "upstream_path": matched.endpoint.upstream_path,
             },
             "request": request_ctx,

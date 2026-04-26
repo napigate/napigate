@@ -21,12 +21,14 @@ from gateway.admin_ops import (
     delete_endpoint,
     delete_output_profile,
     delete_role,
+    delete_route,
     delete_service,
     delete_user,
     save_client,
     save_endpoint,
     save_output_profile,
     save_role,
+    save_route,
     save_service,
     save_user,
 )
@@ -1024,7 +1026,7 @@ def render_admin_page(
           <div>
             <h1 class="title">NapiGate Admin Panel</h1>
             <div class="subtitle">
-              Manage services, endpoints, output profiles, scoped gateway clients, users, and roles
+              Manage services, endpoint targets, gateway routes, output profiles, scoped gateway clients, users, and roles
             </div>
           </div>
           <div class="meta-box">
@@ -1039,6 +1041,7 @@ def render_admin_page(
           <div class="tabs">
             <button class="tab active" data-tab="live">Live</button>
             <button class="tab" data-tab="services">Services</button>
+            <button class="tab" data-tab="routes">Routes</button>
             <button class="tab" data-tab="output">Output</button>
             <button class="tab" data-tab="clients">Clients</button>
             <button class="tab" data-tab="users">Users</button>
@@ -1061,11 +1064,22 @@ def render_admin_page(
             <div class="section-head">
               <div>
                 <h2 class="section-title">Services</h2>
-                <div class="section-note">Review services first, then manage each service's endpoints in a modal table.</div>
+                <div class="section-note">Review upstream services first, then manage their endpoint targets in a modal table.</div>
               </div>
               <div class="actions" id="services-top-actions"></div>
             </div>
             <div class="card" id="services-table-wrap"></div>
+          </section>
+
+          <section class="section" data-section="routes">
+            <div class="section-head">
+              <div>
+                <h2 class="section-title">Routes</h2>
+                <div class="section-note">Expose public gateway paths here, then attach them to one or more service endpoints with single, round-robin, failover, or parallel race strategy.</div>
+              </div>
+              <div class="actions" id="routes-top-actions"></div>
+            </div>
+            <div class="card" id="routes-table-wrap"></div>
           </section>
 
           <section class="section" data-section="clients">
@@ -1083,7 +1097,7 @@ def render_admin_page(
             <div class="section-head">
               <div>
                 <h2 class="section-title">Output</h2>
-                <div class="section-note">Define reusable output profiles so endpoints can stay passthrough, use a standard JSON envelope, or publish JSONP safely.</div>
+                <div class="section-note">Define reusable output profiles so routes can stay passthrough, use a standard JSON envelope, or publish JSONP safely.</div>
               </div>
               <div class="actions" id="output-top-actions"></div>
             </div>
@@ -1176,9 +1190,7 @@ def render_admin_page(
           rate_limit_requests: {{ title: "Allowed Requests", text: "Maximum number of accepted requests inside one rate-limit window.", example: "120" }},
           rate_limit_window_seconds: {{ title: "Window Seconds", text: "Length of the sliding rate-limit window in seconds.", example: "60" }},
           rate_limit_scope: {{ title: "Rate Limit Scope", text: "Choose whether the bucket is tracked by authenticated client, IP address, or client then IP fallback.", example: "client_or_ip" }},
-          endpoint_name: {{ title: "Endpoint Name", text: "A stable internal name for this route used in scopes and admin views.", example: "user_by_id" }},
-          methods: {{ title: "Methods", text: "Comma-separated HTTP methods accepted by this endpoint.", example: "GET, POST" }},
-          gateway_path: {{ title: "Gateway Path", text: "The public path exposed by NapiGate. Use path tokens like {{id}} or {{path:path}}.", example: "/v1/users/{{id}}" }},
+          endpoint_name: {{ title: "Endpoint Name", text: "A stable internal target name used by routes, scopes, logs, and templates.", example: "user_by_id" }},
           upstream_path: {{ title: "Upstream Path", text: "The path or absolute URL sent upstream after template rendering. Leave blank only for local response endpoints.", example: "/users/{{ path.id }}" }},
           endpoint_headers_yaml: {{ title: "Endpoint Headers", text: "Headers added only for this endpoint after template rendering.", example: '{{ "Authorization": "Bearer {{ vars.access_token }}" }}' }},
           query_yaml: {{ title: "Endpoint Query", text: "Query parameters forced or templated by the gateway for this endpoint.", example: '{{ "expand": "profile" }}' }},
@@ -1186,8 +1198,14 @@ def render_admin_page(
           pre_call_cache_key: {{ title: "Pre-call Cache Key", text: "Optional template or literal cache key if the default service:endpoint key is too broad.", example: "{{ path.id }}" }},
           pre_call_code: {{ title: "Pre-call Code", text: "Trusted Python executed before proxying so you can fetch tokens, compute values, or enrich variables.", example: 'set_var("access_token", "demo-token")' }},
           endpoint_slug: {{ title: "Endpoint Slug", text: "Stable machine-friendly identifier for automation, success hooks, downstream mapping, and admin APIs.", example: "user_by_id" }},
-          output_profile: {{ title: "Output Profile", text: "Choose a reusable response-shaping profile. Leave blank to keep the upstream response untouched.", example: "standard_json" }},
-          response_cache_ttl_seconds: {{ title: "Response Cache TTL", text: "Cache successful endpoint responses in memory for this many seconds before calling upstream again.", example: "60" }},
+          route_name: {{ title: "Route Name", text: "A stable internal name for the public gateway route.", example: "get_user" }},
+          route_slug: {{ title: "Route Slug", text: "Machine-friendly route identifier used in logs, headers, and admin state.", example: "get-user" }},
+          methods: {{ title: "Methods", text: "Comma-separated HTTP methods accepted by this gateway route.", example: "GET, POST" }},
+          gateway_path: {{ title: "Gateway Path", text: "The public path exposed by NapiGate. Use path tokens like {{id}} or {{path:path}}.", example: "/v1/users/{{id}}" }},
+          route_strategy: {{ title: "Route Strategy", text: "single calls one target, round_robin rotates targets, failover tries the next target on 5xx or connection failure, parallel_race calls targets concurrently and returns the first healthy response.", example: "failover" }},
+          route_targets: {{ title: "Route Targets", text: "Select one or more service endpoints that this public route can call.", example: "protected_httpbin / user_by_id" }},
+          output_profile: {{ title: "Output Profile", text: "Choose a reusable response-shaping profile for this route. Leave blank to keep the target response untouched.", example: "standard_json" }},
+          response_cache_ttl_seconds: {{ title: "Response Cache TTL", text: "Cache successful route responses in memory for this many seconds before calling a target again.", example: "60" }},
           response_cache_vary_headers: {{ title: "Cache Vary Headers", text: "Header names that should produce separate cache entries for the same path and query.", example: "Accept-Language, X-Tenant" }},
           response_cache_methods: {{ title: "Cache Methods", text: "HTTP methods eligible for response caching when the TTL is enabled.", example: "GET, HEAD" }},
           response_cache_vary_by_client: {{ title: "Cache Per Client", text: "Keep a separate cache bucket for each authenticated gateway client so one consumer does not reuse another's response.", example: "Recommended for scoped partner APIs" }},
@@ -1339,6 +1357,7 @@ def render_admin_page(
           permissions = new Set(STATE.principal.permissions);
           liveRows = Array.isArray(STATE.live?.logs) ? STATE.live.logs : liveRows;
           renderServices();
+          renderRoutes();
           renderOutputProfiles();
           renderClients();
           renderUsers();
@@ -1432,7 +1451,7 @@ def render_admin_page(
             if (value && /(^|_)(url|base_url)$/.test(field.name || "") && !/^https?:\\/\\//i.test(value)) {{
               fail(field, "Use an absolute http(s) URL.");
             }}
-            if (value && ["service_name", "endpoint_name", "endpoint_slug", "client_slug", "client_code", "profile_slug", "role_name", "success_key", "data_key", "message_key", "error_key"].includes(field.name)) {{
+            if (value && ["service_name", "endpoint_name", "endpoint_slug", "route_name", "route_slug", "client_slug", "client_code", "profile_slug", "role_name", "success_key", "data_key", "message_key", "error_key"].includes(field.name)) {{
               if (!isSafeIdentifier(value)) fail(field, "Use letters, numbers, underscore, or dash. Start with a letter or underscore.");
             }}
             if (value && field.name === "username" && !/^[a-zA-Z0-9_.@-]{{1,64}}$/.test(value)) {{
@@ -1457,6 +1476,24 @@ def render_admin_page(
           const pathField = form.querySelector('[name="gateway_path"]');
           if (pathField?.value && !pathField.value.trim().startsWith("/")) {{
             fail(pathField, "Gateway path must start with /.");
+          }}
+          const routeStrategy = form.querySelector('[name="strategy"]')?.value;
+          if (routeStrategy && !["single", "round_robin", "failover", "parallel_race"].includes(routeStrategy)) {{
+            fail(form.querySelector('[name="strategy"]'), "Invalid route strategy.");
+          }}
+          if (form.action.endsWith("/__admin/route/save")) {{
+            const targetInputs = Array.from(form.querySelectorAll("[data-route-target]"));
+            const checkedTargets = targetInputs.filter((input) => input.checked);
+            const firstTarget = targetInputs[0];
+            if (!checkedTargets.length && firstTarget) {{
+              fail(firstTarget, "Select at least one route target.");
+            }}
+            if (routeStrategy === "single" && checkedTargets.length !== 1 && firstTarget) {{
+              fail(firstTarget, "Single strategy needs exactly one target.");
+            }}
+            if (["round_robin", "failover", "parallel_race"].includes(routeStrategy || "") && checkedTargets.length < 2 && firstTarget) {{
+              fail(firstTarget, "This strategy needs at least two targets.");
+            }}
           }}
 
           if (firstInvalid) {{
@@ -1525,6 +1562,10 @@ def render_admin_page(
           return STATE.output_profiles.find((profile) => profile.slug === slug);
         }}
 
+        function routeBySlug(slug) {{
+          return (STATE.routes || []).find((route) => route.slug === slug);
+        }}
+
         function outputProfileRuleSummary(profile) {{
           if (!profile) return "";
           if (profile.type === "passthrough") {{
@@ -1562,6 +1603,7 @@ def render_admin_page(
             service.endpoints.map((endpoint) => ({{
               service: service.name,
               endpoint: endpoint.name,
+              slug: endpoint.slug || endpoint.name,
               ref: `${{service.name}}::${{endpoint.name}}`,
               label: `${{service.name}} / ${{endpoint.name}}`,
             }}))
@@ -1768,37 +1810,9 @@ def render_admin_page(
         }}
 
         function buildEndpointCurl(serviceName, endpointName, methodName = "") {{
-          const service = serviceByName(serviceName);
-          const endpoint = endpointByName(serviceName, endpointName);
-          if (!service || !endpoint) return "";
-
-          const requestMethod = String(methodName || endpoint.methods?.[0] || "GET").toUpperCase();
-          let url = `${{window.location.origin}}${{sampleGatewayPath(endpoint.gateway_path)}}`;
-          const command = ["curl", `-X ${{requestMethod}}`];
-
-          if (service.auth?.required) {{
-            const authSample = authSampleForEndpoint(serviceName, endpointName);
-            (authSample.query || []).forEach(([key, value]) => {{
-              url = appendQueryParam(url, key, value);
-            }});
-            if (authSample.basic) {{
-              command.push(`-u ${{shellQuote(authSample.basic)}}`);
-            }}
-            if ((authSample.headers || []).length) {{
-              authSample.headers.forEach((header) => command.push(`-H ${{shellQuote(header)}}`));
-            }}
-            if ((authSample.cookies || []).length) {{
-              command.push(`-b ${{shellQuote(authSample.cookies.join('; '))}}`);
-            }}
-          }}
-
-          if (["POST", "PUT", "PATCH"].includes(requestMethod)) {{
-            command.push(`-H ${{shellQuote("Content-Type: application/json")}}`);
-            command.push(`-d ${{shellQuote("{{}}")}}`);
-          }}
-
-          command.push(shellQuote(url));
-          return command.join(" \\\n  ");
+          const route = routesForEndpoint(serviceName, endpointName)[0];
+          if (!route) return "";
+          return buildRouteCurl(route.slug, methodName || route.methods?.[0] || "GET");
         }}
 
         async function copyTextToClipboard(text) {{
@@ -1898,7 +1912,7 @@ def render_admin_page(
               <div class="live-stat">
                 <div class="live-label">Services</div>
                 <div class="live-value">${{STATE.services.length}}</div>
-                <div class="live-subvalue">${{STATE.clients.length}} client(s) configured</div>
+                <div class="live-subvalue">${{(STATE.routes || []).length}} route(s), ${{STATE.clients.length}} client(s)</div>
               </div>
               <div class="live-stat">
                 <div class="live-label">Recent Requests</div>
@@ -2059,6 +2073,162 @@ def render_admin_page(
           `;
         }}
 
+        function routeTargetsText(route) {{
+          return (route.targets || []).map((target) => `${{target.service}} / ${{target.endpoint}}`).join(", ");
+        }}
+
+        function routesForEndpoint(serviceName, endpointName) {{
+          const endpoint = endpointByName(serviceName, endpointName);
+          return (STATE.routes || []).filter((route) =>
+            (route.targets || []).some((target) =>
+              target.service === serviceName && (target.endpoint === endpointName || target.endpoint === endpoint?.slug)
+            )
+          );
+        }}
+
+        function routeAuthTarget(route) {{
+          const targets = route.targets || [];
+          return targets.find((target) => serviceByName(target.service)?.auth?.required) || targets[0] || null;
+        }}
+
+        function buildRouteCurl(routeSlug, methodName = "") {{
+          const route = routeBySlug(routeSlug);
+          if (!route) return "";
+          const target = routeAuthTarget(route);
+          const service = target ? serviceByName(target.service) : null;
+          const requestMethod = String(methodName || route.methods?.[0] || "GET").toUpperCase();
+          let url = `${{window.location.origin}}${{sampleGatewayPath(route.gateway_path)}}`;
+          const command = ["curl", `-X ${{requestMethod}}`];
+
+          if (service?.auth?.required && target) {{
+            const authSample = authSampleForEndpoint(target.service, target.endpoint);
+            (authSample.query || []).forEach(([key, value]) => {{
+              url = appendQueryParam(url, key, value);
+            }});
+            if (authSample.basic) {{
+              command.push(`-u ${{shellQuote(authSample.basic)}}`);
+            }}
+            if ((authSample.headers || []).length) {{
+              authSample.headers.forEach((header) => command.push(`-H ${{shellQuote(header)}}`));
+            }}
+            if ((authSample.cookies || []).length) {{
+              command.push(`-b ${{shellQuote(authSample.cookies.join('; '))}}`);
+            }}
+          }}
+
+          if (["POST", "PUT", "PATCH"].includes(requestMethod)) {{
+            command.push(`-H ${{shellQuote("Content-Type: application/json")}}`);
+            command.push(`-d ${{shellQuote("{{}}")}}`);
+          }}
+
+          command.push(shellQuote(url));
+          return command.join(" \\\n  ");
+        }}
+
+        function routeCurlButtonHtml(routeSlug, methodName = "", label = "Copy cURL") {{
+          return `
+            <button
+              class="btn light"
+              type="button"
+              onclick="copyRouteCurl(this, decodeURIComponent('${{arg(routeSlug)}}'), decodeURIComponent('${{arg(methodName)}}'))"
+            >
+              ${{esc(label)}}
+            </button>
+          `;
+        }}
+
+        async function copyRouteCurl(button, routeSlug, methodName = "") {{
+          const curl = buildRouteCurl(routeSlug, methodName);
+          if (!curl) return;
+
+          const originalText = button.dataset.label || button.textContent;
+          button.dataset.label = originalText;
+          try {{
+            await copyTextToClipboard(curl);
+            button.textContent = "Copied";
+          }} catch (_error) {{
+            button.textContent = "Copy failed";
+          }}
+          window.setTimeout(() => {{
+            button.textContent = originalText;
+          }}, 1400);
+        }}
+
+        function renderRoutes() {{
+          const wrap = document.getElementById("routes-table-wrap");
+          const topActions = document.getElementById("routes-top-actions");
+          if (!wrap || !topActions) return;
+
+          topActions.innerHTML = has("services_manage")
+            ? '<button class="btn" type="button" onclick="showRouteForm()">Add Route</button>'
+            : '';
+
+          if (!STATE.routes?.length) {{
+            wrap.innerHTML = '<div class="empty">No routes found. Create endpoints first, then expose gateway paths from this tab.</div>';
+            return;
+          }}
+
+          wrap.innerHTML = `
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Gateway Path</th>
+                  <th>Methods</th>
+                  <th>Strategy</th>
+                  <th>Targets</th>
+                  <th>Output</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${{
+                  STATE.routes.map((route) => `
+                    <tr>
+                      <td><strong>${{esc(route.name)}}</strong><div class="muted mono">${{esc(route.slug)}}</div></td>
+                      <td class="mono">${{esc(route.gateway_path)}}</td>
+                      <td>${{(route.methods || []).map((method) => `<span class="tag">${{esc(method)}}</span>`).join('')}}</td>
+                      <td><span class="tag ${{route.strategy === 'failover' ? 'warn' : route.strategy === 'parallel_race' ? 'ok' : ''}}">${{esc(route.strategy)}}</span></td>
+                      <td class="mono">${{esc(routeTargetsText(route))}}</td>
+                      <td>
+                        ${{
+                          route.output_profile
+                            ? `<span class="tag ok">${{esc(route.output_profile)}}</span>`
+                            : '<span class="muted">passthrough</span>'
+                        }}
+                        ${{
+                          Number(route.response_cache?.ttl_seconds || 0) > 0
+                            ? `<span class="tag warn">Cache ${{esc(route.response_cache.ttl_seconds)}}s</span>`
+                            : ''
+                        }}
+                        ${{
+                          route.success_hook?.url
+                            ? '<span class="tag ok">Hook</span>'
+                            : ''
+                        }}
+                      </td>
+                      <td>
+                        <div class="actions">
+                          <button class="btn light" type="button" onclick="showRouteView(decodeURIComponent('${{arg(route.slug)}}'))">View</button>
+                          <button class="btn light" type="button" onclick="copyRouteCurl(this, decodeURIComponent('${{arg(route.slug)}}'), decodeURIComponent('${{arg(route.methods?.[0] || 'GET')}}'))">Copy cURL</button>
+                          ${{
+                            has("services_manage")
+                              ? `
+                                <button class="btn" type="button" onclick="showRouteForm(decodeURIComponent('${{arg(route.slug)}}'))">Edit</button>
+                                <button class="btn danger" type="button" onclick="deleteRoute(decodeURIComponent('${{arg(route.slug)}}'))">Delete</button>
+                              `
+                              : ''
+                          }}
+                        </div>
+                      </td>
+                    </tr>
+                  `).join('')
+                }}
+              </tbody>
+            </table>
+          `;
+        }}
+
         function renderClients() {{
           const wrap = document.getElementById("clients-table-wrap");
           const topActions = document.getElementById("clients-top-actions");
@@ -2139,7 +2309,7 @@ def render_admin_page(
             : '';
 
           if (!STATE.output_profiles.length) {{
-            wrap.innerHTML = '<div class="empty">No output profiles found. Endpoints will stay passthrough until you define one.</div>';
+            wrap.innerHTML = '<div class="empty">No output profiles found. Routes will stay passthrough until you define one.</div>';
             return;
           }}
 
@@ -2440,9 +2610,9 @@ def render_admin_page(
                       <tr>
                         <th>Name</th>
                         <th>Slug</th>
-                        <th>Methods</th>
-                        <th>Gateway Path</th>
-                        <th>Upstream Path</th>
+                        <th>Upstream</th>
+                        <th>Routes</th>
+                        <th>Pre-call</th>
                         <th>Actions</th>
                       </tr>
                     </thead>
@@ -2451,29 +2621,24 @@ def render_admin_page(
                         <tr>
                           <td><strong>${{esc(endpoint.name)}}</strong></td>
                           <td class="mono">${{esc(endpoint.slug || endpoint.name)}}</td>
-                          <td>${{endpoint.methods.map((method) => `<span class="tag">${{esc(method)}}</span>`).join('')}}</td>
-                          <td class="mono">${{esc(endpoint.gateway_path)}}</td>
                           <td class="mono">
                             ${{
                               endpoint.response
                                 ? '<span class="tag ok">Local Response</span>'
                                 : esc(endpoint.upstream_path)
                             }}
+                          </td>
+                          <td>
                             ${{
-                              endpoint.output_profile
-                                ? `<span class="tag ok">${{esc(endpoint.output_profile)}}</span>`
-                                : ''
-                            }}
-                            ${{
-                              Number(endpoint.response_cache?.ttl_seconds || 0) > 0
-                                ? `<span class="tag warn">Cache ${{esc(endpoint.response_cache.ttl_seconds)}}s</span>`
-                                : ''
+                              routesForEndpoint(service.name, endpoint.name).length
+                                ? routesForEndpoint(service.name, endpoint.name).map((route) => `<span class="tag">${{esc(route.slug)}}</span>`).join('')
+                                : '<span class="muted">No route</span>'
                             }}
                           </td>
+                          <td>${{endpoint.pre_call?.code ? '<span class="tag warn">pre_call</span>' : '<span class="muted">None</span>'}}</td>
                           <td>
                             <div class="actions">
                               <button class="btn light" type="button" onclick="showEndpointView(decodeURIComponent('${{arg(service.name)}}'), decodeURIComponent('${{arg(endpoint.name)}}'))">View</button>
-                              <button class="btn light" type="button" onclick="copyEndpointCurl(this, decodeURIComponent('${{arg(service.name)}}'), decodeURIComponent('${{arg(endpoint.name)}}'), decodeURIComponent('${{arg(endpoint.methods[0] || 'GET')}}'))">Copy cURL</button>
                               ${{
                                 has("services_manage")
                                   ? `
@@ -2499,23 +2664,19 @@ def render_admin_page(
           return service?.endpoints.find((endpoint) => endpoint.name === endpointName);
         }}
 
-        function endpointCurlButtonHtml(serviceName, endpointName, methodName = "", label = "Copy cURL") {{
-          return `
-            <button
-              class="btn light"
-              type="button"
-              onclick="copyEndpointCurl(this, decodeURIComponent('${{arg(serviceName)}}'), decodeURIComponent('${{arg(endpointName)}}'), decodeURIComponent('${{arg(methodName)}}'))"
-            >
-              ${{esc(label)}}
-            </button>
-          `;
+        function endpointRouteButtonsHtml(serviceName, endpointName) {{
+          const routes = routesForEndpoint(serviceName, endpointName);
+          if (!routes.length) return '<span class="muted">No public route points to this endpoint yet.</span>';
+          return routes.flatMap((route) =>
+            (route.methods || ["GET"]).map((method) =>
+              routeCurlButtonHtml(route.slug, method, `Copy ${{route.slug}} ${{method}} cURL`)
+            )
+          ).join("");
         }}
 
         function showEndpointView(serviceName, endpointName) {{
           const endpoint = endpointByName(serviceName, endpointName);
-          const curlButtons = (endpoint?.methods || ["GET"])
-            .map((method) => endpointCurlButtonHtml(serviceName, endpointName, method, `Copy ${{method}} cURL`))
-            .join("");
+          const curlButtons = endpointRouteButtonsHtml(serviceName, endpointName);
           openModal("View Endpoint", `
             <div class="stack">
               <div class="actions">${{curlButtons}}</div>
@@ -2541,14 +2702,6 @@ def render_admin_page(
                 <span>Endpoint Slug</span>
                 <input name="endpoint_slug" value="${{esc(endpoint?.slug || endpoint?.name || "")}}" required>
               </label>
-              <label data-help="methods">
-                <span>Methods</span>
-                <input name="methods" value="${{esc((endpoint?.methods || ['GET']).join(','))}}" required>
-              </label>
-              <label data-help="gateway_path">
-                <span>Gateway Path</span>
-                <input name="gateway_path" value="${{esc(endpoint?.gateway_path || "")}}" required>
-              </label>
               <label data-help="upstream_path">
                 <span>Upstream Path</span>
                 <input name="upstream_path" value="${{esc(endpoint?.upstream_path || "")}}">
@@ -2571,36 +2724,6 @@ def render_admin_page(
                 <span>Query (JSON/YAML Mapping)</span>
                 <textarea name="query_yaml">${{esc(jsonText(endpoint?.query || {{}}))}}</textarea>
               </label>
-              <label data-help="output_profile">
-                <span>Output Profile</span>
-                <select name="output_profile">
-                  <option value="">passthrough</option>
-                  ${{
-                    STATE.output_profiles.map((profile) =>
-                      `<option value="${{esc(profile.slug)}}" ${{(endpoint?.output_profile || "") === profile.slug ? "selected" : ""}}>${{esc(profile.slug)}}${{profile.enabled ? "" : " (disabled)"}}</option>`
-                    ).join("")
-                  }}
-                </select>
-              </label>
-              <label data-help="response_cache_ttl_seconds">
-                <span>Response Cache TTL</span>
-                <input name="response_cache_ttl_seconds" type="number" min="0" value="${{esc(String(endpoint?.response_cache?.ttl_seconds ?? 0))}}">
-              </label>
-              <label class="check-item" data-help="response_cache_vary_by_client">
-                <input type="checkbox" name="response_cache_vary_by_client" ${{endpoint ? (endpoint.response_cache?.vary_by_client ? "checked" : "") : "checked"}}>
-                <div>
-                  <strong>Cache Per Client</strong>
-                  <div class="muted">Separate cached responses by authenticated client identity.</div>
-                </div>
-              </label>
-              <label data-help="response_cache_methods">
-                <span>Cache Methods</span>
-                <input name="response_cache_methods" value="${{esc((endpoint?.response_cache?.methods || ['GET']).join(', '))}}">
-              </label>
-              <label class="full" data-help="response_cache_vary_headers">
-                <span>Cache Vary Headers (CSV)</span>
-                <input name="response_cache_vary_headers" value="${{esc((endpoint?.response_cache?.vary_headers || []).join(', '))}}">
-              </label>
               <label data-help="pre_call_cache_ttl_seconds">
                 <span>Pre-call Cache TTL</span>
                 <input name="pre_call_cache_ttl_seconds" type="number" min="0" value="${{esc(String(endpoint?.pre_call?.cache_ttl_seconds ?? 0))}}">
@@ -2613,27 +2736,132 @@ def render_admin_page(
                 <span>Pre-call Code</span>
                 <textarea name="pre_call_code">${{esc(endpoint?.pre_call?.code || "")}}</textarea>
               </label>
+              <div class="actions full">
+                <button type="submit">Save Endpoint</button>
+              </div>
+            </form>
+          `);
+        }}
+
+        function showRouteView(slug) {{
+          const route = routeBySlug(slug);
+          const curlButtons = (route?.methods || ["GET"])
+            .map((method) => routeCurlButtonHtml(route.slug, method, `Copy ${{method}} cURL`))
+            .join("");
+          openModal("View Route", `
+            <div class="stack">
+              <div class="actions">${{curlButtons}}</div>
+              <div class="detail-box">
+                <pre>${{esc(JSON.stringify(route, null, 2))}}</pre>
+              </div>
+            </div>
+          `);
+        }}
+
+        function showRouteForm(slug = "") {{
+          const route = slug ? routeBySlug(slug) : null;
+          const selectedTargets = new Set((route?.targets || []).map((target) => `${{target.service}}::${{target.endpoint}}`));
+          const targetOptions = endpointOptions()
+            .map((item) => `
+              <label class="mini-check">
+                <input type="checkbox" name="targets" data-route-target value="${{esc(item.ref)}}" ${{selectedTargets.has(item.ref) || selectedTargets.has(`${{item.service}}::${{item.slug}}`) ? "checked" : ""}}>
+                <div>
+                  <strong>${{esc(item.endpoint)}}</strong>
+                  <div class="muted mono">${{esc(item.service)}}</div>
+                </div>
+              </label>
+            `)
+            .join("");
+
+          openModal(route ? "Edit Route" : "Add Route", `
+            <form method="post" action="/__admin/route/save" class="form-grid">
+              <input type="hidden" name="original_slug" value="${{esc(route?.slug || "")}}">
+              <label data-help="route_name">
+                <span>Route Name</span>
+                <input name="route_name" value="${{esc(route?.name || "")}}" required>
+              </label>
+              <label data-help="route_slug">
+                <span>Route Slug</span>
+                <input name="route_slug" value="${{esc(route?.slug || "")}}" required>
+              </label>
+              <label data-help="methods">
+                <span>Methods</span>
+                <input name="methods" value="${{esc((route?.methods || ['GET']).join(','))}}" required>
+              </label>
+              <label data-help="gateway_path">
+                <span>Gateway Path</span>
+                <input name="gateway_path" value="${{esc(route?.gateway_path || "")}}" required>
+              </label>
+              <label data-help="route_strategy">
+                <span>Strategy</span>
+                <select name="strategy">
+                  <option value="single" ${{(route?.strategy || "single") === "single" ? "selected" : ""}}>single</option>
+                  <option value="round_robin" ${{route?.strategy === "round_robin" ? "selected" : ""}}>round_robin</option>
+                  <option value="failover" ${{route?.strategy === "failover" ? "selected" : ""}}>failover</option>
+                  <option value="parallel_race" ${{route?.strategy === "parallel_race" ? "selected" : ""}}>parallel_race</option>
+                </select>
+              </label>
+              <label data-help="output_profile">
+                <span>Output Profile</span>
+                <select name="output_profile">
+                  <option value="">passthrough</option>
+                  ${{
+                    STATE.output_profiles.map((profile) =>
+                      `<option value="${{esc(profile.slug)}}" ${{(route?.output_profile || "") === profile.slug ? "selected" : ""}}>${{esc(profile.slug)}}${{profile.enabled ? "" : " (disabled)"}}</option>`
+                    ).join("")
+                  }}
+                </select>
+              </label>
+              <div class="full" data-help="route_targets">
+                <span style="display:block; font-weight:700; margin-bottom:8px;">Targets</span>
+                ${{targetOptions ? `<div class="scope-grid">${{targetOptions}}</div>` : '<div class="empty">Create a service endpoint first.</div>'}}
+              </div>
+              <div class="full detail-box">
+                <pre class="pseudo-code"><code>single:        call targets[0]
+round_robin:   call next target for each request
+failover:      try next target when a target returns 5xx or is unreachable
+parallel_race: call all targets concurrently and return first healthy response</code></pre>
+              </div>
+              <label data-help="response_cache_ttl_seconds">
+                <span>Response Cache TTL</span>
+                <input name="response_cache_ttl_seconds" type="number" min="0" value="${{esc(String(route?.response_cache?.ttl_seconds ?? 0))}}">
+              </label>
+              <label class="check-item" data-help="response_cache_vary_by_client">
+                <input type="checkbox" name="response_cache_vary_by_client" ${{route ? (route.response_cache?.vary_by_client ? "checked" : "") : "checked"}}>
+                <div>
+                  <strong>Cache Per Client</strong>
+                  <div class="muted">Separate cached responses by authenticated client identity.</div>
+                </div>
+              </label>
+              <label data-help="response_cache_methods">
+                <span>Cache Methods</span>
+                <input name="response_cache_methods" value="${{esc((route?.response_cache?.methods || ['GET']).join(', '))}}">
+              </label>
+              <label class="full" data-help="response_cache_vary_headers">
+                <span>Cache Vary Headers (CSV)</span>
+                <input name="response_cache_vary_headers" value="${{esc((route?.response_cache?.vary_headers || []).join(', '))}}">
+              </label>
               <label class="full" data-help="success_hook_url">
                 <span>Success Hook URL</span>
-                <input name="success_hook_url" value="${{esc(endpoint?.success_hook?.url || "")}}">
+                <input name="success_hook_url" value="${{esc(route?.success_hook?.url || "")}}">
               </label>
               <label data-help="success_hook_timeout_seconds">
                 <span>Success Hook Timeout</span>
-                <input name="success_hook_timeout_seconds" type="number" min="0.1" step="0.1" value="${{esc(String(endpoint?.success_hook?.timeout_seconds ?? 5))}}">
+                <input name="success_hook_timeout_seconds" type="number" min="0.1" step="0.1" value="${{esc(String(route?.success_hook?.timeout_seconds ?? 5))}}">
               </label>
               <label data-help="success_hook_event_type">
                 <span>Success Hook Event Type</span>
-                <input name="success_hook_event_type" value="${{esc(endpoint?.success_hook?.event_type || "financial")}}">
+                <input name="success_hook_event_type" value="${{esc(route?.success_hook?.event_type || "financial")}}">
               </label>
               <label class="check-item" data-help="success_hook_include_request_body">
-                <input type="checkbox" name="success_hook_include_request_body" ${{endpoint?.success_hook?.include_request_body ? "checked" : ""}}>
+                <input type="checkbox" name="success_hook_include_request_body" ${{route?.success_hook?.include_request_body ? "checked" : ""}}>
                 <div>
                   <strong>Include Request Body</strong>
                   <div class="muted">Attach the original request payload to the async success event.</div>
                 </div>
               </label>
               <label class="check-item" data-help="success_hook_include_response_body">
-                <input type="checkbox" name="success_hook_include_response_body" ${{endpoint?.success_hook?.include_response_body ? "checked" : ""}}>
+                <input type="checkbox" name="success_hook_include_response_body" ${{route?.success_hook?.include_response_body ? "checked" : ""}}>
                 <div>
                   <strong>Include Response Body</strong>
                   <div class="muted">Attach the rendered response payload to the async success event.</div>
@@ -2641,10 +2869,10 @@ def render_admin_page(
               </label>
               <label class="full" data-help="success_hook_headers_yaml">
                 <span>Success Hook Headers (JSON/YAML Mapping)</span>
-                <textarea name="success_hook_headers_yaml">${{esc(jsonText(endpoint?.success_hook?.headers || {{}}))}}</textarea>
+                <textarea name="success_hook_headers_yaml">${{esc(jsonText(route?.success_hook?.headers || {{}}))}}</textarea>
               </label>
               <div class="actions full">
-                <button type="submit">Save Endpoint</button>
+                <button type="submit">Save Route</button>
               </div>
             </form>
           `);
@@ -3113,7 +3341,7 @@ def render_admin_page(
                 <input type="checkbox" name="enabled" ${{profile ? (profile.enabled ? "checked" : "") : "checked"}}>
                 <div>
                   <strong>Enabled</strong>
-                  <div class="muted">Disabled profiles remain saved but are ignored by endpoint output settings.</div>
+                  <div class="muted">Disabled profiles remain saved but are ignored by route output settings.</div>
                 </div>
               </label>
               <div class="output-flow full">
@@ -3282,6 +3510,10 @@ def render_admin_page(
           postDelete("/__admin/endpoint/delete", {{ service_name: serviceName, endpoint_name: endpointName }});
         }}
 
+        function deleteRoute(slug) {{
+          postDelete("/__admin/route/delete", {{ route_slug: slug }});
+        }}
+
         function deleteClient(slug) {{
           postDelete("/__admin/client/delete", {{ client_slug: slug }});
         }}
@@ -3300,6 +3532,7 @@ def render_admin_page(
 
         startLivePolling();
         renderServices();
+        renderRoutes();
         renderOutputProfiles();
         renderClients();
         renderUsers();
@@ -3349,6 +3582,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 {
                     "status": "ok",
                     "service_count": runtime.service_count(),
+                    "route_count": runtime.route_count(),
                     "output_profile_count": runtime.output_profile_count(),
                     "config_path": str(runtime.config_path),
                 }
@@ -3499,6 +3733,18 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 if self._require_permission("services_manage") is None:
                     return
                 self._handle_endpoint_delete()
+                return
+
+            if parsed.path == "/__admin/route/save" and self.command == "POST":
+                if self._require_permission("services_manage") is None:
+                    return
+                self._handle_route_save()
+                return
+
+            if parsed.path == "/__admin/route/delete" and self.command == "POST":
+                if self._require_permission("services_manage") is None:
+                    return
+                self._handle_route_delete()
                 return
 
             if parsed.path == "/__admin/output-profile/save" and self.command == "POST":
@@ -4029,14 +4275,78 @@ class GatewayHandler(BaseHTTPRequestHandler):
             original_slug = str(form.get("original_slug", "")).strip().lower()
             endpoint_name = str(form.get("endpoint_name", "")).strip()
             endpoint_slug = str(form.get("endpoint_slug", "")).strip().lower()
-            methods = self._parse_methods(str(form.get("methods", "GET")))
-            gateway_path = str(form.get("gateway_path", "")).strip()
             upstream_path = str(form.get("upstream_path", "")).strip()
             headers = self._parse_yaml_mapping(str(form.get("headers_yaml", "")), "Headers")
             query = self._parse_yaml_mapping(str(form.get("query_yaml", "")), "Query")
             pre_call_code = str(form.get("pre_call_code", "")).rstrip()
             pre_call_cache_ttl = int(str(form.get("pre_call_cache_ttl_seconds", "0")).strip() or "0")
             pre_call_cache_key = str(form.get("pre_call_cache_key", "")).strip()
+
+            if not service_name:
+                raise ValueError("Service name is required.")
+            if not endpoint_name:
+                raise ValueError("Endpoint name is required.")
+            if not endpoint_slug:
+                raise ValueError("Endpoint slug is required.")
+            if pre_call_cache_ttl < 0:
+                raise ValueError("Pre-call cache TTL must be zero or positive.")
+
+            message = save_endpoint(
+                runtime.config_path,
+                service_name=service_name,
+                original_name=original_name,
+                original_slug=original_slug,
+                endpoint_name=endpoint_name,
+                endpoint_slug=endpoint_slug,
+                upstream_path=upstream_path,
+                headers=headers,
+                query=query,
+                pre_call_code=pre_call_code,
+                pre_call_cache_ttl=pre_call_cache_ttl,
+                pre_call_cache_key=pre_call_cache_key,
+            )
+            runtime.load()
+            self._send_admin_mutation_success(message)
+        except Exception as exc:  # noqa: BLE001
+            self._send_admin_mutation_error(exc)
+
+    def _handle_endpoint_delete(self) -> None:
+        try:
+            form = self._parse_form()
+            service_name = str(form.get("service_name", "")).strip()
+            endpoint_name = str(form.get("endpoint_name", "")).strip()
+            message = delete_endpoint(
+                runtime.config_path,
+                service_name=service_name,
+                endpoint_name=endpoint_name,
+            )
+            runtime.load()
+            self._send_admin_mutation_success(message)
+        except Exception as exc:  # noqa: BLE001
+            self._send_admin_mutation_error(exc)
+
+    def _handle_route_save(self) -> None:
+        try:
+            form = self._parse_form()
+            original_slug = str(form.get("original_slug", "")).strip().lower()
+            route_name = str(form.get("route_name", "")).strip()
+            route_slug = str(form.get("route_slug", "")).strip().lower()
+            methods = self._parse_methods(str(form.get("methods", "GET")))
+            gateway_path = str(form.get("gateway_path", "")).strip()
+            strategy = str(form.get("strategy", "single")).strip().lower() or "single"
+            target_values = form.get("targets", [])
+            if isinstance(target_values, str):
+                target_values = [target_values] if target_values else []
+            targets: list[dict[str, str]] = []
+            for value in target_values:
+                service_name, _, endpoint_name = str(value).partition("::")
+                service_name = service_name.strip()
+                endpoint_name = endpoint_name.strip()
+                if service_name and endpoint_name:
+                    target = {"service": service_name, "endpoint": endpoint_name}
+                    if target not in targets:
+                        targets.append(target)
+
             output_profile = str(form.get("output_profile", "")).strip().lower()
             response_cache_ttl = int(str(form.get("response_cache_ttl_seconds", "0")).strip() or "0")
             response_cache_vary_by_client = "response_cache_vary_by_client" in form
@@ -4058,36 +4368,34 @@ class GatewayHandler(BaseHTTPRequestHandler):
             success_hook_include_response_body = "success_hook_include_response_body" in form
             success_hook_include_request_body = "success_hook_include_request_body" in form
 
-            if not service_name:
-                raise ValueError("Service name is required.")
-            if not endpoint_name:
-                raise ValueError("Endpoint name is required.")
-            if not endpoint_slug:
-                raise ValueError("Endpoint slug is required.")
+            if not route_name:
+                raise ValueError("Route name is required.")
+            if not route_slug:
+                raise ValueError("Route slug is required.")
             if not gateway_path:
                 raise ValueError("Gateway path is required.")
-            if pre_call_cache_ttl < 0:
-                raise ValueError("Pre-call cache TTL must be zero or positive.")
+            if not gateway_path.startswith("/"):
+                raise ValueError("Gateway path must start with /.")
+            if strategy not in {"single", "round_robin", "failover", "parallel_race"}:
+                raise ValueError("Route strategy must be single, round_robin, failover, or parallel_race.")
+            if strategy == "single" and len(targets) != 1:
+                raise ValueError("Single route strategy needs exactly one target.")
+            if strategy in {"round_robin", "failover", "parallel_race"} and len(targets) < 2:
+                raise ValueError(f"Route strategy {strategy} needs at least two targets.")
             if response_cache_ttl < 0:
                 raise ValueError("Response cache TTL must be zero or positive.")
             if success_hook_timeout_seconds <= 0:
                 raise ValueError("Success hook timeout must be positive.")
 
-            message = save_endpoint(
+            message = save_route(
                 runtime.config_path,
-                service_name=service_name,
-                original_name=original_name,
                 original_slug=original_slug,
-                endpoint_name=endpoint_name,
-                endpoint_slug=endpoint_slug,
+                route_name=route_name,
+                route_slug=route_slug,
                 methods=methods,
                 gateway_path=gateway_path,
-                upstream_path=upstream_path,
-                headers=headers,
-                query=query,
-                pre_call_code=pre_call_code,
-                pre_call_cache_ttl=pre_call_cache_ttl,
-                pre_call_cache_key=pre_call_cache_key,
+                strategy=strategy,
+                targets=targets,
                 output_profile=output_profile,
                 response_cache_ttl=response_cache_ttl,
                 response_cache_vary_by_client=response_cache_vary_by_client,
@@ -4105,16 +4413,11 @@ class GatewayHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             self._send_admin_mutation_error(exc)
 
-    def _handle_endpoint_delete(self) -> None:
+    def _handle_route_delete(self) -> None:
         try:
             form = self._parse_form()
-            service_name = str(form.get("service_name", "")).strip()
-            endpoint_name = str(form.get("endpoint_name", "")).strip()
-            message = delete_endpoint(
-                runtime.config_path,
-                service_name=service_name,
-                endpoint_name=endpoint_name,
-            )
+            route_slug = str(form.get("route_slug", "")).strip().lower()
+            message = delete_route(runtime.config_path, route_slug=route_slug)
             runtime.load()
             self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001

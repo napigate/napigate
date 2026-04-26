@@ -7,7 +7,9 @@ This file stores the working knowledge for the `NapiGate` project so future sess
 - Project path: repo root
 - Purpose: a lightweight, config-driven Python API gateway
 - Current goals:
-  - route incoming endpoints to upstream services or direct gateway responses
+  - route incoming gateway paths to one or more configured endpoint targets
+  - keep gateway routes separate from upstream endpoint definitions
+  - support route strategies for `single`, `round_robin`, `failover`, and `parallel_race`
   - authenticate incoming gateway clients against protected services
   - support multiple auth methods per client
   - scope each client to all services, selected services, or selected endpoints
@@ -16,8 +18,8 @@ This file stores the working knowledge for the `NapiGate` project so future sess
   - support `pre_call` hooks for downstream preparation
   - support `external_service` auth scripts for upstream client validation
   - support reusable output profiles for passthrough, JSON envelope, and JSONP responses
-  - support endpoint-level response caching
-  - support async success hooks for financial/accounting style callbacks
+  - support route-level response caching
+  - support route-level async success hooks for financial/accounting style callbacks
   - support async request-log forwarding to HTTP JSON sinks or Loki
   - expose simple request monitoring through an HTML table and a JSON endpoint
   - hot-reload config and security files without process restarts
@@ -28,6 +30,13 @@ This file stores the working knowledge for the `NapiGate` project so future sess
 - This project intentionally stays on `stdlib + requests + PyYAML`.
 - The HTTP server runs on `ThreadingHTTPServer`.
 - Services and endpoints remain config-driven.
+- Public gateway exposure is now top-level route-driven:
+  - `routes[].gateway_path`
+  - `routes[].methods`
+  - `routes[].strategy`
+  - `routes[].targets[]`
+- Endpoints are target definitions only: upstream path, headers, query, `pre_call`, or local `response`.
+- Legacy endpoint-local `gateway_path`, `output_profile`, `response_cache`, and `success_hook` are still loaded as single-target routes for migration, but new config and admin saves should write these fields under `routes[]`.
 - Client auth is now top-level and cleanly separated:
   - `client`
   - `client.access`
@@ -49,7 +58,8 @@ This file stores the working knowledge for the `NapiGate` project so future sess
   - serializes config and security data into the admin UI view-model
   - keeps page state assembly separate from template rendering
 - `gateway/runtime.py`
-  - route matching
+  - top-level route matching
+  - route target strategy execution
   - client scope resolution
   - multi-method auth matching
   - config hot reload
@@ -116,6 +126,7 @@ Current permissions:
 Top-level structure:
 
 - `clients[]`
+- `routes[]`
 - `output_profiles.<profile_slug>`
 - `observability.log_aggregators.<sink_code>`
 - `services.<service_name>`
@@ -206,16 +217,35 @@ Common:
 
 - `name`
 - `slug`
-- `methods`
-- `gateway_path`
 - `upstream_path`
 - `response`
-- `output_profile`
-- `response_cache`
-- `success_hook`
 - `headers`
 - `query`
 - `pre_call`
+
+### Route Fields
+
+- `name`
+- `slug`
+- `methods`
+- `gateway_path`
+- `strategy`
+- `targets[]`
+- `output_profile`
+- `response_cache`
+- `success_hook`
+
+### Route Target Fields
+
+- `service`
+- `endpoint`
+
+### Route Strategies
+
+- `single`
+- `round_robin`
+- `failover`
+- `parallel_race`
 
 ### Output Profile Fields
 
@@ -334,7 +364,7 @@ Common:
 ## 6.8) Output Profile Behavior
 
 - `output_profiles` are reusable top-level response contracts.
-- Endpoints opt in through `output_profile`.
+- Routes opt in through `output_profile`.
 - Supported types:
   - `passthrough`
   - `json_envelope`
@@ -346,14 +376,14 @@ Common:
 
 ## 6.9) Response Cache Behavior
 
-- `response_cache` is configured at the endpoint level.
+- `response_cache` is configured at the route level.
 - It uses an in-memory TTL cache.
 - Only successful responses are cached.
 - Cache keys include method, path, query, configured vary headers, and optionally the authenticated client slug.
 
 ## 6.10) Success Hook Behavior
 
-- `success_hook` is configured at the endpoint level.
+- `success_hook` is configured at the route level.
 - It runs asynchronously after successful responses only.
 - It is intended for downstream accounting, billing, metering, or audit callbacks.
 - Current implementation uses an in-process async queue worker rather than durable persistence.
@@ -365,6 +395,14 @@ Common:
   - `http_json`
   - `loki`
 - Request log delivery is asynchronous and best-effort.
+
+## 6.12) Route Strategy Behavior
+
+- `single` calls exactly one target.
+- `round_robin` rotates through targets in memory for each matched request.
+- `failover` tries targets in order and moves to the next target when a target is unreachable or returns HTTP 5xx.
+- `parallel_race` sends the request to all targets concurrently and returns the first healthy response under HTTP 500.
+- Route strategy state is in-process and resets on config reload or process restart.
 
 ## 7) Incoming Client Auth Behavior
 
@@ -387,6 +425,7 @@ Common:
   - `X-NapiGate-Auth-Method-Code`
   - `X-NapiGate-Auth-Method-Type`
   - `X-NapiGate-Auth-Source`
+  - `X-NapiGate-Route-Slug`
   - `X-NapiGate-Endpoint-Slug`
 
 ## 8) `external_service` Auth Behavior
@@ -432,6 +471,9 @@ Common:
   - `{{ auth.source }}`
   - `{{ auth.metadata.subject }}`
 - Other common keys:
+  - `{{ route.slug }}`
+  - `{{ route.gateway_path }}`
+  - `{{ route.strategy }}`
   - `{{ endpoint.slug }}`
   - `{{ client.slug }}`
   - `{{ path.id }}`
@@ -463,6 +505,9 @@ Common:
   - `GET /__admin/api/output-profiles/{slug}`
   - `PUT /__admin/api/output-profiles/{slug}`
   - `DELETE /__admin/api/output-profiles/{slug}`
+- Admin route form endpoints:
+  - `POST /__admin/route/save`
+  - `POST /__admin/route/delete`
 - Health endpoint:
   - `GET /__health`
 - SQLite DB:
@@ -480,6 +525,7 @@ Common:
 - Admin tabs:
   - `Live`
   - `Services`
+  - `Routes`
   - `Output`
   - `Clients`
   - `Users`
@@ -499,15 +545,14 @@ Common:
   - generated credentials from the UI
 - OAuth methods can request live tokens from the UI.
 - Services and endpoints remain modal-based CRUD.
+- Routes have their own tab and modal CRUD.
+- Endpoint forms define target behavior only; gateway path, method exposure, output profile, response cache, and success hook are configured from route forms.
 - Output profiles now have their own tab and modal CRUD.
 - Output profile forms show response shaping as pseudo-code instead of raw success/data/message/error key inputs; `passthrough` is the raw unmodified-output mode.
 - Admin forms now include inline tooltip help and examples for the visible input fields.
 - Admin modal forms include client-side validation for required fields, numbers, URLs, identifiers, obvious browser-markup injection, JSONP callback names, and output-profile pseudo-code key safety; server-side validation also rejects unsafe output envelope keys and JSONP callback values.
 - Endpoint forms now also expose:
   - slug
-  - output profile selection
-  - response cache settings
-  - success hook settings
 - Endpoint forms still preserve existing local `response` blocks, but direct-response editing remains config-first rather than fully modeled in the admin form.
 
 ## 12) Running The Project
@@ -597,6 +642,14 @@ pip install requests pyyaml
   - `/__admin/api/clients/{slug}`
   - `/__admin/api/output-profiles/{slug}`
   - `NAPIGATE_ADMIN_ACCESS_WHITELIST_IPS`
+- 2026-04-26: gateway routes were separated from endpoint targets:
+  - top-level `routes[]`
+  - route targets connected to service endpoints
+  - route strategies for `single`, `round_robin`, `failover`, and `parallel_race`
+  - route-level `output_profile`
+  - route-level `response_cache`
+  - route-level `success_hook`
+  - admin `Routes` tab
 - Verified locally:
   - `python3 -m compileall gateway`
   - `python3 -m py_compile gateway/*.py`
@@ -616,6 +669,8 @@ pip install requests pyyaml
     - client scope filtering
     - output profile envelope rendering
     - response cache hit behavior
+    - route config loading from `config/services.example.yaml`
+    - route strategy smoke test for `single`, `round_robin`, `failover`, and `parallel_race`
 
 ## 15) Maintenance Rule For Future Sessions
 
