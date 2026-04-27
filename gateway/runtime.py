@@ -25,6 +25,7 @@ from gateway.config import (
     ClientConfig,
     EndpointConfig,
     OutputProfileConfig,
+    PreCallConfig,
     ResponseCacheConfig,
     RouteConfig,
     ServiceConfig,
@@ -551,12 +552,27 @@ class GatewayRuntime:
             authenticated_client=authenticated_client,
         )
 
-        if matched.endpoint.pre_call:
+        pre_call_steps = (
+            (matched.service.pre_call, f"service:{matched.service.name}"),
+            (matched.route.pre_call, f"route:{matched.route.slug}"),
+            (matched.endpoint.pre_call, f"{matched.service.name}:{matched.endpoint.name}"),
+        )
+        for pre_call, default_cache_key in pre_call_steps:
+            if not pre_call:
+                continue
             self._run_pre_call(
                 matched=matched,
                 request=request,
                 context=context,
                 variables=variables,
+                pre_call=pre_call,
+                default_cache_key=default_cache_key,
+            )
+            context = self._build_template_context(
+                matched=matched,
+                request=request,
+                variables=variables,
+                authenticated_client=authenticated_client,
             )
 
         context = self._build_template_context(
@@ -850,18 +866,52 @@ class GatewayRuntime:
         if self._is_existing_output_envelope(parsed_body, profile):
             envelope = parsed_body
         else:
-            success_value = self._payload_value_or_default(
-                parsed_body,
-                profile.success_key,
-                response.status_code < 400,
-            )
-            success = self._success_flag(success_value)
-            message = self._payload_value_or_default(
-                parsed_body,
-                profile.message_key,
-                self._output_message_from_payload(parsed_body),
-            )
-            data_default = parsed_body if success else None
+            if profile.source_success_key:
+                success_source_value = self._payload_path_value_or_default(
+                    parsed_body,
+                    profile.source_success_key,
+                    profile.empty_value,
+                )
+                success = self._success_flag(success_source_value)
+                success_value = success
+            else:
+                success_value = self._payload_value_or_default(
+                    parsed_body,
+                    profile.success_key,
+                    response.status_code < 400,
+                )
+                success = self._success_flag(success_value)
+
+            if profile.message_source_keys:
+                message = self._first_payload_path_value_or_default(
+                    parsed_body,
+                    profile.message_source_keys,
+                    profile.empty_value,
+                )
+            else:
+                message = self._payload_value_or_default(
+                    parsed_body,
+                    profile.message_key,
+                    self._output_message_from_payload(parsed_body),
+                )
+
+            if profile.data_fields:
+                data_value = {
+                    field_name: self._payload_path_value_or_default(
+                        parsed_body,
+                        source_path,
+                        profile.empty_value,
+                    )
+                    for field_name, source_path in profile.data_fields.items()
+                }
+            else:
+                data_default = parsed_body if success else None
+                data_value = self._payload_value_or_default(
+                    parsed_body,
+                    profile.data_key,
+                    data_default,
+                )
+
             error_default = (
                 parsed_body
                 if not success and parsed_body not in (None, "")
@@ -870,16 +920,22 @@ class GatewayRuntime:
             envelope = {
                 profile.success_key: success_value,
                 profile.message_key: message,
-                profile.data_key: self._payload_value_or_default(
-                    parsed_body,
-                    profile.data_key,
-                    data_default,
-                ),
+                profile.data_key: data_value,
             }
             if not success:
-                envelope[profile.error_key] = (
-                    self._payload_value_or_default(parsed_body, profile.error_key, error_default)
-                )
+                if profile.error_source_keys:
+                    error_value = self._first_payload_path_value_or_default(
+                        parsed_body,
+                        profile.error_source_keys,
+                        profile.empty_value,
+                    )
+                else:
+                    error_value = self._payload_value_or_default(
+                        parsed_body,
+                        profile.error_key,
+                        error_default,
+                    )
+                envelope[profile.error_key] = error_value
 
         body = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
         headers = dict(response.headers)
@@ -917,6 +973,29 @@ class GatewayRuntime:
     def _payload_value_or_default(self, payload: Any, key: str, default: Any) -> Any:
         if isinstance(payload, Mapping) and key in payload and payload[key] not in (None, ""):
             return payload[key]
+        return default
+
+    def _payload_path_value_or_default(self, payload: Any, path: str, default: Any) -> Any:
+        current: Any = payload
+        for part in path.split("."):
+            if isinstance(current, Mapping) and part in current:
+                current = current[part]
+            else:
+                return default
+        if current in (None, ""):
+            return default
+        return current
+
+    def _first_payload_path_value_or_default(
+        self,
+        payload: Any,
+        paths: list[str],
+        default: Any,
+    ) -> Any:
+        for path in paths:
+            value = self._payload_path_value_or_default(payload, path, None)
+            if value not in (None, ""):
+                return value
         return default
 
     def _success_flag(self, value: Any) -> bool:
@@ -1042,12 +1121,12 @@ class GatewayRuntime:
         request: IncomingRequest,
         context: dict[str, Any],
         variables: dict[str, Any],
+        pre_call: PreCallConfig,
+        default_cache_key: str,
     ) -> None:
-        pre_call = matched.endpoint.pre_call
-        if pre_call is None:
-            return
-
-        cache_key = pre_call.cache_key or f"{matched.service.name}:{matched.endpoint.name}"
+        raw_cache_key = pre_call.cache_key or default_cache_key
+        rendered_cache_key = self.render_template(raw_cache_key, context)
+        cache_key = str(rendered_cache_key or default_cache_key)
         now = time.time()
         cached = self.pre_call_cache.get(cache_key)
         if cached and cached.expires_at > now:
@@ -1120,13 +1199,19 @@ class GatewayRuntime:
         for line in pre_call.code.splitlines():
             snippet += f"    {line}\n"
 
+        before_variables = dict(variables)
         exec(snippet, exec_globals, exec_locals)
         exec_locals["__user_pre_call__"]()
 
         if pre_call.cache_ttl_seconds > 0:
+            changed_variables = {
+                key: value
+                for key, value in variables.items()
+                if key not in before_variables or before_variables.get(key) != value
+            }
             self.pre_call_cache[cache_key] = CacheValue(
                 expires_at=now + pre_call.cache_ttl_seconds,
-                value=dict(variables),
+                value=changed_variables,
             )
 
     def _build_template_context(

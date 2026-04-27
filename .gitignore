@@ -5,6 +5,7 @@ __pycache__/
 .env
 config/services.yaml
 config/security.yaml
+config/test.yaml
 logs/*
 !logs/.gitkeep
 data/*

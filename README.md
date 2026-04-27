@@ -296,6 +296,7 @@ Services remain fully config-driven:
 - `trust_env_proxy`
 - `variables`
 - `headers`
+- `pre_call`
 - `auth.required`
 - `cors`
 - `rate_limit`
@@ -319,6 +320,7 @@ Route fields:
 - `gateway_path`
 - `strategy`
 - `targets[]`
+- `pre_call`
 - `output_profile`
 - `response_cache`
 - `success_hook`
@@ -395,6 +397,11 @@ Common output profile fields:
 - `message_key`
 - `error_key`
 - `passthrough_keys[]`
+- `source_success_key`
+- `message_source_keys[]`
+- `error_source_keys[]`
+- `data_fields`
+- `empty_value`
 - `jsonp_callback_param`
 - `jsonp_default_callback`
 - `headers`
@@ -403,6 +410,8 @@ Common output profile fields:
 
 - If the upstream JSON already contains the configured `passthrough_keys`, NapiGate does not wrap it again.
 - Otherwise, the payload is placed into `data_key`.
+- `source_success_key`, `message_source_keys`, `error_source_keys`, and `data_fields` can map an upstream response into a stable envelope such as `success`, `message`, `data`, and `error`.
+- Missing or null mapped values use `empty_value`.
 - Non-JSON binary/image responses should normally stay on `passthrough`.
 
 ### Response Caching
@@ -521,7 +530,7 @@ Allowed `scope` values:
 
 ### `pre_call`
 
-`pre_call.code` is trusted Python executed synchronously before the upstream request.
+`pre_call.code` is trusted Python executed synchronously before the upstream request. It can be defined on a service, route, or endpoint, and NapiGate runs those hooks in service, route, endpoint order.
 
 Helpers available:
 
@@ -545,6 +554,8 @@ Caching:
 
 - `pre_call.cache_ttl_seconds`
 - `pre_call.cache_key`
+
+The cache stores variables changed by that specific hook. If `cache_key` is omitted, NapiGate uses a default key scoped to the service, route, or endpoint that owns the hook.
 
 ### `external_service`
 

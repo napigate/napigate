@@ -30,13 +30,21 @@ def serialize_success_hook(source: dict[str, Any] | None) -> dict[str, Any] | No
     }
 
 
+def serialize_pre_call(source: dict[str, Any] | None) -> dict[str, Any]:
+    pre_call = source or {}
+    return {
+        "code": str(pre_call.get("code", "")),
+        "cache_ttl_seconds": int(pre_call.get("cache_ttl_seconds", 0) or 0),
+        "cache_key": str(pre_call.get("cache_key", "")),
+    }
+
+
 def serialize_services(document: dict[str, Any]) -> list[dict[str, Any]]:
     services_state: list[dict[str, Any]] = []
     services = document.get("services") or {}
     for service_name, service_data in services.items():
         endpoints_state = []
         for endpoint in service_data.get("endpoints") or []:
-            pre_call = endpoint.get("pre_call") or {}
             response = endpoint.get("response")
             endpoints_state.append(
                 {
@@ -45,11 +53,7 @@ def serialize_services(document: dict[str, Any]) -> list[dict[str, Any]]:
                     "upstream_path": str(endpoint.get("upstream_path", "")),
                     "headers": endpoint.get("headers") or {},
                     "query": endpoint.get("query") or {},
-                    "pre_call": {
-                        "code": str(pre_call.get("code", "")),
-                        "cache_ttl_seconds": int(pre_call.get("cache_ttl_seconds", 0) or 0),
-                        "cache_key": str(pre_call.get("cache_key", "")),
-                    },
+                    "pre_call": serialize_pre_call(endpoint.get("pre_call")),
                     "response": (
                         {
                             "status_code": int(response.get("status_code", 200) or 200),
@@ -72,6 +76,7 @@ def serialize_services(document: dict[str, Any]) -> list[dict[str, Any]]:
                 "trust_env_proxy": bool(service_data.get("trust_env_proxy", False)),
                 "variables": service_data.get("variables") or {},
                 "headers": service_data.get("headers") or {},
+                "pre_call": serialize_pre_call(service_data.get("pre_call")),
                 "auth": {
                     "required": bool((service_data.get("auth") or {}).get("required", False))
                 },
@@ -120,6 +125,7 @@ def serialize_routes(document: dict[str, Any]) -> list[dict[str, Any]]:
                         if isinstance(target, dict)
                     ],
                     "output_profile": str(route.get("output_profile", "") or ""),
+                    "pre_call": serialize_pre_call(route.get("pre_call")),
                     "response_cache": serialize_response_cache(route.get("response_cache")),
                     "success_hook": serialize_success_hook(route.get("success_hook")),
                 }
@@ -140,6 +146,7 @@ def serialize_routes(document: dict[str, Any]) -> list[dict[str, Any]]:
                     "strategy": "single",
                     "targets": [{"service": str(service_name), "endpoint": name}],
                     "output_profile": str(endpoint.get("output_profile", "") or ""),
+                    "pre_call": serialize_pre_call(endpoint.get("pre_call")),
                     "response_cache": serialize_response_cache(endpoint.get("response_cache")),
                     "success_hook": serialize_success_hook(endpoint.get("success_hook")),
                 }
@@ -221,6 +228,11 @@ def serialize_output_profiles(document: dict[str, Any]) -> list[dict[str, Any]]:
                 "message_key": str(profile.get("message_key", "message") or "message"),
                 "error_key": str(profile.get("error_key", "error") or "error"),
                 "passthrough_keys": list(profile.get("passthrough_keys") or []),
+                "source_success_key": str(profile.get("source_success_key", "") or ""),
+                "message_source_keys": list(profile.get("message_source_keys") or []),
+                "error_source_keys": list(profile.get("error_source_keys") or []),
+                "data_fields": profile.get("data_fields") or {},
+                "empty_value": profile.get("empty_value", ""),
                 "jsonp_callback_param": str(profile.get("jsonp_callback_param", "callback") or "callback"),
                 "jsonp_default_callback": str(profile.get("jsonp_default_callback", "callback") or "callback"),
                 "headers": profile.get("headers") or {},

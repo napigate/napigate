@@ -9,3 +9,4 @@ data
 logs
 config/services.yaml
 config/security.yaml
+config/test.yaml

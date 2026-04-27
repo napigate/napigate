@@ -208,6 +208,7 @@ Common:
 - `trust_env_proxy`
 - `variables`
 - `headers`
+- `pre_call`
 - `auth.required`
 - `cors`
 - `rate_limit`
@@ -231,6 +232,7 @@ Common:
 - `gateway_path`
 - `strategy`
 - `targets[]`
+- `pre_call`
 - `output_profile`
 - `response_cache`
 - `success_hook`
@@ -257,6 +259,11 @@ Common:
 - `message_key`
 - `error_key`
 - `passthrough_keys[]`
+- `source_success_key`
+- `message_source_keys[]`
+- `error_source_keys[]`
+- `data_fields`
+- `empty_value`
 - `jsonp_callback_param`
 - `jsonp_default_callback`
 - `headers`
@@ -315,7 +322,9 @@ Common:
 ## 6) `pre_call` Behavior
 
 - `pre_call.code` is trusted Python.
-- It runs synchronously.
+- It can be configured on a service, route, or endpoint.
+- Execution order is service `pre_call`, then route `pre_call`, then endpoint `pre_call`.
+- Each `pre_call` runs synchronously before proxying or returning a local response.
 - Helpers available:
   - `call(method, url, **kwargs)`
   - `set_var(name, value)`
@@ -332,8 +341,9 @@ Common:
   - `datetime`
   - `base64`
   - `hashlib`
-- `pre_call.cache_ttl_seconds` enables in-memory caching.
+- `pre_call.cache_ttl_seconds` enables in-memory caching of variables changed by that hook.
 - `pre_call.cache_key` can override the default key.
+- Default cache keys are service-scoped, route-scoped, or endpoint-scoped based on where the hook is configured.
 
 ## 6.5) Local Response Behavior
 
@@ -372,6 +382,7 @@ Common:
 - `passthrough` returns the upstream or local response body unchanged, while still allowing profile headers to be merged.
 - `json_envelope` does not double-wrap payloads that already contain the configured `passthrough_keys`.
 - When `json_envelope` builds an envelope, it uses existing response values such as `success`, `data`, `message`, and `error` when present, and falls back to HTTP status, the raw body, inferred messages, or generated errors when they are missing.
+- `json_envelope` can also map upstream keys into the standard envelope through `source_success_key`, `message_source_keys`, `error_source_keys`, and `data_fields`; missing or null mapped values become `empty_value`.
 - Image and opaque binary responses should usually stay on `passthrough`.
 
 ## 6.9) Response Cache Behavior
@@ -669,6 +680,13 @@ pip install requests pyyaml
   - `docker-compose.yml` now runs `NAPIGATE_IMAGE`
   - `docker-compose.build.yml` owns local image builds
   - `.github/workflows/docker-image.yml` publishes to Docker Hub when Docker Hub secrets are configured
+- 2026-04-27: `json_envelope` output profiles gained source-key mapping for upstream payloads:
+  - `source_success_key`
+  - `message_source_keys`
+  - `error_source_keys`
+  - `data_fields`
+  - `empty_value`
+- 2026-04-27: `pre_call` became available at service, route, and endpoint levels and now runs in that order.
 - Verified locally:
   - `python3 -m compileall gateway`
   - `python3 -m py_compile gateway/*.py`
@@ -688,6 +706,7 @@ pip install requests pyyaml
     - client scope filtering
     - output profile envelope rendering
     - response cache hit behavior
+    - output profile source-key mapping behavior
     - route config loading from `config/services.example.yaml`
     - route strategy smoke test for `single`, `round_robin`, `failover`, and `parallel_race`
 

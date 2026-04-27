@@ -25,6 +25,22 @@ def build_status_query(*, message: str = "", error: str = "") -> str:
     return f"/__admin?{encoded}"
 
 
+def _build_pre_call_payload(
+    *,
+    code: str,
+    cache_ttl: int,
+    cache_key: str,
+) -> dict[str, Any] | None:
+    if not code:
+        return None
+    payload: dict[str, Any] = {"code": code}
+    if cache_ttl > 0:
+        payload["cache_ttl_seconds"] = cache_ttl
+    if cache_key:
+        payload["cache_key"] = cache_key
+    return payload
+
+
 def save_service(
     config_path: Path,
     *,
@@ -36,6 +52,9 @@ def save_service(
     trust_env_proxy: bool,
     variables: dict[str, Any],
     headers: dict[str, Any],
+    pre_call_code: str,
+    pre_call_cache_ttl: int,
+    pre_call_cache_key: str,
     auth_required: bool,
     cors_enabled: bool,
     cors_allow_origins: list[str],
@@ -74,6 +93,13 @@ def save_service(
         payload["variables"] = variables
     if headers:
         payload["headers"] = headers
+    pre_call_payload = _build_pre_call_payload(
+        code=pre_call_code,
+        cache_ttl=pre_call_cache_ttl,
+        cache_key=pre_call_cache_key,
+    )
+    if pre_call_payload:
+        payload["pre_call"] = pre_call_payload
     if cors_enabled:
         payload["cors"] = {
             "enabled": True,
@@ -304,12 +330,12 @@ def save_endpoint(
         payload["query"] = query
     else:
         payload.pop("query", None)
-    if pre_call_code:
-        pre_call_payload: dict[str, Any] = {"code": pre_call_code}
-        if pre_call_cache_ttl > 0:
-            pre_call_payload["cache_ttl_seconds"] = pre_call_cache_ttl
-        if pre_call_cache_key:
-            pre_call_payload["cache_key"] = pre_call_cache_key
+    pre_call_payload = _build_pre_call_payload(
+        code=pre_call_code,
+        cache_ttl=pre_call_cache_ttl,
+        cache_key=pre_call_cache_key,
+    )
+    if pre_call_payload:
         payload["pre_call"] = pre_call_payload
     else:
         payload.pop("pre_call", None)
@@ -344,6 +370,9 @@ def save_route(
     gateway_path: str,
     strategy: str,
     targets: list[dict[str, Any]],
+    pre_call_code: str,
+    pre_call_cache_ttl: int,
+    pre_call_cache_key: str,
     output_profile: str,
     response_cache_ttl: int,
     response_cache_vary_by_client: bool,
@@ -369,6 +398,13 @@ def save_route(
     }
     if output_profile:
         payload["output_profile"] = output_profile
+    pre_call_payload = _build_pre_call_payload(
+        code=pre_call_code,
+        cache_ttl=pre_call_cache_ttl,
+        cache_key=pre_call_cache_key,
+    )
+    if pre_call_payload:
+        payload["pre_call"] = pre_call_payload
     if response_cache_ttl > 0:
         payload["response_cache"] = {
             "enabled": True,

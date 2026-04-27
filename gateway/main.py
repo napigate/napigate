@@ -2048,6 +2048,7 @@ def render_admin_page(
                         <span class="tag">${{scopedClientsCount(service.name)}} scoped client(s)</span>
                         <span class="tag ${{service.verify_ssl ? 'ok' : 'warn'}}">SSL ${{service.verify_ssl ? 'On' : 'Off'}}</span>
                         <span class="tag ${{service.trust_env_proxy ? 'warn' : 'ok'}}">Proxy ${{service.trust_env_proxy ? 'Env' : 'Direct'}}</span>
+                        ${{service.pre_call?.code ? '<span class="tag warn">pre_call</span>' : ''}}
                         <span class="tag ${{service.cors?.enabled ? 'ok' : ''}}">CORS ${{service.cors?.enabled ? 'On' : 'Off'}}</span>
                         <span class="tag ${{service.rate_limit?.enabled ? 'warn' : ''}}">Rate Limit ${{service.rate_limit?.enabled ? `${{service.rate_limit.requests}}/${{service.rate_limit.window_seconds}}s` : 'Off'}}</span>
                       </td>
@@ -2206,6 +2207,7 @@ def render_admin_page(
                             ? '<span class="tag ok">Hook</span>'
                             : ''
                         }}
+                        ${{route.pre_call?.code ? '<span class="tag warn">pre_call</span>' : ''}}
                       </td>
                       <td>
                         <div class="actions">
@@ -2515,6 +2517,18 @@ def render_admin_page(
                 <span>Headers (JSON/YAML Mapping)</span>
                 <textarea name="headers_yaml">${{esc(jsonText(service?.headers || {{}}))}}</textarea>
               </label>
+              <label data-help="pre_call_cache_ttl_seconds">
+                <span>Pre-call Cache TTL</span>
+                <input name="pre_call_cache_ttl_seconds" type="number" min="0" value="${{esc(String(service?.pre_call?.cache_ttl_seconds ?? 0))}}">
+              </label>
+              <label data-help="pre_call_cache_key">
+                <span>Pre-call Cache Key</span>
+                <input name="pre_call_cache_key" value="${{esc(service?.pre_call?.cache_key || "")}}">
+              </label>
+              <label class="full" data-help="pre_call_code">
+                <span>Pre-call Code</span>
+                <textarea name="pre_call_code">${{esc(service?.pre_call?.code || "")}}</textarea>
+              </label>
               <label class="check-item" data-help="auth_required">
                 <input type="checkbox" name="auth_required" ${{service?.auth?.required ? "checked" : ""}}>
                 <div>
@@ -2816,6 +2830,18 @@ def render_admin_page(
                 <span style="display:block; font-weight:700; margin-bottom:8px;">Targets</span>
                 ${{targetOptions ? `<div class="scope-grid">${{targetOptions}}</div>` : '<div class="empty">Create a service endpoint first.</div>'}}
               </div>
+              <label data-help="pre_call_cache_ttl_seconds">
+                <span>Pre-call Cache TTL</span>
+                <input name="pre_call_cache_ttl_seconds" type="number" min="0" value="${{esc(String(route?.pre_call?.cache_ttl_seconds ?? 0))}}">
+              </label>
+              <label data-help="pre_call_cache_key">
+                <span>Pre-call Cache Key</span>
+                <input name="pre_call_cache_key" value="${{esc(route?.pre_call?.cache_key || "")}}">
+              </label>
+              <label class="full" data-help="pre_call_code">
+                <span>Pre-call Code</span>
+                <textarea name="pre_call_code">${{esc(route?.pre_call?.code || "")}}</textarea>
+              </label>
               <div class="full detail-box">
                 <pre class="pseudo-code"><code>single:        call targets[0]
 round_robin:   call next target for each request
@@ -4149,6 +4175,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
             timeout_seconds = float(str(form.get("timeout_seconds", "30")).strip() or "30")
             variables = self._parse_yaml_mapping(str(form.get("variables_yaml", "")), "Variables")
             headers = self._parse_yaml_mapping(str(form.get("headers_yaml", "")), "Headers")
+            pre_call_code = str(form.get("pre_call_code", "")).rstrip()
+            pre_call_cache_ttl = int(str(form.get("pre_call_cache_ttl_seconds", "0")).strip() or "0")
+            pre_call_cache_key = str(form.get("pre_call_cache_key", "")).strip()
             cors_allow_origins = self._parse_name_list(str(form.get("cors_allow_origins", "")))
             cors_allow_methods = [
                 item.upper() for item in self._parse_name_list(str(form.get("cors_allow_methods", "")))
@@ -4170,6 +4199,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 raise ValueError("Base URL is required.")
             if timeout_seconds < 0:
                 raise ValueError("Timeout seconds must be zero or positive.")
+            if pre_call_cache_ttl < 0:
+                raise ValueError("Pre-call cache TTL must be zero or positive.")
             if cors_max_age_seconds < 0:
                 raise ValueError("CORS max age must be zero or positive.")
             if "rate_limit_enabled" in form:
@@ -4190,6 +4221,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 trust_env_proxy="trust_env_proxy" in form,
                 variables=variables,
                 headers=headers,
+                pre_call_code=pre_call_code,
+                pre_call_cache_ttl=pre_call_cache_ttl,
+                pre_call_cache_key=pre_call_cache_key,
                 auth_required="auth_required" in form,
                 cors_enabled="cors_enabled" in form,
                 cors_allow_origins=cors_allow_origins,
@@ -4348,6 +4382,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                         targets.append(target)
 
             output_profile = str(form.get("output_profile", "")).strip().lower()
+            pre_call_code = str(form.get("pre_call_code", "")).rstrip()
+            pre_call_cache_ttl = int(str(form.get("pre_call_cache_ttl_seconds", "0")).strip() or "0")
+            pre_call_cache_key = str(form.get("pre_call_cache_key", "")).strip()
             response_cache_ttl = int(str(form.get("response_cache_ttl_seconds", "0")).strip() or "0")
             response_cache_vary_by_client = "response_cache_vary_by_client" in form
             response_cache_vary_headers = self._parse_name_list(
@@ -4382,6 +4419,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 raise ValueError("Single route strategy needs exactly one target.")
             if strategy in {"round_robin", "failover", "parallel_race"} and len(targets) < 2:
                 raise ValueError(f"Route strategy {strategy} needs at least two targets.")
+            if pre_call_cache_ttl < 0:
+                raise ValueError("Pre-call cache TTL must be zero or positive.")
             if response_cache_ttl < 0:
                 raise ValueError("Response cache TTL must be zero or positive.")
             if success_hook_timeout_seconds <= 0:
@@ -4396,6 +4435,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 gateway_path=gateway_path,
                 strategy=strategy,
                 targets=targets,
+                pre_call_code=pre_call_code,
+                pre_call_cache_ttl=pre_call_cache_ttl,
+                pre_call_cache_key=pre_call_cache_key,
                 output_profile=output_profile,
                 response_cache_ttl=response_cache_ttl,
                 response_cache_vary_by_client=response_cache_vary_by_client,

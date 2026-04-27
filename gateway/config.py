@@ -68,6 +68,11 @@ class OutputProfileConfig:
     message_key: str = "message"
     error_key: str = "error"
     passthrough_keys: list[str] = field(default_factory=list)
+    source_success_key: str | None = None
+    message_source_keys: list[str] = field(default_factory=list)
+    error_source_keys: list[str] = field(default_factory=list)
+    data_fields: dict[str, str] = field(default_factory=dict)
+    empty_value: Any = ""
     jsonp_callback_param: str = "callback"
     jsonp_default_callback: str = "callback"
     headers: dict[str, Any] = field(default_factory=dict)
@@ -178,6 +183,7 @@ class RouteConfig:
     gateway_path: str
     strategy: str = "single"
     targets: list[RouteTargetConfig] = field(default_factory=list)
+    pre_call: PreCallConfig | None = None
     output_profile: str | None = None
     response_cache: ResponseCacheConfig = field(default_factory=ResponseCacheConfig)
     success_hook: SuccessHookConfig | None = None
@@ -194,6 +200,7 @@ class ServiceConfig:
     trust_env_proxy: bool = False
     variables: dict[str, Any] = field(default_factory=dict)
     headers: dict[str, Any] = field(default_factory=dict)
+    pre_call: PreCallConfig | None = None
     auth: RouteAuthConfig = field(default_factory=RouteAuthConfig)
     cors: CorsConfig = field(default_factory=CorsConfig)
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
@@ -387,6 +394,26 @@ def _load_response_cache_config(value: Any, *, label: str) -> ResponseCacheConfi
     )
 
 
+def _load_pre_call_config(value: Any, *, label: str) -> PreCallConfig | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a mapping.")
+
+    code = str(value.get("code", "")).rstrip()
+    if not code:
+        raise ValueError(f"{label} needs code.")
+
+    pre_call = PreCallConfig(
+        code=code,
+        cache_ttl_seconds=int(value.get("cache_ttl_seconds", 0) or 0),
+        cache_key=str(value.get("cache_key", "")).strip() or None,
+    )
+    if pre_call.cache_ttl_seconds < 0:
+        raise ValueError(f"{label} must use a non-negative cache_ttl_seconds.")
+    return pre_call
+
+
 def _load_output_profile(
     value: Any,
     *,
@@ -408,6 +435,22 @@ def _load_output_profile(
         value.get("passthrough_keys", []),
         label=f"{label}.passthrough_keys",
     )
+    message_source_keys = _normalize_string_list(
+        value.get("message_source_keys", []),
+        label=f"{label}.message_source_keys",
+    )
+    error_source_keys = _normalize_string_list(
+        value.get("error_source_keys", []),
+        label=f"{label}.error_source_keys",
+    )
+    data_fields_raw = value.get("data_fields") or {}
+    if not isinstance(data_fields_raw, dict):
+        raise ValueError(f"{label}.data_fields must be a mapping.")
+    data_fields = {
+        str(field_name).strip(): str(source_path).strip()
+        for field_name, source_path in data_fields_raw.items()
+        if str(field_name).strip() and str(source_path).strip()
+    }
     return OutputProfileConfig(
         slug=_normalize_slug(slug, label=f"{label} slug", fallback=slug),
         title=str(value.get("title", slug)).strip() or slug,
@@ -418,6 +461,11 @@ def _load_output_profile(
         message_key=str(value.get("message_key", "message")).strip() or "message",
         error_key=str(value.get("error_key", "error")).strip() or "error",
         passthrough_keys=passthrough_keys,
+        source_success_key=str(value.get("source_success_key", "")).strip() or None,
+        message_source_keys=message_source_keys,
+        error_source_keys=error_source_keys,
+        data_fields=data_fields,
+        empty_value=value.get("empty_value", ""),
         jsonp_callback_param=str(value.get("jsonp_callback_param", "callback")).strip()
         or "callback",
         jsonp_default_callback=str(value.get("jsonp_default_callback", "callback")).strip()
@@ -812,6 +860,10 @@ def _load_services_block(
             trust_env_proxy=bool(service_data.get("trust_env_proxy", False)),
             variables=dict(service_data.get("variables") or {}),
             headers=dict(service_data.get("headers") or {}),
+            pre_call=_load_pre_call_config(
+                service_data.get("pre_call"),
+                label=f"pre_call for service '{service_name}'",
+            ),
             auth=_load_route_auth(
                 service_data.get("auth"),
                 label=f"Service '{service_name}' auth",
@@ -867,27 +919,10 @@ def _load_services_block(
                     f"Endpoint '{name}' in service '{service_name}' needs upstream_path or response."
                 )
 
-            pre_call_data = endpoint_data.get("pre_call")
-            pre_call = None
-            if pre_call_data is not None:
-                if not isinstance(pre_call_data, dict):
-                    raise ValueError(
-                        f"pre_call for endpoint '{name}' in service '{service_name}' must be a mapping."
-                    )
-                code = str(pre_call_data.get("code", "")).rstrip()
-                if not code:
-                    raise ValueError(
-                        f"pre_call for endpoint '{name}' in service '{service_name}' needs code."
-                    )
-                pre_call = PreCallConfig(
-                    code=code,
-                    cache_ttl_seconds=int(pre_call_data.get("cache_ttl_seconds", 0) or 0),
-                    cache_key=str(pre_call_data.get("cache_key", "")).strip() or None,
-                )
-                if pre_call.cache_ttl_seconds < 0:
-                    raise ValueError(
-                        f"pre_call for endpoint '{name}' in service '{service_name}' must use a non-negative cache_ttl_seconds."
-                    )
+            pre_call = _load_pre_call_config(
+                endpoint_data.get("pre_call"),
+                label=f"pre_call for endpoint '{name}' in service '{service_name}'",
+            )
 
             output_profile = str(endpoint_data.get("output_profile", "")).strip().lower() or None
             if output_profile is not None and output_profile not in output_profiles:
@@ -1014,6 +1049,7 @@ def _load_routes_block(
                     gateway_path=endpoint.gateway_path,
                     strategy="single",
                     targets=[RouteTargetConfig(service=service.name, endpoint=endpoint.name)],
+                    pre_call=None,
                     output_profile=endpoint.output_profile,
                     response_cache=endpoint.response_cache,
                     success_hook=endpoint.success_hook,
@@ -1071,6 +1107,11 @@ def _load_routes_block(
         if output_profile is not None and output_profile not in output_profiles:
             raise ValueError(f"Route '{name}' references unknown output_profile '{output_profile}'.")
 
+        pre_call = _load_pre_call_config(
+            route_data.get("pre_call"),
+            label=f"pre_call for route '{name}'",
+        )
+
         response_cache = _load_response_cache_config(
             route_data.get("response_cache"),
             label=f"response_cache for route '{name}'",
@@ -1090,6 +1131,7 @@ def _load_routes_block(
                 gateway_path=gateway_path,
                 strategy=strategy,
                 targets=targets,
+                pre_call=pre_call,
                 output_profile=output_profile,
                 response_cache=response_cache,
                 success_hook=success_hook,
