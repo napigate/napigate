@@ -1,17 +1,7 @@
 services:
   app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        UID: ${UID:-1000}
-        GID: ${GID:-1000}
-        CURRENT_USER: ${CURRENT_USER:-app}
-        CURRENT_GROUP: ${CURRENT_GROUP:-app}
-        APP_TIMEZONE: ${APP_TIMEZONE:-UTC}
-        DEBIAN_MIRROR_URL: ${DEBIAN_MIRROR_URL}
-        DEBIAN_SECURITY_MIRROR_URL: ${DEBIAN_SECURITY_MIRROR_URL}
-        PIP_INDEX_URL: ${PIP_INDEX_URL}
+    image: ${NAPIGATE_IMAGE:-napigate/napigate:latest}
+    pull_policy: ${NAPIGATE_PULL_POLICY:-missing}
     container_name: napigate
     env_file: .env
     environment:

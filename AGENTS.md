@@ -571,9 +571,17 @@ Docker:
 cp .env.example .env
 cp config/services.example.yaml config/services.yaml
 cp config/security.example.yaml config/security.yaml
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
+- `docker-compose.yml` runs `NAPIGATE_IMAGE` and does not build during normal startup.
+- `docker-compose.build.yml` is the explicit local build/publish override.
+- Manual Docker Hub publish:
+  - `docker login`
+  - `NAPIGATE_IMAGE=your-dockerhub-username/napigate:0.1.0 docker compose -f docker-compose.yml -f docker-compose.build.yml build app`
+  - `NAPIGATE_IMAGE=your-dockerhub-username/napigate:0.1.0 docker compose -f docker-compose.yml -f docker-compose.build.yml push app`
+- GitHub Actions workflow `.github/workflows/docker-image.yml` publishes `napigate/napigate:latest` from `main` and semantic version tags from `v*.*.*` tags when `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets are configured; change workflow `IMAGE_NAME` if the Docker Hub namespace is different.
 - Compose mounts:
   - `./config:/code/config`
   - `./data:/code/data`
@@ -591,6 +599,8 @@ pip install requests pyyaml
 - `trust_env_proxy` defaults to `false`.
 - `config/services.yaml` must stay local.
 - `.env` must stay local.
+- `NAPIGATE_IMAGE` selects the runtime image for Compose.
+- `NAPIGATE_PULL_POLICY` controls whether Compose pulls the runtime image.
 - Shared template changes go to `config/services.example.yaml`.
 - `config/services.yaml` and `config/security.yaml` are reloaded automatically when their on-disk contents change.
 - Container runtime user settings come from `.env`:
@@ -598,6 +608,11 @@ pip install requests pyyaml
   - `GID`
   - `CURRENT_USER`
   - `CURRENT_GROUP`
+- Container image build user settings come from `.env` when using `docker-compose.build.yml`:
+  - `NAPIGATE_IMAGE_UID`
+  - `NAPIGATE_IMAGE_GID`
+  - `NAPIGATE_IMAGE_USER`
+  - `NAPIGATE_IMAGE_GROUP`
 - `NAPIGATE_ADMIN_USERNAME` and `NAPIGATE_ADMIN_PASSWORD` protect both monitor and admin pages.
 - `NAPIGATE_ADMIN_ACCESS_WHITELIST_IPS` restricts `/__admin` UI and admin API requests to comma-separated IP/CIDR ranges when set.
 - `NAPIGATE_SECURITY_CONFIG` can override the default security file path.
@@ -650,6 +665,10 @@ pip install requests pyyaml
   - route-level `response_cache`
   - route-level `success_hook`
   - admin `Routes` tab
+- 2026-04-27: Docker runtime and image publishing were separated:
+  - `docker-compose.yml` now runs `NAPIGATE_IMAGE`
+  - `docker-compose.build.yml` owns local image builds
+  - `.github/workflows/docker-image.yml` publishes to Docker Hub when Docker Hub secrets are configured
 - Verified locally:
   - `python3 -m compileall gateway`
   - `python3 -m py_compile gateway/*.py`

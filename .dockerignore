@@ -8,3 +8,4 @@ __pycache__
 data
 logs
 config/services.yaml
+config/security.yaml

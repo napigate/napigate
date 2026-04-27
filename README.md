@@ -69,7 +69,9 @@ The runtime uses `ThreadingHTTPServer` and keeps the gateway model intentionally
 │   ├── security.py
 │   └── settings.py
 ├── Dockerfile
+├── docker-compose.build.yml
 ├── docker-compose.yml
+├── .github/workflows/docker-image.yml
 └── pyproject.toml
 ```
 
@@ -134,17 +136,44 @@ cp config/security.example.yaml config/security.yaml
 2. Start the container:
 
 ```bash
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
 The default container port is controlled by `APP_PORT` in `.env`.
+`docker-compose.yml` runs the published image from `NAPIGATE_IMAGE` and does not build from the local Dockerfile during normal startup.
 
 Compose mounts `config/`, `data/`, and `logs/` into the container. Changes to `config/services.yaml` and `config/security.yaml` are detected automatically by the running process, so Docker restart cycles are not required for routine config edits.
+
+### Docker Hub Image
+
+The default image is `napigate/napigate:latest`. Override it in `.env` when publishing under another Docker Hub namespace or when pinning a release:
+
+```dotenv
+NAPIGATE_IMAGE=your-dockerhub-username/napigate:0.1.0
+NAPIGATE_PULL_POLICY=missing
+```
+
+Build and push a release image explicitly with the build override:
+
+```bash
+docker login
+NAPIGATE_IMAGE=your-dockerhub-username/napigate:0.1.0 docker compose -f docker-compose.yml -f docker-compose.build.yml build app
+NAPIGATE_IMAGE=your-dockerhub-username/napigate:0.1.0 docker compose -f docker-compose.yml -f docker-compose.build.yml push app
+```
+
+For automated publishing, configure the GitHub repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`. The workflow in `.github/workflows/docker-image.yml` pushes `napigate/napigate:latest` from `main` and version tags from `v*.*.*` tags; change `IMAGE_NAME` in that workflow if the Docker Hub namespace is different.
 
 ### Important `.env` Variables
 
 See [`.env.example`](.env.example) for the full template.
 
+- `NAPIGATE_IMAGE`
+- `NAPIGATE_PULL_POLICY`
+- `NAPIGATE_IMAGE_USER`
+- `NAPIGATE_IMAGE_GROUP`
+- `NAPIGATE_IMAGE_UID`
+- `NAPIGATE_IMAGE_GID`
 - `APP_PORT`
 - `APP_TIMEZONE`
 - `NAPIGATE_CONFIG`

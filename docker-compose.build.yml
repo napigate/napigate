@@ -1,0 +1,14 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        UID: ${NAPIGATE_IMAGE_UID:-1000}
+        GID: ${NAPIGATE_IMAGE_GID:-1000}
+        CURRENT_USER: ${NAPIGATE_IMAGE_USER:-app}
+        CURRENT_GROUP: ${NAPIGATE_IMAGE_GROUP:-app}
+        APP_TIMEZONE: ${APP_TIMEZONE:-UTC}
+        DEBIAN_MIRROR_URL: ${DEBIAN_MIRROR_URL}
+        DEBIAN_SECURITY_MIRROR_URL: ${DEBIAN_SECURITY_MIRROR_URL}
+        PIP_INDEX_URL: ${PIP_INDEX_URL}
