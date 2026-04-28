@@ -214,6 +214,7 @@ class GatewayConfig:
     routes: list[RouteConfig] = field(default_factory=list)
     output_profiles: dict[str, OutputProfileConfig] = field(default_factory=dict)
     log_aggregators: list[LogAggregatorConfig] = field(default_factory=list)
+    log_retention_hours: int | None = None
 
 
 def compile_gateway_path(pattern: str) -> re.Pattern[str]:
@@ -562,6 +563,21 @@ def _load_log_aggregators_block(observability_block: Any) -> list[LogAggregatorC
         _load_log_aggregator(value, code=str(code))
         for code, value in aggregators_block.items()
     ]
+
+
+def _load_log_retention_hours(observability_block: Any) -> int | None:
+    if observability_block in (None, {}):
+        return None
+    if not isinstance(observability_block, dict):
+        raise ValueError("Config 'observability' must be a mapping.")
+
+    raw_value = observability_block.get("log_retention_hours")
+    if raw_value in (None, "", 0, "0"):
+        return None
+    retention_hours = int(raw_value)
+    if retention_hours < 0:
+        raise ValueError("Config 'observability.log_retention_hours' must be zero or positive.")
+    return retention_hours or None
 
 
 def _validate_ip_allowlist(ip_allowlist: list[str], *, label: str) -> list[str]:
@@ -1102,7 +1118,9 @@ def load_gateway_config(config_path: Path | str = CONFIG_PATH) -> GatewayConfig:
     raw = load_config_document(config_path)
     clients = _load_clients_block(raw.get("clients"))
     output_profiles = _load_output_profiles_block(raw.get("output_profiles"))
-    log_aggregators = _load_log_aggregators_block(raw.get("observability"))
+    observability = raw.get("observability")
+    log_aggregators = _load_log_aggregators_block(observability)
+    log_retention_hours = _load_log_retention_hours(observability)
     services = _load_services_block(
         raw.get("services") or {},
         output_profiles=output_profiles,
@@ -1118,6 +1136,7 @@ def load_gateway_config(config_path: Path | str = CONFIG_PATH) -> GatewayConfig:
         routes=routes,
         output_profiles=output_profiles,
         log_aggregators=log_aggregators,
+        log_retention_hours=log_retention_hours,
     )
 
 

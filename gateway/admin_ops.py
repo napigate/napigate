@@ -146,6 +146,26 @@ def _clear_output_profile_references(document: dict[str, Any], *, profile_slug: 
             route.pop("output_profile", None)
 
 
+def save_gateway_settings(
+    config_path: Path,
+    *,
+    log_retention_hours: int | None,
+) -> str:
+    document = load_config_document(config_path)
+    observability = document.get("observability")
+    if not isinstance(observability, dict):
+        observability = {}
+        document["observability"] = observability
+
+    if log_retention_hours is None:
+        observability.pop("log_retention_hours", None)
+    else:
+        observability["log_retention_hours"] = int(log_retention_hours)
+
+    save_config_document(config_path, document)
+    return "Gateway settings saved."
+
+
 def save_service(
     config_path: Path,
     *,

@@ -118,6 +118,9 @@ output_profiles:
     jsonp_default_callback: callback
 
 observability:
+  # Leave unset for unlimited retention. When set, monitor rows and rotated
+  # file logs older than this many hours are deleted by an hourly cleanup job.
+  log_retention_hours: 168
   log_aggregators:
     audit_loki:
       enabled: false

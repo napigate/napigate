@@ -16,7 +16,7 @@ NapiGate is a lightweight, config-driven Python API gateway built for small and 
 - optional structured request-log forwarding to HTTP JSON sinks or Loki
 - Built-in monitor UI, JSON logs endpoint, and live stream
 - File-backed users and roles for admin access
-- Daily rotating file logs
+- Daily rotating file logs with optional hourly retention cleanup
 - Minimal dependency footprint: `stdlib + requests + PyYAML`
 
 ## Why This Project
@@ -36,8 +36,8 @@ The codebase is split into a few focused modules:
 - [`gateway/runtime.py`](gateway/runtime.py): request matching, client auth, rate limiting, CORS handling, token issuance, output transforms, response caching, async success hooks, config hot-reload, and upstream proxying
 - [`gateway/admin_ops.py`](gateway/admin_ops.py): config and security mutations used by the admin UI
 - [`gateway/security.py`](gateway/security.py): users, roles, password hashing, and authorization checks
-- [`gateway/monitoring.py`](gateway/monitoring.py): SQLite-backed request log storage
-- [`gateway/logging_utils.py`](gateway/logging_utils.py): daily rotating file logging
+- [`gateway/monitoring.py`](gateway/monitoring.py): SQLite-backed request log storage and retention cleanup
+- [`gateway/logging_utils.py`](gateway/logging_utils.py): daily rotating file logging and retention cleanup
 - [`gateway/settings.py`](gateway/settings.py): `.env` loading and runtime settings
 - [`gateway/main.py`](gateway/main.py): HTTP server, admin/monitor endpoints, and CLI entrypoint
 
@@ -216,6 +216,7 @@ routes:
   - ...
 
 observability:
+  log_retention_hours: 168
   log_aggregators:
     sink_code:
       ...
@@ -467,7 +468,15 @@ success_hook:
 
 ### Log Aggregators
 
-Request logs can be forwarded asynchronously through `observability.log_aggregators`.
+`observability` can hold both log retention and async forwarding settings.
+
+`log_retention_hours` behavior:
+
+- leave it unset or blank for unlimited retention
+- when set, request log rows in `data/monitor.db` and rotated file logs under `logs/` older than that many hours are deleted by an hourly cleanup worker
+- daily file rotation stays enabled regardless of retention
+
+Request logs can also be forwarded asynchronously through `observability.log_aggregators`.
 
 Supported sink types:
 
@@ -633,7 +642,7 @@ If `NAPIGATE_ADMIN_ACCESS_WHITELIST_IPS` is empty, admin routes accept requests 
 - SQLite request log DB: `data/monitor.db`
 - File log: `logs/napigate.log`
 - Rotation: daily
-- Retention: `14` rotated log files
+- Retention: unlimited by default, or `observability.log_retention_hours` with hourly cleanup when set
 
 The request monitor exposes:
 

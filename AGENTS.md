@@ -87,8 +87,10 @@ This file stores the working knowledge for the `NapiGate` project so future sess
   - `.env` loading
 - `gateway/monitoring.py`
   - SQLite monitor storage
+  - hourly retention cleanup when configured
 - `gateway/logging_utils.py`
   - daily rotating file logs
+  - hourly retention cleanup for rotated files when configured
 - `config/services.example.yaml`
   - canonical sample for the current architecture
 - `config/services.yaml`
@@ -128,6 +130,7 @@ Top-level structure:
 - `clients[]`
 - `routes[]`
 - `output_profiles.<profile_slug>`
+- `observability.log_retention_hours`
 - `observability.log_aggregators.<sink_code>`
 - `services.<service_name>`
 
@@ -404,6 +407,10 @@ Common:
 
 ## 6.11) Log Aggregator Behavior
 
+- `observability.log_retention_hours` controls log retention when set.
+- Leave `observability.log_retention_hours` unset for unlimited retention.
+- When set, request log rows in `data/monitor.db` and rotated files under `logs/` older than that many hours are deleted by an hourly cleanup worker.
+- Daily file rotation stays enabled regardless of retention.
 - `observability.log_aggregators` is top-level.
 - Supported sink types:
   - `http_json`
@@ -530,14 +537,18 @@ Common:
   - `logs/napigate.log`
 - rotation:
   - daily
-- backup count:
-  - `14`
+- retention:
+  - unlimited when `observability.log_retention_hours` is unset
+  - hourly cleanup of rows and rotated files when `observability.log_retention_hours` is set
+- proxied request capture:
+  - monitor rows now also persist the final upstream URL and rendered `curl` command after templating, auth stripping, and header/query injection
 
 ## 11) Admin UI Notes
 
 - UI language is English.
 - Admin tabs:
   - `Live`
+  - `Config`
   - `Services`
   - `Routes`
   - `Output`
@@ -549,6 +560,8 @@ Common:
 - Admin tabs update the URL hash, for example `/__admin#output`, without reloading the page.
 - Admin modal save/delete actions use AJAX when JavaScript is available, refresh the in-page admin state, and preserve the active tab instead of returning to Live.
 - Inactive tabs are dark with white text by design.
+- Monitor and admin Live tables now show both `Status` and `Success` columns for each request row.
+- Monitor and admin Live views now expose the final upstream URL plus a copyable rendered `cURL` for proxied requests.
 - Client forms support:
   - slug, title, and code
   - title and code
@@ -560,6 +573,8 @@ Common:
 - OAuth methods can request live tokens from the UI.
 - Services and endpoints remain modal-based CRUD.
 - Routes have their own tab and modal CRUD.
+- Config has its own tab for gateway-wide operational settings.
+- Route and endpoint `Copy cURL` actions open a modal first so the admin can generate a request without auth or choose a client plus auth method before copying the command.
 - Endpoint forms define target behavior only; gateway path, method exposure, output profile, response cache, and success hook are configured from route forms.
 - Output profiles now have their own tab and modal CRUD.
 - Output profile forms show response shaping as pseudo-code instead of raw success/data/message/error key inputs; `passthrough` is the raw unmodified-output mode.
@@ -615,6 +630,7 @@ pip install requests pyyaml
 - `.env` must stay local.
 - `NAPIGATE_IMAGE` selects the runtime image for Compose.
 - `NAPIGATE_PULL_POLICY` controls whether Compose pulls the runtime image.
+- `observability.log_retention_hours` controls hourly cleanup of monitor rows and rotated file logs; leave it unset for unlimited retention.
 - Shared template changes go to `config/services.example.yaml`.
 - `config/services.yaml` and `config/security.yaml` are reloaded automatically when their on-disk contents change.
 - Container runtime user settings come from `.env`:
@@ -691,6 +707,8 @@ pip install requests pyyaml
   - `empty_value`
 - 2026-04-27: `pre_call` became available at service, route, and endpoint levels and now runs in that order.
 - 2026-04-28: admin deletes now clear dependent client scopes, route targets, and output-profile references instead of failing on those dependencies; empty scoped clients or targetless routes are preserved until reassigned.
+- 2026-04-28: admin and monitor log tables gained a `Success` column, and the admin panel gained a `Config` tab with `observability.log_retention_hours` so monitor rows and rotated file logs can be kept indefinitely or cleaned hourly after a configured number of hours.
+- 2026-04-28: monitor storage and Live views now capture the final outgoing upstream `curl` command, including rendered URL, headers, and request body when a proxied call is actually sent.
 - Verified locally:
   - `python3 -m compileall gateway`
   - `python3 -m py_compile gateway/*.py`

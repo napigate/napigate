@@ -35,6 +35,7 @@ from gateway.config import (
     load_gateway_config,
 )
 from gateway.integrations import IntegrationDispatcher
+from gateway.logging_utils import configure_log_retention_hours
 from gateway.monitoring import LogEntry, RequestLogStore
 
 
@@ -171,7 +172,8 @@ class GatewayRuntime:
             self._route_round_robin.clear()
             self._config_signature = signature
         self.dispatcher.configure(log_aggregators=gateway_config.log_aggregators)
-        self.log_store.cleanup_old()
+        self.log_store.configure_retention_hours(gateway_config.log_retention_hours)
+        configure_log_retention_hours(gateway_config.log_retention_hours)
         LOGGER.info(
             "Loaded %s services, %s routes, %s gateway clients, and %s output profiles from %s",
             len(services),

@@ -26,6 +26,7 @@ from gateway.admin_ops import (
     delete_user,
     save_client,
     save_endpoint,
+    save_gateway_settings,
     save_output_profile,
     save_role,
     save_route,
@@ -34,7 +35,7 @@ from gateway.admin_ops import (
 )
 from gateway.admin_state import build_admin_page_state
 from gateway.config import load_config_document, save_config_document
-from gateway.logging_utils import setup_logging
+from gateway.logging_utils import setup_logging, shutdown_logging
 from gateway.runtime import GatewayError, GatewayRuntime, IncomingRequest, OutgoingResponse
 from gateway.security import (
     AuthenticatedPrincipal,
@@ -1124,7 +1125,7 @@ def render_admin_page(
           <div>
             <h1 class="title">NapiGate Admin Panel</h1>
             <div class="subtitle">
-              Manage services, endpoint targets, gateway routes, output profiles, scoped gateway clients, users, and roles
+              Manage gateway settings, services, endpoint targets, gateway routes, output profiles, scoped gateway clients, users, and roles
             </div>
           </div>
           <div class="meta-box">
@@ -1138,6 +1139,7 @@ def render_admin_page(
         <div class="panel">
           <div class="tabs">
             <button class="tab active" data-tab="live">Live</button>
+            <button class="tab" data-tab="config">Config</button>
             <button class="tab" data-tab="services">Services</button>
             <button class="tab" data-tab="routes">Routes</button>
             <button class="tab" data-tab="output">Output</button>
@@ -1156,6 +1158,16 @@ def render_admin_page(
               <div class="actions" id="live-top-actions"></div>
             </div>
             <div id="live-wrap"></div>
+          </section>
+
+          <section class="section" data-section="config">
+            <div class="section-head">
+              <div>
+                <h2 class="section-title">Config</h2>
+                <div class="section-note">Keep gateway-wide operational settings here so the runtime and monitor stay aligned.</div>
+              </div>
+            </div>
+            <div id="config-wrap"></div>
           </section>
 
           <section class="section" data-section="services">
@@ -1363,6 +1375,7 @@ def render_admin_page(
           jsonp_callback_param: {{ title: "JSONP Callback Param", text: "Query-string parameter name that carries the JavaScript callback function.", example: "callback" }},
           jsonp_default_callback: {{ title: "JSONP Default Callback", text: "Fallback callback name used when the request omits the callback parameter.", example: "callback" }},
           output_headers_yaml: {{ title: "Profile Headers", text: "Headers applied after the output profile transforms the response.", example: '{{ "Cache-Control": "no-store" }}' }},
+          log_retention_hours: {{ title: "Log Retention Hours", text: "When set, request log rows and rotated file logs older than this many hours are deleted by an hourly cleanup worker. Leave blank for unlimited retention.", example: "168" }},
         }};
 
         function helpMarkup(key) {{
@@ -1458,6 +1471,7 @@ def render_admin_page(
           renderRoutes();
           renderOutputProfiles();
           renderClients();
+          renderConfig();
           renderUsers();
           renderRoles();
           renderLive();
@@ -1835,22 +1849,13 @@ def render_admin_page(
           }}[type] || 99;
         }}
 
-        function endpointAuthCandidate(serviceName, endpointName) {{
-          return STATE.clients
-            .filter((client) => client.enabled && clientTouchesEndpoint(client, serviceName, endpointName))
-            .flatMap((client) =>
-              (client.auth_methods || [])
-                .filter((method) => method.enabled)
-                .map((method) => ({{ client, method }}))
-            )
-            .sort((left, right) => authPriority(left.method.type) - authPriority(right.method.type))[0] || null;
+        function emptyAuthSample() {{
+          return {{ headers: [], cookies: [], basic: "", query: [] }};
         }}
 
-        function authSampleForEndpoint(serviceName, endpointName) {{
-          const candidate = endpointAuthCandidate(serviceName, endpointName);
-          if (!candidate) return {{ headers: [], cookies: [], basic: "", query: [] }};
+        function authSampleForMethod(method) {{
+          if (!method) return emptyAuthSample();
 
-          const method = candidate.method;
           if (method.type === "api_key") {{
             if (method.header_names?.length) {{
               return {{ headers: [`${{method.header_names[0]}}: ${{method.secret || "<api_key>"}}`], cookies: [], basic: "", query: [] }};
@@ -1904,13 +1909,7 @@ def render_admin_page(
             }};
           }}
 
-          return {{ headers: [], cookies: [], basic: "", query: [] }};
-        }}
-
-        function buildEndpointCurl(serviceName, endpointName, methodName = "") {{
-          const route = routesForEndpoint(serviceName, endpointName)[0];
-          if (!route) return "";
-          return buildRouteCurl(route.slug, methodName || route.methods?.[0] || "GET");
+          return emptyAuthSample();
         }}
 
         async function copyTextToClipboard(text) {{
@@ -1928,23 +1927,6 @@ def render_admin_page(
           textarea.select();
           document.execCommand("copy");
           textarea.remove();
-        }}
-
-        async function copyEndpointCurl(button, serviceName, endpointName, methodName = "") {{
-          const curl = buildEndpointCurl(serviceName, endpointName, methodName);
-          if (!curl) return;
-
-          const originalText = button.dataset.label || button.textContent;
-          button.dataset.label = originalText;
-          try {{
-            await copyTextToClipboard(curl);
-            button.textContent = "Copied";
-          }} catch (_error) {{
-            button.textContent = "Copy failed";
-          }}
-          window.setTimeout(() => {{
-            button.textContent = originalText;
-          }}, 1400);
         }}
 
         function formatDateTime(value) {{
@@ -2299,34 +2281,65 @@ def render_admin_page(
           );
         }}
 
-        function routeAuthTarget(route) {{
-          const targets = route.targets || [];
-          return targets.find((target) => serviceByName(target.service)?.auth?.required) || targets[0] || null;
+        function resolveRouteTarget(target) {{
+          const service = serviceByName(target.service);
+          const endpoint = service?.endpoints.find((item) => item.name === target.endpoint || item.slug === target.endpoint);
+          if (!service || !endpoint) return null;
+          return {{ service, endpoint }};
         }}
 
-        function buildRouteCurl(routeSlug, methodName = "") {{
+        function routeTargetsForCurl(route) {{
+          return (route?.targets || [])
+            .map((target) => resolveRouteTarget(target))
+            .filter(Boolean);
+        }}
+
+        function routeProtectedTargets(route) {{
+          return routeTargetsForCurl(route).filter((target) => target.service.auth?.required);
+        }}
+
+        function routeEligibleClients(route) {{
+          const protectedTargets = routeProtectedTargets(route);
+          if (!protectedTargets.length) return [];
+          return STATE.clients.filter((client) =>
+            client.enabled
+            && protectedTargets.some((target) => clientTouchesEndpoint(client, target.service.name, target.endpoint.name))
+          );
+        }}
+
+        function routeEligibleAuthMethods(route, clientSlug) {{
+          const client = clientBySlug(clientSlug);
+          if (!client) return [];
+          const methods = [];
+          const seenCodes = new Set();
+          (client.auth_methods || []).forEach((method) => {{
+            const code = String(method.code || "").trim();
+            if (!method.enabled || !code || seenCodes.has(code)) return;
+            seenCodes.add(code);
+            methods.push(method);
+          }});
+          return methods.sort((left, right) => authPriority(left.type) - authPriority(right.type));
+        }}
+
+        function buildRouteCurl(routeSlug, methodName = "", authSample = null) {{
           const route = routeBySlug(routeSlug);
           if (!route) return "";
-          const target = routeAuthTarget(route);
-          const service = target ? serviceByName(target.service) : null;
           const requestMethod = String(methodName || route.methods?.[0] || "GET").toUpperCase();
           let url = `${{window.location.origin}}${{sampleGatewayPath(route.gateway_path)}}`;
           const command = ["curl", `-X ${{requestMethod}}`];
 
-          if (service?.auth?.required && target) {{
-            const authSample = authSampleForEndpoint(target.service, target.endpoint);
-            (authSample.query || []).forEach(([key, value]) => {{
-              url = appendQueryParam(url, key, value);
-            }});
-            if (authSample.basic) {{
-              command.push(`-u ${{shellQuote(authSample.basic)}}`);
-            }}
-            if ((authSample.headers || []).length) {{
-              authSample.headers.forEach((header) => command.push(`-H ${{shellQuote(header)}}`));
-            }}
-            if ((authSample.cookies || []).length) {{
-              command.push(`-b ${{shellQuote(authSample.cookies.join('; '))}}`);
-            }}
+          const sample = authSample || emptyAuthSample();
+          (sample.query || []).forEach(([key, value]) => {{
+            url = appendQueryParam(url, key, value);
+          }});
+          if (sample.basic) {{
+            command.push(`-u ${{shellQuote(sample.basic)}}`);
+          }}
+          if ((sample.headers || []).length) {{
+            sample.headers.forEach((header) => command.push(`-H ${{shellQuote(header)}}`));
+          }}
+          if ((sample.cookies || []).length) {{
+            command.push(`-b ${{shellQuote(sample.cookies.join('; '))}}`);
           }}
 
           if (["POST", "PUT", "PATCH"].includes(requestMethod)) {{
@@ -2343,17 +2356,16 @@ def render_admin_page(
             <button
               class="btn light"
               type="button"
-              onclick="copyRouteCurl(this, decodeURIComponent('${{arg(routeSlug)}}'), decodeURIComponent('${{arg(methodName)}}'))"
+              onclick="showRouteCurlModal(decodeURIComponent('${{arg(routeSlug)}}'), decodeURIComponent('${{arg(methodName)}}'))"
             >
               ${{esc(label)}}
             </button>
           `;
         }}
 
-        async function copyRouteCurl(button, routeSlug, methodName = "") {{
-          const curl = buildRouteCurl(routeSlug, methodName);
-          if (!curl) return;
-
+        async function copyGeneratedCurl(button) {{
+          const curl = button.closest("[data-curl-modal]")?.querySelector("[data-curl-output]")?.textContent || "";
+          if (!curl.trim()) return;
           const originalText = button.dataset.label || button.textContent;
           button.dataset.label = originalText;
           try {{
@@ -2365,6 +2377,135 @@ def render_admin_page(
           window.setTimeout(() => {{
             button.textContent = originalText;
           }}, 1400);
+        }}
+
+        function syncRouteCurlModal(container, options = {{}}) {{
+          const route = routeBySlug(container?.dataset.routeSlug || "");
+          if (!route) return;
+
+          const resetClient = Boolean(options.resetClient);
+          const resetMethod = Boolean(options.resetMethod);
+          const methodName = String(container.dataset.methodName || route.methods?.[0] || "GET").toUpperCase();
+          const modeSelect = container.querySelector('[name="curl_auth_mode"]');
+          const clientWrap = container.querySelector("[data-curl-client-wrap]");
+          const methodWrap = container.querySelector("[data-curl-method-wrap]");
+          const clientSelect = container.querySelector('[name="curl_client_slug"]');
+          const methodSelect = container.querySelector('[name="curl_auth_method_code"]');
+          const note = container.querySelector("[data-curl-note]");
+          const output = container.querySelector("[data-curl-output]");
+
+          if (!modeSelect || !clientWrap || !methodWrap || !clientSelect || !methodSelect || !note || !output) return;
+
+          const authMode = modeSelect.value || "without_auth";
+          const protectedTargets = routeProtectedTargets(route);
+          const eligibleClients = routeEligibleClients(route);
+          const shouldShowAuth = authMode === "with_auth";
+
+          clientWrap.style.display = shouldShowAuth ? "" : "none";
+          methodWrap.style.display = shouldShowAuth ? "" : "none";
+
+          if (!shouldShowAuth) {{
+            note.textContent = protectedTargets.length
+              ? "Command is generated without incoming client credentials."
+              : "Current route targets do not require incoming client authentication.";
+            output.textContent = buildRouteCurl(route.slug, methodName);
+            return;
+          }}
+
+          const currentClientSlug = resetClient ? "" : clientSelect.value;
+          clientSelect.innerHTML = eligibleClients.length
+            ? eligibleClients
+                .map((client) => `<option value="${{esc(client.slug)}}">${{esc(client.title || client.code)}} (${{esc(client.code)}})</option>`)
+                .join("")
+            : '<option value="">No eligible clients</option>';
+          clientSelect.value = eligibleClients.some((client) => client.slug === currentClientSlug)
+            ? currentClientSlug
+            : (eligibleClients[0]?.slug || "");
+
+          const methods = routeEligibleAuthMethods(route, clientSelect.value);
+          const currentMethodCode = resetMethod ? "" : methodSelect.value;
+          methodSelect.innerHTML = methods.length
+            ? methods
+                .map((method) => `<option value="${{esc(method.code)}}">${{esc(method.title || method.code)}} (${{esc(method.type)}})</option>`)
+                .join("")
+            : '<option value="">No enabled auth methods</option>';
+          methodSelect.value = methods.some((method) => method.code === currentMethodCode)
+            ? currentMethodCode
+            : (methods[0]?.code || "");
+
+          if (!protectedTargets.length) {{
+            note.textContent = "Current route targets do not require incoming client authentication.";
+            output.textContent = buildRouteCurl(route.slug, methodName);
+            return;
+          }}
+
+          if (!eligibleClients.length) {{
+            note.textContent = "No enabled client matches the protected targets on this route.";
+            output.textContent = buildRouteCurl(route.slug, methodName);
+            return;
+          }}
+
+          if (!methods.length) {{
+            note.textContent = "Selected client has no enabled auth methods.";
+            output.textContent = buildRouteCurl(route.slug, methodName);
+            return;
+          }}
+
+          const selectedClient = eligibleClients.find((client) => client.slug === clientSelect.value) || null;
+          const selectedMethod = methods.find((method) => method.code === methodSelect.value) || methods[0];
+          note.textContent = `Using ${{selectedClient?.title || selectedClient?.code || "client"}} via ${{selectedMethod.title || selectedMethod.code}} (${{selectedMethod.type}}).`;
+          output.textContent = buildRouteCurl(route.slug, methodName, authSampleForMethod(selectedMethod));
+        }}
+
+        function showRouteCurlModal(routeSlug, methodName = "") {{
+          const route = routeBySlug(routeSlug);
+          if (!route) return;
+
+          const requestMethod = String(methodName || route.methods?.[0] || "GET").toUpperCase();
+          const protectedTargets = routeProtectedTargets(route);
+          const defaultAuthMode = protectedTargets.length ? "with_auth" : "without_auth";
+
+          openModal(`Generate ${{requestMethod}} cURL`, `
+            <div class="stack" data-curl-modal data-route-slug="${{esc(route.slug)}}" data-method-name="${{esc(requestMethod)}}">
+              <div class="section-note">
+                Build a sample request for <span class="mono">${{esc(route.gateway_path)}}</span> using <span class="mono">${{esc(requestMethod)}}</span>.
+              </div>
+              <div class="form-grid">
+                <label>
+                  <span>Auth Mode</span>
+                  <select name="curl_auth_mode">
+                    <option value="without_auth" ${{defaultAuthMode === "without_auth" ? "selected" : ""}}>Without Auth</option>
+                    <option value="with_auth" ${{defaultAuthMode === "with_auth" ? "selected" : ""}}>With Auth</option>
+                  </select>
+                </label>
+                <label data-curl-client-wrap>
+                  <span>Client</span>
+                  <select name="curl_client_slug"></select>
+                </label>
+                <label data-curl-method-wrap>
+                  <span>Auth Method</span>
+                  <select name="curl_auth_method_code"></select>
+                </label>
+              </div>
+              <div class="section-note" data-curl-note></div>
+              <div class="detail-box">
+                <pre data-curl-output></pre>
+              </div>
+              <div class="actions">
+                <button class="btn" type="button" onclick="copyGeneratedCurl(this)">Copy Command</button>
+              </div>
+            </div>
+          `);
+
+          const container = modalBody.querySelector("[data-curl-modal]");
+          const modeSelect = container?.querySelector('[name="curl_auth_mode"]');
+          const clientSelect = container?.querySelector('[name="curl_client_slug"]');
+          const methodSelect = container?.querySelector('[name="curl_auth_method_code"]');
+
+          modeSelect?.addEventListener("change", () => syncRouteCurlModal(container, {{ resetClient: true, resetMethod: true }}));
+          clientSelect?.addEventListener("change", () => syncRouteCurlModal(container, {{ resetMethod: true }}));
+          methodSelect?.addEventListener("change", () => syncRouteCurlModal(container));
+          syncRouteCurlModal(container);
         }}
 
         function renderRoutes() {{
@@ -2424,7 +2565,7 @@ def render_admin_page(
                       <td>
                         <div class="actions">
                           <button class="btn light" type="button" onclick="showRouteView(decodeURIComponent('${{arg(route.slug)}}'))">View</button>
-                          <button class="btn light" type="button" onclick="copyRouteCurl(this, decodeURIComponent('${{arg(route.slug)}}'), decodeURIComponent('${{arg(route.methods?.[0] || 'GET')}}'))">Copy cURL</button>
+                          <button class="btn light" type="button" onclick="showRouteCurlModal(decodeURIComponent('${{arg(route.slug)}}'), decodeURIComponent('${{arg(route.methods?.[0] || 'GET')}}'))">Copy cURL</button>
                           ${{
                             has("services_manage")
                               ? `
@@ -3771,6 +3912,7 @@ parallel_race: call all targets concurrently and return first healthy response</
         renderRoutes();
         renderOutputProfiles();
         renderClients();
+        renderConfig();
         renderUsers();
         renderRoles();
       </script>
@@ -3934,6 +4076,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 if self.command == "DELETE":
                     self._handle_admin_output_profile_delete(parsed)
                     return
+
+            if parsed.path == "/__admin/settings/save" and self.command == "POST":
+                if self._require_permission("services_manage") is None:
+                    return
+                self._handle_settings_save()
+                return
 
             if parsed.path == "/__admin/service/save" and self.command == "POST":
                 if self._require_permission("services_manage") is None:
@@ -4375,6 +4523,22 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"detail": exc.detail}, status_code=exc.status_code)
         except Exception as exc:  # noqa: BLE001
             self._send_json({"detail": str(exc)}, status_code=400)
+
+    def _handle_settings_save(self) -> None:
+        try:
+            form = self._parse_form()
+            retention_raw = str(form.get("log_retention_hours", "")).strip()
+            log_retention_hours = int(retention_raw) if retention_raw else None
+            if log_retention_hours is not None and log_retention_hours <= 0:
+                raise ValueError("Log retention hours must be a positive number.")
+            message = save_gateway_settings(
+                runtime.config_path,
+                log_retention_hours=log_retention_hours,
+            )
+            runtime.load()
+            self._send_admin_mutation_success(message)
+        except Exception as exc:  # noqa: BLE001
+            self._send_admin_mutation_error(exc)
 
     def _handle_service_save(self) -> None:
         try:
@@ -5046,6 +5210,7 @@ def main() -> None:
     finally:
         server.server_close()
         runtime.close()
+        shutdown_logging()
 
 
 if __name__ == "__main__":

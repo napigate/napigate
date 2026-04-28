@@ -242,6 +242,20 @@ def serialize_output_profiles(document: dict[str, Any]) -> list[dict[str, Any]]:
     return profiles_state
 
 
+def serialize_gateway_settings(document: dict[str, Any]) -> dict[str, Any]:
+    observability = document.get("observability") or {}
+    if not isinstance(observability, dict):
+        observability = {}
+    retention_hours = observability.get("log_retention_hours")
+    return {
+        "log_retention_hours": (
+            str(int(retention_hours))
+            if retention_hours not in (None, "", 0, "0")
+            else ""
+        ),
+    }
+
+
 def build_admin_page_state(
     *,
     principal: AuthenticatedPrincipal,
@@ -256,6 +270,7 @@ def build_admin_page_state(
         "routes": serialize_routes(document),
         "clients": serialize_clients(document),
         "output_profiles": serialize_output_profiles(document),
+        "settings": serialize_gateway_settings(document),
         "security": security_state,
         "principal": {
             "username": principal.username,
