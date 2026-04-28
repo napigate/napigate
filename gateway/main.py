@@ -200,6 +200,38 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
         .status-2xx {{ background: #dcfce7; color: var(--ok); }}
         .status-4xx {{ background: #fef3c7; color: var(--warn); }}
         .status-5xx {{ background: #fee2e2; color: var(--bad); }}
+        .bool-yes {{ background: #dcfce7; color: var(--ok); }}
+        .bool-no {{ background: #fee2e2; color: var(--bad); }}
+        .muted {{ color: var(--muted); }}
+        .btn-link {{
+          border: 0;
+          background: transparent;
+          color: var(--accent);
+          cursor: pointer;
+          font: inherit;
+          font-weight: 700;
+          padding: 0;
+        }}
+        .upstream-cell {{
+          min-width: 260px;
+        }}
+        .curl-block {{
+          margin-top: 6px;
+        }}
+        .curl-block summary {{
+          cursor: pointer;
+          color: var(--accent);
+          font-weight: 700;
+        }}
+        .curl-pre {{
+          margin-top: 6px;
+          padding: 8px;
+          border: 1px solid #eadbc4;
+          border-radius: 10px;
+          background: #fff8ee;
+          white-space: pre-wrap;
+          word-break: break-word;
+        }}
         .mono {{
           font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
           font-size: 11px;
@@ -253,7 +285,9 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
                   <th>Gateway Path</th>
                   <th>Service</th>
                   <th>Endpoint</th>
+                  <th>Upstream</th>
                   <th>Status</th>
+                  <th>Success</th>
                   <th>Duration (ms)</th>
                   <th>IP</th>
                   <th>Error</th>
@@ -284,6 +318,68 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
           return "";
         }}
 
+        function successBadge(success) {{
+          return `<span class="status-badge ${{success ? "bool-yes" : "bool-no"}}">${{success ? "Yes" : "No"}}</span>`;
+        }}
+
+        async function copyText(text) {{
+          if (navigator.clipboard?.writeText) {{
+            await navigator.clipboard.writeText(text);
+            return;
+          }}
+          const textarea = document.createElement("textarea");
+          textarea.value = text;
+          textarea.setAttribute("readonly", "readonly");
+          textarea.style.position = "absolute";
+          textarea.style.left = "-9999px";
+          document.body.appendChild(textarea);
+          textarea.select();
+          document.execCommand("copy");
+          textarea.remove();
+        }}
+
+        async function copyCurl(button) {{
+          const curl = button.closest(".curl-block")?.querySelector("pre")?.textContent || "";
+          if (!curl.trim()) return;
+          const originalText = button.dataset.label || button.textContent;
+          button.dataset.label = originalText;
+          try {{
+            await copyText(curl);
+            button.textContent = "Copied";
+          }} catch (_error) {{
+            button.textContent = "Copy failed";
+          }}
+          window.setTimeout(() => {{
+            button.textContent = originalText;
+          }}, 1400);
+        }}
+
+        function renderUpstreamCell(row) {{
+          const upstreamUrl = String(row.upstream_url || "").trim();
+          const upstreamCurl = String(row.upstream_curl || "").trim();
+          if (!upstreamUrl && !upstreamCurl) {{
+            return '<span class="muted">-</span>';
+          }}
+          return `
+            <div class="upstream-cell">
+              ${{upstreamUrl ? `<div class="mono">${{esc(upstreamUrl)}}</div>` : ""}}
+              ${{
+                upstreamCurl
+                  ? `
+                    <details class="curl-block">
+                      <summary>cURL</summary>
+                      <div style="margin-top:6px;">
+                        <button class="btn-link" type="button" onclick="copyCurl(this)">Copy</button>
+                      </div>
+                      <pre class="mono curl-pre">${{esc(upstreamCurl)}}</pre>
+                    </details>
+                  `
+                  : ""
+              }}
+            </div>
+          `;
+        }}
+
         function render(rows) {{
           const totalRows = rows.length;
           const total5xx = rows.filter((row) => row.status_code >= 500).length;
@@ -304,13 +400,15 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
                   <td class="mono">${{esc(row.gateway_path)}}</td>
                   <td>${{esc(row.service_name)}}</td>
                   <td>${{esc(row.endpoint_name)}}</td>
+                  <td>${{renderUpstreamCell(row)}}</td>
                   <td><span class="status-badge ${{statusClass(row.status_code)}}">${{row.status_code}}</span></td>
+                  <td>${{successBadge(Boolean(row.success))}}</td>
                   <td>${{row.duration_ms}}</td>
                   <td class="mono">${{esc(row.client_ip)}}</td>
                   <td>${{esc(row.error || "-")}}</td>
                 </tr>
               `).join("")
-            : '<tr><td colspan="9">No logs yet.</td></tr>';
+            : '<tr><td colspan="11">No logs yet.</td></tr>';
         }}
 
         function setOnlineState(online) {{
@@ -1883,6 +1981,116 @@ def render_admin_page(
           return {{ label: "Connecting to monitor", className: "" }};
         }}
 
+        async function copyLiveCurl(button) {{
+          const curl = button.closest("[data-live-curl]")?.querySelector("[data-live-curl-output]")?.textContent || "";
+          if (!curl.trim()) return;
+          const originalText = button.dataset.label || button.textContent;
+          button.dataset.label = originalText;
+          try {{
+            await copyTextToClipboard(curl);
+            button.textContent = "Copied";
+          }} catch (_error) {{
+            button.textContent = "Copy failed";
+          }}
+          window.setTimeout(() => {{
+            button.textContent = originalText;
+          }}, 1400);
+        }}
+
+        function renderLiveUpstreamCell(row) {{
+          const upstreamUrl = String(row.upstream_url || "").trim();
+          const upstreamCurl = String(row.upstream_curl || "").trim();
+          if (!upstreamUrl && !upstreamCurl) {{
+            return '<span class="muted">-</span>';
+          }}
+          return `
+            <div style="display:flex; flex-direction:column; gap:8px; min-width:260px;">
+              ${{upstreamUrl ? `<div class="mono">${{esc(upstreamUrl)}}</div>` : ""}}
+              ${{
+                upstreamCurl
+                  ? `
+                    <details data-live-curl>
+                      <summary>cURL</summary>
+                      <div class="actions" style="margin-top:8px;">
+                        <button class="btn light" type="button" onclick="copyLiveCurl(this)">Copy cURL</button>
+                      </div>
+                      <div class="detail-box" style="margin-top:8px;">
+                        <pre data-live-curl-output>${{esc(upstreamCurl)}}</pre>
+                      </div>
+                    </details>
+                  `
+                  : ""
+              }}
+            </div>
+          `;
+        }}
+
+        function renderConfig() {{
+          const wrap = document.getElementById("config-wrap");
+          if (!wrap) return;
+
+          const retentionValue = String(STATE.settings?.log_retention_hours || "");
+          const canEdit = has("services_manage");
+          const retentionLabel = retentionValue ? `${{retentionValue}} hour(s)` : "Unlimited";
+
+          wrap.innerHTML = `
+            <div class="card">
+              <div class="section-head" style="margin-bottom: 14px;">
+                <div>
+                  <h3 class="section-title" style="font-size:16px; margin-bottom:4px;">Gateway Settings</h3>
+                  <div class="section-note">Daily file rotation stays enabled. Hourly cleanup only applies when retention is set.</div>
+                </div>
+                <div class="actions">
+                  <span class="tag">Current retention: ${{esc(retentionLabel)}}</span>
+                  <span class="tag">Cleanup cadence: hourly</span>
+                </div>
+              </div>
+              <form method="post" action="/__admin/settings/save" class="form-grid" onsubmit="return submitGatewaySettings(event, this)">
+                <label data-help="log_retention_hours">
+                  <span>Log Retention (hours)</span>
+                  <input
+                    name="log_retention_hours"
+                    type="number"
+                    min="1"
+                    step="1"
+                    value="${{esc(retentionValue)}}"
+                    placeholder="Leave blank for unlimited"
+                    ${{canEdit ? "" : "disabled"}}
+                  >
+                </label>
+                <div class="full section-note">
+                  This applies to monitor rows in <span class="mono">data/monitor.db</span> and rotated files under <span class="mono">logs/</span>.
+                </div>
+                <div class="actions full">
+                  ${{
+                    canEdit
+                      ? '<button type="submit">Save Settings</button>'
+                      : '<span class="muted">This account does not have <code>services_manage</code> for gateway config changes.</span>'
+                  }}
+                </div>
+              </form>
+            </div>
+          `;
+          decorateHelp(wrap);
+        }}
+
+        async function submitGatewaySettings(event, form) {{
+          event.preventDefault();
+          showAdminNotice("");
+          if (!validateAdminForm(form)) return false;
+          const submitButton = form.querySelector('[type="submit"]');
+          submitButton?.setAttribute("disabled", "disabled");
+          try {{
+            const payload = await postAdminMutation(form.action, formPayload(form));
+            showAdminNotice(payload.message || "Saved.");
+          }} catch (error) {{
+            showAdminNotice(String(error?.message || error), "error");
+          }} finally {{
+            submitButton?.removeAttribute("disabled");
+          }}
+          return false;
+        }}
+
         function renderLive() {{
           const wrap = document.getElementById("live-wrap");
           const topActions = document.getElementById("live-top-actions");
@@ -1948,29 +2156,33 @@ def render_admin_page(
                   ? `
                     <table>
                       <thead>
-                        <tr>
-                          <th>Time</th>
-                          <th>Method</th>
-                          <th>Gateway Path</th>
-                          <th>Service</th>
-                          <th>Status</th>
-                          <th>Duration</th>
-                          <th>Client IP</th>
-                          <th>Error</th>
-                        </tr>
+	                        <tr>
+	                          <th>Time</th>
+	                          <th>Method</th>
+	                          <th>Gateway Path</th>
+	                          <th>Service</th>
+	                          <th>Upstream</th>
+	                          <th>Status</th>
+	                          <th>Success</th>
+	                          <th>Duration</th>
+	                          <th>Client IP</th>
+	                          <th>Error</th>
+	                        </tr>
                       </thead>
                       <tbody>
                         ${{
                           recentRows.map((row) => `
-                            <tr>
-                              <td>${{esc(formatDateTime(row.created_at))}}</td>
-                              <td>${{esc(row.method)}}</td>
-                              <td class="mono">${{esc(row.gateway_path)}}</td>
-                              <td>${{esc(row.service_name)}} / ${{esc(row.endpoint_name)}}</td>
-                              <td><span class="tag ${{statusClass(row.status_code)}}">${{esc(row.status_code)}}</span></td>
-                              <td>${{esc(row.duration_ms)}} ms</td>
-                              <td class="mono">${{esc(row.client_ip)}}</td>
-                              <td>${{esc(row.error || "-")}}</td>
+	                            <tr>
+	                              <td>${{esc(formatDateTime(row.created_at))}}</td>
+	                              <td>${{esc(row.method)}}</td>
+	                              <td class="mono">${{esc(row.gateway_path)}}</td>
+	                              <td>${{esc(row.service_name)}} / ${{esc(row.endpoint_name)}}</td>
+	                              <td>${{renderLiveUpstreamCell(row)}}</td>
+	                              <td><span class="tag ${{statusClass(row.status_code)}}">${{esc(row.status_code)}}</span></td>
+	                              <td><span class="tag ${{row.success ? "ok" : "warn"}}">${{row.success ? "Yes" : "No"}}</span></td>
+	                              <td>${{esc(row.duration_ms)}} ms</td>
+	                              <td class="mono">${{esc(row.client_ip)}}</td>
+	                              <td>${{esc(row.error || "-")}}</td>
                             </tr>
                           `).join("")
                         }}

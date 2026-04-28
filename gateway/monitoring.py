@@ -16,6 +16,7 @@ class LogEntry:
     service_name: str
     endpoint_name: str
     upstream_url: str
+    upstream_curl: str
     status_code: int
     duration_ms: int
     client_ip: str
@@ -30,7 +31,16 @@ class RequestLogStore:
         self._connection = sqlite3.connect(path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._lock = threading.Lock()
+        self._retention_hours: int | None = None
+        self._stop_event = threading.Event()
+        self._cleanup_wakeup = threading.Event()
         self._init_db()
+        self._cleanup_thread = threading.Thread(
+            target=self._cleanup_loop,
+            name="napigate-monitor-retention",
+            daemon=True,
+        )
+        self._cleanup_thread.start()
 
     def _init_db(self) -> None:
         with self._lock:
@@ -44,6 +54,7 @@ class RequestLogStore:
                     service_name TEXT NOT NULL,
                     endpoint_name TEXT NOT NULL,
                     upstream_url TEXT NOT NULL,
+                    upstream_curl TEXT NOT NULL DEFAULT '',
                     status_code INTEGER NOT NULL,
                     duration_ms INTEGER NOT NULL,
                     client_ip TEXT NOT NULL,
@@ -58,16 +69,50 @@ class RequestLogStore:
                 ON request_logs (created_at DESC)
                 """
             )
+            self._ensure_column(
+                "request_logs",
+                "upstream_curl",
+                "TEXT NOT NULL DEFAULT ''",
+            )
             self._connection.commit()
 
-    def cleanup_old(self, days_to_keep: int = 30) -> None:
-        cutoff = datetime.now(UTC) - timedelta(days=days_to_keep)
+    def _ensure_column(self, table_name: str, column_name: str, definition: str) -> None:
+        existing_columns = {
+            str(row["name"])
+            for row in self._connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if column_name in existing_columns:
+            return
+        self._connection.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"
+        )
+
+    def _delete_before(self, cutoff: datetime) -> None:
         with self._lock:
             self._connection.execute(
                 "DELETE FROM request_logs WHERE created_at < ?",
                 (cutoff.isoformat(),),
             )
             self._connection.commit()
+
+    def _cleanup_loop(self) -> None:
+        while not self._stop_event.is_set():
+            self._cleanup_wakeup.wait(timeout=3600)
+            self._cleanup_wakeup.clear()
+            if self._stop_event.is_set():
+                return
+            self.cleanup_old()
+
+    def configure_retention_hours(self, retention_hours: int | None) -> None:
+        self._retention_hours = retention_hours if retention_hours and retention_hours > 0 else None
+        self.cleanup_old()
+        self._cleanup_wakeup.set()
+
+    def cleanup_old(self) -> None:
+        if self._retention_hours is None:
+            return
+        cutoff = datetime.now(UTC) - timedelta(hours=self._retention_hours)
+        self._delete_before(cutoff)
 
     def write(self, entry: LogEntry) -> None:
         with self._lock:
@@ -80,13 +125,14 @@ class RequestLogStore:
                     service_name,
                     endpoint_name,
                     upstream_url,
+                    upstream_curl,
                     status_code,
                     duration_ms,
                     client_ip,
                     error,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry.request_id,
@@ -95,6 +141,7 @@ class RequestLogStore:
                     entry.service_name,
                     entry.endpoint_name,
                     entry.upstream_url,
+                    entry.upstream_curl,
                     entry.status_code,
                     entry.duration_ms,
                     entry.client_ip,
@@ -115,6 +162,7 @@ class RequestLogStore:
                     service_name,
                     endpoint_name,
                     upstream_url,
+                    upstream_curl,
                     status_code,
                     duration_ms,
                     client_ip,
@@ -126,8 +174,17 @@ class RequestLogStore:
                 """,
                 (limit,),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [
+            {
+                **dict(row),
+                "success": int(row["status_code"]) < 400,
+            }
+            for row in rows
+        ]
 
     def close(self) -> None:
+        self._stop_event.set()
+        self._cleanup_wakeup.set()
+        self._cleanup_thread.join(timeout=1)
         with self._lock:
             self._connection.close()

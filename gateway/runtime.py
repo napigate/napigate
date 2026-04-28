@@ -13,6 +13,7 @@ import json
 import logging
 from pathlib import Path
 import re
+import shlex
 import threading
 import time
 from typing import Any
@@ -64,11 +65,17 @@ class GatewayError(Exception):
         detail: str,
         *,
         headers: Mapping[str, Any] | None = None,
+        matched: MatchedEndpoint | None = None,
+        upstream_url: str = "",
+        upstream_curl: str = "",
     ) -> None:
         super().__init__(detail)
         self.status_code = status_code
         self.detail = detail
         self.headers = {str(key): str(value) for key, value in (headers or {}).items()}
+        self.matched = matched
+        self.upstream_url = upstream_url
+        self.upstream_curl = upstream_curl
 
 
 @dataclass(slots=True)
@@ -103,6 +110,7 @@ class TargetExecutionResult:
     matched: MatchedEndpoint
     response: OutgoingResponse
     upstream_url: str
+    upstream_curl: str
     response_source: str
 
 
@@ -306,6 +314,7 @@ class GatewayRuntime:
                 request=request,
                 matched=matched,
                 upstream_url=upstream_url,
+                upstream_curl="",
                 status_code=status_code,
                 duration_ms=duration_ms,
                 error_message=error_message,
@@ -321,6 +330,7 @@ class GatewayRuntime:
         status_code = 500
         error_message = ""
         upstream_url = ""
+        upstream_curl = ""
         log_matched = matched
         authenticated_client: AuthenticatedClient | None = None
 
@@ -362,6 +372,7 @@ class GatewayRuntime:
             )
             log_matched = result.matched
             upstream_url = result.upstream_url
+            upstream_curl = result.upstream_curl
 
             result.response.headers = self.merge_response_headers(
                 result.response.headers,
@@ -379,7 +390,17 @@ class GatewayRuntime:
             return result.response
         except GatewayError as exc:
             status_code = exc.status_code
-            error_message = exc.detail
+            error_message = (
+                str(exc.__cause__)
+                if exc.upstream_url and exc.__cause__ is not None
+                else exc.detail
+            )
+            if exc.matched is not None:
+                log_matched = exc.matched
+            if exc.upstream_url:
+                upstream_url = exc.upstream_url
+            if exc.upstream_curl:
+                upstream_curl = exc.upstream_curl
             raise
         except requests.RequestException as exc:
             status_code = 502
@@ -398,6 +419,7 @@ class GatewayRuntime:
                 request=request,
                 matched=log_matched,
                 upstream_url=upstream_url,
+                upstream_curl=upstream_curl,
                 status_code=status_code,
                 duration_ms=duration_ms,
                 error_message=error_message,
@@ -605,6 +627,7 @@ class GatewayRuntime:
                 matched=matched,
                 response=direct_response,
                 upstream_url=upstream_url,
+                upstream_curl="",
                 response_source="local",
             )
 
@@ -630,15 +653,41 @@ class GatewayRuntime:
             authenticated_client=authenticated_client,
         )
 
-        response = self._send_request(
-            matched.service,
-            request.method,
-            upstream_url,
-            headers=request_headers,
-            params=final_query,
-            data=request.body or None,
-            timeout=matched.service.timeout_seconds,
-            verify=matched.service.verify_ssl,
+        try:
+            response, prepared_request = self._send_request(
+                matched.service,
+                request.method,
+                upstream_url,
+                headers=request_headers,
+                params=final_query,
+                data=request.body or None,
+                timeout=matched.service.timeout_seconds,
+                verify=matched.service.verify_ssl,
+                allow_redirects=False,
+            )
+        except requests.RequestException as exc:
+            prepared_request = getattr(exc, "napigate_prepared_request", None)
+            upstream_curl = (
+                self._build_upstream_curl(
+                    prepared_request=prepared_request,
+                    timeout_seconds=matched.service.timeout_seconds,
+                    verify_ssl=matched.service.verify_ssl,
+                    allow_redirects=False,
+                )
+                if prepared_request is not None
+                else ""
+            )
+            raise GatewayError(
+                502,
+                "Upstream request failed.",
+                matched=matched,
+                upstream_url=upstream_url,
+                upstream_curl=upstream_curl,
+            ) from exc
+        upstream_curl = self._build_upstream_curl(
+            prepared_request=prepared_request,
+            timeout_seconds=matched.service.timeout_seconds,
+            verify_ssl=matched.service.verify_ssl,
             allow_redirects=False,
         )
 
@@ -663,6 +712,7 @@ class GatewayRuntime:
             matched=matched,
             response=outgoing_response,
             upstream_url=upstream_url,
+            upstream_curl=upstream_curl,
             response_source="upstream",
         )
 
@@ -1572,10 +1622,86 @@ class GatewayRuntime:
         method: str,
         url: str,
         **kwargs: Any,
-    ) -> requests.Response:
+    ) -> tuple[requests.Response, requests.PreparedRequest]:
+        request_kwargs: dict[str, Any] = {}
+        send_kwargs = dict(kwargs)
+        for key in ("headers", "files", "data", "json", "params", "cookies", "auth"):
+            if key in send_kwargs:
+                request_kwargs[key] = send_kwargs.pop(key)
+        verify = send_kwargs.pop("verify", None)
+        stream = send_kwargs.pop("stream", None)
+        cert = send_kwargs.pop("cert", None)
+        proxies = send_kwargs.pop("proxies", None)
         with requests.Session() as session:
             session.trust_env = service.trust_env_proxy
-            return session.request(method.upper(), url, **kwargs)
+            prepared_request = session.prepare_request(
+                requests.Request(method.upper(), url, **request_kwargs)
+            )
+            merged_settings = session.merge_environment_settings(
+                prepared_request.url,
+                proxies=proxies,
+                stream=stream,
+                verify=verify,
+                cert=cert,
+            )
+            send_kwargs = {
+                **merged_settings,
+                **send_kwargs,
+            }
+            try:
+                response = session.send(prepared_request, **send_kwargs)
+            except requests.RequestException as exc:
+                setattr(exc, "napigate_prepared_request", prepared_request)
+                raise
+            return response, prepared_request
+
+    def _build_upstream_curl(
+        self,
+        *,
+        prepared_request: requests.PreparedRequest,
+        timeout_seconds: int | float | None,
+        verify_ssl: bool,
+        allow_redirects: bool,
+    ) -> str:
+        command = [
+            "curl",
+            f"-X {shlex.quote(prepared_request.method or 'GET')}",
+        ]
+        if not verify_ssl:
+            command.append("-k")
+        if allow_redirects:
+            command.append("-L")
+        if timeout_seconds is not None:
+            timeout_value = (
+                int(timeout_seconds)
+                if isinstance(timeout_seconds, (int, float)) and float(timeout_seconds).is_integer()
+                else timeout_seconds
+            )
+            command.append(f"--max-time {shlex.quote(str(timeout_value))}")
+
+        for header_name, header_value in prepared_request.headers.items():
+            command.append(
+                f"-H {shlex.quote(f'{header_name}: {header_value}')}"
+            )
+
+        body_prefix = ""
+        prepared_body = prepared_request.body
+        if prepared_body not in (None, b"", ""):
+            if isinstance(prepared_body, bytes):
+                try:
+                    body_text = prepared_body.decode("utf-8")
+                except UnicodeDecodeError:
+                    escaped_bytes = "".join(f"\\x{byte:02x}" for byte in prepared_body)
+                    body_prefix = f"printf '%b' {shlex.quote(escaped_bytes)} | "
+                    command.append("--data-binary @-")
+                else:
+                    command.append(f"--data-binary {shlex.quote(body_text)}")
+            else:
+                command.append(f"--data-binary {shlex.quote(str(prepared_body))}")
+
+        command.append(shlex.quote(prepared_request.url or ""))
+        rendered = " \\\n  ".join(command)
+        return f"{body_prefix}{rendered}" if body_prefix else rendered
 
     def _write_log(
         self,
@@ -1584,6 +1710,7 @@ class GatewayRuntime:
         request: IncomingRequest,
         matched: MatchedEndpoint,
         upstream_url: str,
+        upstream_curl: str,
         status_code: int,
         duration_ms: int,
         error_message: str,
@@ -1596,6 +1723,7 @@ class GatewayRuntime:
             service_name=matched.service.name,
             endpoint_name=matched.endpoint.name,
             upstream_url=upstream_url,
+            upstream_curl=upstream_curl,
             status_code=status_code,
             duration_ms=duration_ms,
             client_ip=request.client_ip,
