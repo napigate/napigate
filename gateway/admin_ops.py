@@ -41,6 +41,111 @@ def _build_pre_call_payload(
     return payload
 
 
+def _existing_routes_block(document: dict[str, Any]) -> list[dict[str, Any]] | None:
+    routes = document.get("routes")
+    if routes is None:
+        return None
+    if not isinstance(routes, list):
+        raise ValueError("Config routes block must be a list.")
+    return routes
+
+
+def _remove_service_references(document: dict[str, Any], *, service_name: str) -> None:
+    for client in document.get("clients") or []:
+        if not isinstance(client, dict):
+            continue
+        access = client.get("access")
+        if not isinstance(access, dict):
+            continue
+        access["services"] = [
+            item
+            for item in (access.get("services") or [])
+            if str(item).strip() != service_name
+        ]
+        access["endpoints"] = [
+            item
+            for item in (access.get("endpoints") or [])
+            if not (
+                isinstance(item, dict)
+                and str(item.get("service", "")).strip() == service_name
+            )
+        ]
+
+    routes = _existing_routes_block(document)
+    if routes is None:
+        return
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        route["targets"] = [
+            target
+            for target in (route.get("targets") or [])
+            if not (
+                isinstance(target, dict)
+                and str(target.get("service", "")).strip() == service_name
+            )
+        ]
+
+
+def _remove_endpoint_references(
+    document: dict[str, Any],
+    *,
+    service_name: str,
+    endpoint_refs: set[str],
+) -> None:
+    for client in document.get("clients") or []:
+        if not isinstance(client, dict):
+            continue
+        access = client.get("access")
+        if not isinstance(access, dict):
+            continue
+        access["endpoints"] = [
+            item
+            for item in (access.get("endpoints") or [])
+            if not (
+                isinstance(item, dict)
+                and str(item.get("service", "")).strip() == service_name
+                and str(item.get("endpoint", "")).strip() in endpoint_refs
+            )
+        ]
+
+    routes = _existing_routes_block(document)
+    if routes is None:
+        return
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        route["targets"] = [
+            target
+            for target in (route.get("targets") or [])
+            if not (
+                isinstance(target, dict)
+                and str(target.get("service", "")).strip() == service_name
+                and str(target.get("endpoint", "")).strip() in endpoint_refs
+            )
+        ]
+
+
+def _clear_output_profile_references(document: dict[str, Any], *, profile_slug: str) -> None:
+    for service_data in (document.get("services") or {}).values():
+        if not isinstance(service_data, dict):
+            continue
+        for endpoint in service_data.get("endpoints") or []:
+            if not isinstance(endpoint, dict):
+                continue
+            if str(endpoint.get("output_profile", "")).strip().lower() == profile_slug:
+                endpoint.pop("output_profile", None)
+
+    routes = _existing_routes_block(document)
+    if routes is None:
+        return
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        if str(route.get("output_profile", "")).strip().lower() == profile_slug:
+            route.pop("output_profile", None)
+
+
 def save_service(
     config_path: Path,
     *,
@@ -133,6 +238,7 @@ def delete_service(config_path: Path, *, service_name: str) -> str:
     if service_name not in services:
         raise ValueError(f"Service '{service_name}' does not exist.")
     services.pop(service_name)
+    _remove_service_references(document, service_name=service_name)
     save_config_document(config_path, document)
     return f"Service '{service_name}' deleted."
 
@@ -480,11 +586,29 @@ def delete_endpoint(config_path: Path, *, service_name: str, endpoint_name: str)
         raise ValueError(f"Service '{service_name}' does not exist.")
 
     endpoints = list(service.get("endpoints") or [])
+    existing_endpoint = next(
+        (
+            item
+            for item in endpoints
+            if isinstance(item, dict) and str(item.get("name")) == endpoint_name
+        ),
+        None,
+    )
     filtered = [item for item in endpoints if str(item.get("name")) != endpoint_name]
     if len(filtered) == len(endpoints):
         raise ValueError(f"Endpoint '{endpoint_name}' does not exist in '{service_name}'.")
 
     service["endpoints"] = filtered
+    endpoint_refs = {endpoint_name}
+    if isinstance(existing_endpoint, dict):
+        endpoint_slug = str(existing_endpoint.get("slug", "")).strip()
+        if endpoint_slug:
+            endpoint_refs.add(endpoint_slug)
+    _remove_endpoint_references(
+        document,
+        service_name=service_name,
+        endpoint_refs=endpoint_refs,
+    )
     save_config_document(config_path, document)
     return f"Endpoint '{endpoint_name}' deleted from '{service_name}'."
 
@@ -553,24 +677,7 @@ def delete_output_profile(config_path: Path, *, profile_slug: str) -> str:
     if profile_slug not in profiles:
         raise ValueError(f"Output profile '{profile_slug}' does not exist.")
 
-    if not document.get("routes"):
-        services = document.get("services") or {}
-        for service_name, service_data in services.items():
-            for endpoint in (service_data.get("endpoints") or []):
-                if not isinstance(endpoint, dict):
-                    continue
-                if str(endpoint.get("output_profile", "")).strip() == profile_slug:
-                    raise ValueError(
-                        f"Output profile '{profile_slug}' is still used by endpoint '{service_name}.{endpoint.get('name', '')}'."
-                    )
-    for route in _ensure_routes_list(document):
-        if not isinstance(route, dict):
-            continue
-        if str(route.get("output_profile", "")).strip() == profile_slug:
-            raise ValueError(
-                f"Output profile '{profile_slug}' is still used by route '{route.get('name', '')}'."
-            )
-
+    _clear_output_profile_references(document, profile_slug=profile_slug)
     profiles.pop(profile_slug)
     save_config_document(config_path, document)
     return f"Output profile '{profile_slug}' deleted."

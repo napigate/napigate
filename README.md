@@ -268,6 +268,8 @@ Access modes:
 - `services`
 - `endpoints`
 
+`services` and `endpoints` scopes may be left empty after admin-side dependency cleanup. In that state the client remains saved, but it will not match protected targets until you assign new scope entries.
+
 ### Supported Auth Methods
 
 - `api_key`
@@ -331,6 +333,8 @@ Route strategies:
 - `round_robin`
 - `failover`
 - `parallel_race`
+
+Routes may temporarily keep an empty `targets[]` list after admin-side cleanup. Those routes stay editable in the admin UI, but they will not match traffic until a target is attached again.
 
 `response` can be used for direct gateway replies without an upstream call:
 
@@ -556,6 +560,8 @@ Caching:
 - `pre_call.cache_key`
 
 The cache stores variables changed by that specific hook. If `cache_key` is omitted, NapiGate uses a default key scoped to the service, route, or endpoint that owns the hook.
+
+Admin delete actions clear dependent client scopes, route targets, and output-profile references instead of blocking the delete on those cross-references.
 
 ### `external_service`
 

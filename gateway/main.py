@@ -3179,14 +3179,12 @@ parallel_race: call all targets concurrently and return first healthy response</
           }}
           if (mode === "services") {{
             const services = Array.from(form.querySelectorAll("[data-scope-service]:checked")).map((input) => input.value);
-            if (!services.length) throw new Error("Select at least one service for the client scope.");
             return {{ mode: "services", services }};
           }}
           const endpoints = Array.from(form.querySelectorAll("[data-scope-endpoint]:checked")).map((input) => {{
             const [service, endpoint] = input.value.split("::", 2);
             return {{ service, endpoint }};
           }});
-          if (!endpoints.length) throw new Error("Select at least one endpoint for the client scope.");
           return {{ mode: "endpoints", endpoints }};
         }}
 
@@ -4415,10 +4413,6 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 raise ValueError("Gateway path must start with /.")
             if strategy not in {"single", "round_robin", "failover", "parallel_race"}:
                 raise ValueError("Route strategy must be single, round_robin, failover, or parallel_race.")
-            if strategy == "single" and len(targets) != 1:
-                raise ValueError("Single route strategy needs exactly one target.")
-            if strategy in {"round_robin", "failover", "parallel_race"} and len(targets) < 2:
-                raise ValueError(f"Route strategy {strategy} needs at least two targets.")
             if pre_call_cache_ttl < 0:
                 raise ValueError("Pre-call cache TTL must be zero or positive.")
             if response_cache_ttl < 0:

@@ -1706,10 +1706,7 @@ class GatewayRuntime:
             ]
 
         if not eligible_clients:
-            raise GatewayError(
-                500,
-                f"Protected route '{matched.route.name}' has no eligible clients.",
-            )
+            raise GatewayError(401, "Client authentication failed.")
 
         for client in eligible_clients:
             for method in client.auth_methods:

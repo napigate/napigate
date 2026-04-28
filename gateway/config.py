@@ -712,10 +712,6 @@ def _load_client(value: Any, *, index: int) -> ClientConfig:
             seen_endpoints.add(key)
             access_endpoints.append(ClientEndpointScope(service=service_name, endpoint=endpoint_name))
 
-    if access_mode == "services" and not access_services:
-        raise ValueError(f"Client '{code}' needs at least one access.services entry.")
-    if access_mode == "endpoints" and not access_endpoints:
-        raise ValueError(f"Client '{code}' needs at least one access.endpoints entry.")
     if access_mode != "services":
         access_services = []
     if access_mode != "endpoints":
@@ -730,7 +726,7 @@ def _load_client(value: Any, *, index: int) -> ClientConfig:
     for method_index, method_data in enumerate(methods_raw, start=1):
         method = _load_auth_method(method_data, client_code=code, index=method_index)
         if method.code in seen_method_codes:
-            raise ValueError(f"Client '{code}' has duplicate auth method code '{method.code}'.")
+            continue
         seen_method_codes.add(method.code)
         auth_methods.append(method)
 
@@ -830,7 +826,6 @@ def save_config_document(config_path: Path | str, document: dict[str, Any]) -> N
 def _load_services_block(
     services_block: dict[str, Any],
     *,
-    clients: dict[str, ClientConfig],
     output_profiles: dict[str, OutputProfileConfig],
 ) -> list[ServiceConfig]:
     services: list[ServiceConfig] = []
@@ -926,9 +921,7 @@ def _load_services_block(
 
             output_profile = str(endpoint_data.get("output_profile", "")).strip().lower() or None
             if output_profile is not None and output_profile not in output_profiles:
-                raise ValueError(
-                    f"Endpoint '{name}' in service '{service_name}' references unknown output_profile '{output_profile}'."
-                )
+                output_profile = None
 
             response_cache = _load_response_cache_config(
                 endpoint_data.get("response_cache"),
@@ -962,41 +955,6 @@ def _load_services_block(
 
         services.append(service)
 
-    service_names = {service.name for service in services}
-    endpoint_lookup = {
-        (service.name, endpoint.name)
-        for service in services
-        for endpoint in service.endpoints
-    }
-
-    for client in clients.values():
-        if client.access.mode == "services":
-            for service_name in client.access.services:
-                if service_name not in service_names:
-                    raise ValueError(
-                        f"Client '{client.code}' access references unknown service '{service_name}'."
-                    )
-        elif client.access.mode == "endpoints":
-            for target in client.access.endpoints:
-                if (target.service, target.endpoint) not in endpoint_lookup:
-                    raise ValueError(
-                        f"Client '{client.code}' access references unknown endpoint '{target.service}.{target.endpoint}'."
-                    )
-
-    for service in services:
-        if not service.auth.required:
-            continue
-        for endpoint in service.endpoints:
-            applicable = [
-                client
-                for client in clients.values()
-                if client.enabled and _client_scope_applies(client, service_name=service.name, endpoint_name=endpoint.name)
-            ]
-            if not applicable:
-                raise ValueError(
-                    f"Protected endpoint '{service.name}.{endpoint.name}' has no client access scope configured."
-                )
-
     return services
 
 
@@ -1010,8 +968,10 @@ def _endpoint_lookup(services: list[ServiceConfig]) -> dict[tuple[str, str], End
 
 
 def _load_route_targets(value: Any, *, label: str) -> list[RouteTargetConfig]:
-    if not isinstance(value, list) or not value:
-        raise ValueError(f"{label}.targets must be a non-empty list.")
+    if value in (None, "", []):
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{label}.targets must be a list.")
     targets: list[RouteTargetConfig] = []
     for index, item in enumerate(value, start=1):
         if not isinstance(item, dict):
@@ -1086,16 +1046,11 @@ def _load_routes_block(
             )
 
         targets = _load_route_targets(route_data.get("targets"), label=f"Route '{name}'")
-        if strategy == "single" and len(targets) != 1:
-            raise ValueError(f"Route '{name}' with strategy single must define exactly one target.")
-        if strategy in {"round_robin", "failover", "parallel_race"} and len(targets) < 2:
-            raise ValueError(f"Route '{name}' strategy {strategy} needs at least two targets.")
-
-        for target in targets:
-            if (target.service, target.endpoint) not in endpoint_lookup:
-                raise ValueError(
-                    f"Route '{name}' references unknown endpoint '{target.service}.{target.endpoint}'."
-                )
+        targets = [
+            target
+            for target in targets
+            if (target.service, target.endpoint) in endpoint_lookup
+        ]
 
         for method in methods:
             path_key = (method, gateway_path)
@@ -1105,7 +1060,7 @@ def _load_routes_block(
 
         output_profile = str(route_data.get("output_profile", "")).strip().lower() or None
         if output_profile is not None and output_profile not in output_profiles:
-            raise ValueError(f"Route '{name}' references unknown output_profile '{output_profile}'.")
+            output_profile = None
 
         pre_call = _load_pre_call_config(
             route_data.get("pre_call"),
@@ -1150,7 +1105,6 @@ def load_gateway_config(config_path: Path | str = CONFIG_PATH) -> GatewayConfig:
     log_aggregators = _load_log_aggregators_block(raw.get("observability"))
     services = _load_services_block(
         raw.get("services") or {},
-        clients=clients,
         output_profiles=output_profiles,
     )
     routes = _load_routes_block(
@@ -1169,23 +1123,6 @@ def load_gateway_config(config_path: Path | str = CONFIG_PATH) -> GatewayConfig:
 
 def load_clients(config_path: Path | str = CONFIG_PATH) -> dict[str, ClientConfig]:
     return load_gateway_config(config_path).clients
-
-
-def _client_scope_applies(
-    client: ClientConfig,
-    *,
-    service_name: str,
-    endpoint_name: str,
-) -> bool:
-    if client.access.mode == "all":
-        return True
-    if client.access.mode == "services":
-        return service_name in client.access.services
-    return any(
-        target.service == service_name and target.endpoint == endpoint_name
-        for target in client.access.endpoints
-    )
-
 
 def load_services(config_path: Path | str = CONFIG_PATH) -> list[ServiceConfig]:
     return load_gateway_config(config_path).services

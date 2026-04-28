@@ -148,6 +148,7 @@ Top-level structure:
 - `all`
 - `services`
 - `endpoints`
+- `services` and `endpoints` can temporarily hold empty selections after dependency cleanup; those clients simply match no protected targets until reassigned.
 
 ### Endpoint Scope Item
 
@@ -248,6 +249,7 @@ Common:
 - `round_robin`
 - `failover`
 - `parallel_race`
+- Routes can temporarily keep an empty `targets[]` list after dependency cleanup; they remain editable in admin but do not match traffic until a target is attached again.
 
 ### Output Profile Fields
 
@@ -384,6 +386,7 @@ Common:
 - When `json_envelope` builds an envelope, it uses existing response values such as `success`, `data`, `message`, and `error` when present, and falls back to HTTP status, the raw body, inferred messages, or generated errors when they are missing.
 - `json_envelope` can also map upstream keys into the standard envelope through `source_success_key`, `message_source_keys`, `error_source_keys`, and `data_fields`; missing or null mapped values become `empty_value`.
 - Image and opaque binary responses should usually stay on `passthrough`.
+- Deleting a referenced output profile clears dependent route or legacy endpoint `output_profile` values instead of blocking the delete.
 
 ## 6.9) Response Cache Behavior
 
@@ -687,6 +690,7 @@ pip install requests pyyaml
   - `data_fields`
   - `empty_value`
 - 2026-04-27: `pre_call` became available at service, route, and endpoint levels and now runs in that order.
+- 2026-04-28: admin deletes now clear dependent client scopes, route targets, and output-profile references instead of failing on those dependencies; empty scoped clients or targetless routes are preserved until reassigned.
 - Verified locally:
   - `python3 -m compileall gateway`
   - `python3 -m py_compile gateway/*.py`
