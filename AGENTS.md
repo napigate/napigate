@@ -27,8 +27,11 @@ This file stores the working knowledge for the `NapiGate` project so future sess
 
 ## 2) Architecture Decisions
 
-- This project intentionally stays on `stdlib + requests + PyYAML`.
-- The HTTP server runs on `ThreadingHTTPServer`.
+- This project intentionally stays on `stdlib + requests + PyYAML`; Redis support is an optional install extra.
+- The HTTP server runs on `PooledHTTPServer`, a subclass of `ThreadingHTTPServer` that dispatches into a `ThreadPoolExecutor` bounded by `NAPIGATE_MAX_WORKERS` (default 256) instead of spawning unbounded threads.
+- Cache and rate-limit state lives in pluggable backends (`gateway/cache.py`): in-memory by default, Redis when `NAPIGATE_REDIS_URL` is set. If Redis is unreachable at startup, both backends fall back to in-memory automatically and log a warning.
+- Rate-limiter state is NOT cleared on config reload; only response/pre-call/auth caches are cleared.
+- Upstream responses stream through to the client without buffering when no transforming output profile is applied and response caching is off. Otherwise the body is buffered to allow envelope transforms or cache storage.
 - Services and endpoints remain config-driven.
 - Public gateway exposure is now top-level route-driven:
   - `routes[].gateway_path`
@@ -66,14 +69,20 @@ This file stores the working knowledge for the `NapiGate` project so future sess
   - OAuth token issuance and verification
   - `external_service` auth execution
   - output profile transforms
-  - response caching
+  - response caching (via `_cache` backend)
   - async success hooks
   - async log forwarding
   - CORS preflight and response headers
-  - rate limiting
+  - rate limiting (via `_rate_limiter` backend)
   - `pre_call` execution
   - local configured responses
-  - upstream proxying
+  - upstream proxying — buffered or streaming
+- `gateway/cache.py`
+  - `CacheBackend` and `RateLimitBackend` protocols
+  - `MemoryCacheBackend` / `MemoryRateLimitBackend` — default in-process backends
+  - `RedisCacheBackend` — `SETEX`/`GET` with pickle, namespace `napigate:cache:`
+  - `RedisRateLimitBackend` — atomic Lua sliding window, namespace `napigate:rl:`
+  - `make_backends(redis_url)` factory — connects and pings Redis, falls back to memory on failure
 - `gateway/integrations.py`
   - async dispatcher for success hooks and log aggregators
 - `gateway/config.py`
@@ -229,7 +238,9 @@ Common:
 - `headers`
 - `query`
 - `pre_call`
+- `output_profile`
 
+- `output_profile` at endpoint level is the fallback when the route has no `output_profile` set.
 - `headers` can also blank out inherited incoming headers for an upstream target by setting a header value to an empty string.
 
 ### Route Fields
@@ -383,7 +394,9 @@ Common:
 ## 6.7) Rate Limit Behavior
 
 - `rate_limit` is configured at the service level.
-- It uses an in-memory sliding window.
+- It uses a sliding window — in-memory by default, Redis sorted-set when `NAPIGATE_REDIS_URL` is set.
+- The Redis path uses a Lua script for atomicity and UUID-suffixed member names to prevent request deduplication in high-concurrency scenarios.
+- Rate-limiter state is not cleared on config hot-reload.
 - `scope` can be:
   - `client_or_ip`
   - `client`
@@ -393,7 +406,7 @@ Common:
 ## 6.8) Output Profile Behavior
 
 - `output_profiles` are reusable top-level response contracts.
-- Routes opt in through `output_profile`.
+- Routes opt in through `output_profile`; endpoints can also set `output_profile` as a fallback when the route has none.
 - Supported types:
   - `passthrough`
   - `json_envelope`
@@ -408,9 +421,10 @@ Common:
 ## 6.9) Response Cache Behavior
 
 - `response_cache` is configured at the route level.
-- It uses an in-memory TTL cache.
+- It uses a TTL cache — in-memory by default, Redis (`SETEX`/`GET` with pickle) when `NAPIGATE_REDIS_URL` is set.
 - Only successful responses are cached.
 - Cache keys include method, path, query, configured vary headers, and optionally the authenticated client slug.
+- When response caching is enabled for a route, streaming is disabled for that route and the full body is buffered.
 
 ## 6.10) Success Hook Behavior
 
@@ -660,6 +674,10 @@ pip install requests pyyaml
 - `observability.log_retention_hours` controls hourly cleanup of monitor rows and rotated file logs; leave it unset for unlimited retention.
 - `forward_napigate_headers` defaults to `true`.
 - `gateway_responses` defaults to the disabled `{"detail": ...}` runtime error shape until enabled in config.
+- `NAPIGATE_REDIS_URL` enables Redis-backed rate limiting and response caching when set (e.g. `redis://localhost:6379/0`). Falls back to in-memory on connection failure. Requires the `redis` optional dependency (`pip install ".[redis]"`).
+- `NAPIGATE_MAX_WORKERS` caps the request handler thread pool (default `256`). Long-lived SSE connections at `/__monitor/stream` each occupy one worker for their duration.
+- Response bodies stream through to the client (chunked transfer encoding) when no transforming output profile is active and response caching is off. To pass streaming responses through a reverse proxy without re-buffering, set `proxy_buffering off` on the upstream location.
+- Rate-limiter sliding-window state is NOT cleared on config hot-reload.
 - Shared template changes go to `config/services.example.yaml`.
 - `config/services.yaml` and `config/security.yaml` are reloaded automatically when their on-disk contents change.
 - Container runtime user settings come from `.env`:
@@ -679,7 +697,7 @@ pip install requests pyyaml
   - `DEBIAN_MIRROR_URL=https://deb.debian.org/debian`
   - `DEBIAN_SECURITY_MIRROR_URL=https://security.debian.org/debian-security`
   - `PIP_INDEX_URL=https://pypi.org/simple`
-- Request and response bodies are still buffered in memory.
+- Request bodies are buffered in memory. Response bodies are buffered only when transformation or caching is needed.
 - YAML remains appropriate for gateway config objects, but it is not meant to be an application end-user database.
 
 ## 14) Current State And Verification
@@ -739,6 +757,21 @@ pip install requests pyyaml
 - 2026-04-28: admin and monitor log tables gained a `Response` column backed by the final outgoing response body, and the admin panel gained a `Config` tab with `observability.log_retention_hours` so monitor rows and rotated file logs can be kept indefinitely or cleaned hourly after a configured number of hours.
 - 2026-04-28: monitor storage and Live views now capture the final outgoing upstream `curl` command, including rendered URL, headers, and request body when a proxied call is actually sent.
 - 2026-04-28: gateway-wide `gateway_responses` settings were added under Config so public runtime errors can keep the default detail shape or switch to a configurable JSON envelope with custom keys, empty values, and headers.
+- 2026-04-29: endpoint forms now expose an output profile selector; routes that have no `output_profile` fall back to the endpoint's `output_profile` value.
+- 2026-04-29: pluggable cache and rate-limit backends were introduced in `gateway/cache.py`:
+  - in-memory backends remain the default
+  - Redis backends activate when `NAPIGATE_REDIS_URL` is set; connection failure degrades to in-memory automatically
+  - rate-limit state is no longer cleared on config hot-reload
+  - Redis rate limiting uses an atomic Lua sliding-window script with UUID-suffixed members
+  - cache key namespaces: `napigate:cache:` (pre_call, auth, response) and `napigate:rl:`
+- 2026-04-29: server concurrency model changed from unbounded per-connection threads to a bounded `ThreadPoolExecutor`:
+  - `PooledHTTPServer` replaces `ThreadingHTTPServer` in `main.py`
+  - pool size controlled by `NAPIGATE_MAX_WORKERS` (default 256)
+- 2026-04-29: streaming proxy support added:
+  - upstream responses stream through via chunked transfer encoding when no transforming output profile is active and response caching is off
+  - passthrough profiles are compatible with streaming (they only add headers)
+  - transforming profiles (`json_envelope`, `jsonp`) and cached routes still buffer the full body
+  - streaming responses appear as `<streaming>` in request log body column
 - Verified locally:
   - `python3 -m compileall gateway`
   - `python3 -m py_compile gateway/*.py`

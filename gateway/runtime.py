@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from collections import deque
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.cookies import SimpleCookie
 import ipaddress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import base64
 import hmac
@@ -21,6 +20,7 @@ import uuid
 
 import requests
 
+from gateway.cache import CacheBackend, RateLimitBackend, make_backends
 from gateway.config import (
     AuthMethodConfig,
     ClientConfig,
@@ -97,6 +97,7 @@ class OutgoingResponse:
     status_code: int
     headers: dict[str, str]
     body: bytes
+    body_iter: Iterator[bytes] | None = field(default=None)
 
 
 @dataclass(slots=True)
@@ -131,14 +132,12 @@ class AuthenticatedClient:
     consumed_cookie_names: set[str]
 
 
-@dataclass(slots=True)
-class CacheValue:
-    expires_at: float
-    value: Any
-
-
 class GatewayRuntime:
-    def __init__(self, config_path: Path | str = "config/services.yaml") -> None:
+    def __init__(
+        self,
+        config_path: Path | str = "config/services.yaml",
+        redis_url: str = "",
+    ) -> None:
         self.config_path = Path(config_path)
         self.services: list[ServiceConfig] = []
         self.routes: list[RouteConfig] = []
@@ -146,10 +145,9 @@ class GatewayRuntime:
         self.output_profiles: dict[str, OutputProfileConfig] = {}
         self.gateway_responses = GatewayResponseConfig()
         self.log_store = RequestLogStore()
-        self.pre_call_cache: dict[str, CacheValue] = {}
-        self.auth_cache: dict[str, CacheValue] = {}
-        self.response_cache: dict[str, CacheValue] = {}
-        self.rate_limit_hits: dict[str, deque[float]] = {}
+        self._cache: CacheBackend
+        self._rate_limiter: RateLimitBackend
+        self._cache, self._rate_limiter = make_backends(redis_url)
         self._config_signature: tuple[int, int] | None = None
         self._route_round_robin: dict[str, int] = {}
         self._lock = threading.RLock()
@@ -169,10 +167,7 @@ class GatewayRuntime:
             self.clients = clients
             self.output_profiles = output_profiles
             self.gateway_responses = gateway_responses
-            self.pre_call_cache.clear()
-            self.auth_cache.clear()
-            self.response_cache.clear()
-            self.rate_limit_hits.clear()
+            self._cache.clear()
             self._route_round_robin.clear()
             self._config_signature = signature
         self.dispatcher.configure(log_aggregators=gateway_config.log_aggregators)
@@ -687,17 +682,76 @@ class GatewayRuntime:
             authenticated_client=authenticated_client,
         )
 
+        _request_kwargs = dict(
+            headers=request_headers,
+            params=final_query,
+            data=request.body or None,
+            timeout=matched.service.timeout_seconds,
+            verify=matched.service.verify_ssl,
+            allow_redirects=False,
+        )
+
+        if self._should_stream_response(matched):
+            try:
+                response, _session, prepared_request = self._send_request_streaming(
+                    matched.service, request.method, upstream_url, **_request_kwargs
+                )
+            except requests.RequestException as exc:
+                prepared_request = getattr(exc, "napigate_prepared_request", None)
+                upstream_curl = (
+                    self._build_upstream_curl(
+                        prepared_request=prepared_request,
+                        timeout_seconds=matched.service.timeout_seconds,
+                        verify_ssl=matched.service.verify_ssl,
+                        allow_redirects=False,
+                    )
+                    if prepared_request is not None
+                    else ""
+                )
+                raise GatewayError(
+                    502,
+                    "Upstream request failed.",
+                    matched=matched,
+                    upstream_url=upstream_url,
+                    upstream_curl=upstream_curl,
+                ) from exc
+            upstream_curl = self._build_upstream_curl(
+                prepared_request=prepared_request,
+                timeout_seconds=matched.service.timeout_seconds,
+                verify_ssl=matched.service.verify_ssl,
+                allow_redirects=False,
+            )
+
+            def _body_iter() -> Iterator[bytes]:
+                try:
+                    yield from response.iter_content(8192)
+                finally:
+                    _session.close()
+
+            outgoing_response = OutgoingResponse(
+                status_code=response.status_code,
+                headers=self._prepare_response_headers(response.headers, request_id),
+                body=b"",
+                body_iter=_body_iter(),
+            )
+            # Passthrough profiles only modify headers, safe to apply on streaming responses
+            outgoing_response = self._apply_output_profile(
+                matched=matched,
+                request=request,
+                response=outgoing_response,
+            )
+            outgoing_response = self._tag_route_response(matched=matched, response=outgoing_response)
+            return TargetExecutionResult(
+                matched=matched,
+                response=outgoing_response,
+                upstream_url=upstream_url,
+                upstream_curl=upstream_curl,
+                response_source="upstream",
+            )
+
         try:
             response, prepared_request = self._send_request(
-                matched.service,
-                request.method,
-                upstream_url,
-                headers=request_headers,
-                params=final_query,
-                data=request.body or None,
-                timeout=matched.service.timeout_seconds,
-                verify=matched.service.verify_ssl,
-                allow_redirects=False,
+                matched.service, request.method, upstream_url, **_request_kwargs
             )
         except requests.RequestException as exc:
             prepared_request = getattr(exc, "napigate_prepared_request", None)
@@ -823,12 +877,9 @@ class GatewayRuntime:
             request=request,
             authenticated_client=authenticated_client,
         )
-        with self._lock:
-            cached = self.response_cache.get(cache_key)
-        if not cached or cached.expires_at <= time.time():
+        cached_response = self._cache.get(f"resp:{cache_key}")
+        if cached_response is None:
             return None
-
-        cached_response = cached.value
         headers = self.merge_response_headers(
             cached_response.headers,
             {
@@ -869,15 +920,15 @@ class GatewayRuntime:
             for key, value in response.headers.items()
             if key.lower() not in {"x-request-id", "x-napigate-cache"}
         }
-        with self._lock:
-            self.response_cache[cache_key] = CacheValue(
-                expires_at=time.time() + cache_config.ttl_seconds,
-                value=OutgoingResponse(
-                    status_code=response.status_code,
-                    headers=stored_headers,
-                    body=bytes(response.body),
-                ),
-            )
+        self._cache.set(
+            f"resp:{cache_key}",
+            OutgoingResponse(
+                status_code=response.status_code,
+                headers=stored_headers,
+                body=bytes(response.body),
+            ),
+            cache_config.ttl_seconds,
+        )
 
     def _response_cache_key(
         self,
@@ -1210,9 +1261,9 @@ class GatewayRuntime:
         rendered_cache_key = self.render_template(raw_cache_key, context)
         cache_key = str(rendered_cache_key or default_cache_key)
         now = time.time()
-        cached = self.pre_call_cache.get(cache_key)
-        if cached and cached.expires_at > now:
-            variables.update(cached.value)
+        cached_vars = self._cache.get(f"pre_call:{cache_key}")
+        if cached_vars is not None:
+            variables.update(cached_vars)
             return
 
         def call(method: str, url: str, **kwargs: Any) -> requests.Response:
@@ -1297,10 +1348,7 @@ class GatewayRuntime:
                 for key, value in variables.items()
                 if key not in before_variables or before_variables.get(key) != value
             }
-            self.pre_call_cache[cache_key] = CacheValue(
-                expires_at=now + pre_call.cache_ttl_seconds,
-                value=changed_variables,
-            )
+            self._cache.set(f"pre_call:{cache_key}", changed_variables, pre_call.cache_ttl_seconds)
 
     def _build_template_context(
         self,
@@ -1718,6 +1766,56 @@ class GatewayRuntime:
                 raise
             return response, prepared_request
 
+    def _send_request_streaming(
+        self,
+        service: ServiceConfig,
+        method: str,
+        url: str,
+        **kwargs: Any,
+    ) -> tuple[requests.Response, requests.Session, requests.PreparedRequest]:
+        """Open a streaming upstream request. Caller must close session after consuming body."""
+        request_kwargs: dict[str, Any] = {}
+        send_kwargs = dict(kwargs)
+        for key in ("headers", "files", "data", "json", "params", "cookies", "auth"):
+            if key in send_kwargs:
+                request_kwargs[key] = send_kwargs.pop(key)
+        verify = send_kwargs.pop("verify", None)
+        send_kwargs.pop("stream", None)
+        cert = send_kwargs.pop("cert", None)
+        proxies = send_kwargs.pop("proxies", None)
+        session = requests.Session()
+        session.trust_env = service.trust_env_proxy
+        try:
+            prepared_request = session.prepare_request(
+                requests.Request(method.upper(), url, **request_kwargs)
+            )
+            merged_settings = session.merge_environment_settings(
+                prepared_request.url,
+                proxies=proxies,
+                stream=True,
+                verify=verify,
+                cert=cert,
+            )
+            send_kwargs = {**merged_settings, **send_kwargs}
+            response = session.send(prepared_request, **send_kwargs)
+        except requests.RequestException as exc:
+            session.close()
+            setattr(exc, "napigate_prepared_request", locals().get("prepared_request"))
+            raise
+        return response, session, prepared_request
+
+    def _should_stream_response(self, matched: MatchedEndpoint) -> bool:
+        """Return True when the response can be streamed without buffering."""
+        profile_slug = self._route_output_profile_slug(matched)
+        if profile_slug:
+            profile = self.output_profiles.get(profile_slug)
+            if profile and profile.type != "passthrough":
+                return False
+        cache_config = self._route_response_cache_config(matched)
+        if cache_config.enabled and cache_config.ttl_seconds > 0:
+            return False
+        return True
+
     def _build_upstream_curl(
         self,
         *,
@@ -1767,6 +1865,8 @@ class GatewayRuntime:
         return f"{body_prefix}{rendered}" if body_prefix else rendered
 
     def _response_body_for_log(self, response: OutgoingResponse) -> str:
+        if response.body_iter is not None:
+            return "<streaming>"
         if not response.body:
             return ""
         content_type = str(response.headers.get("Content-Type", "") or "")
@@ -1903,21 +2003,15 @@ class GatewayRuntime:
             authenticated_client=authenticated_client,
         )
         bucket_key = f"{matched.service.name}:{rate_limit.scope}:{subject}"
-        now = time.time()
-
-        with self._lock:
-            bucket = self.rate_limit_hits.setdefault(bucket_key, deque())
-            cutoff = now - rate_limit.window_seconds
-            while bucket and bucket[0] <= cutoff:
-                bucket.popleft()
-            if len(bucket) >= rate_limit.requests:
-                retry_after = max(1, int(bucket[0] + rate_limit.window_seconds - now))
-                raise GatewayError(
-                    429,
-                    f"Rate limit exceeded for service '{matched.service.name}'.",
-                    headers={"Retry-After": str(retry_after)},
-                )
-            bucket.append(now)
+        allowed, retry_after = self._rate_limiter.check_and_record(
+            bucket_key, rate_limit.requests, rate_limit.window_seconds
+        )
+        if not allowed:
+            raise GatewayError(
+                429,
+                f"Rate limit exceeded for service '{matched.service.name}'.",
+                headers={"Retry-After": str(retry_after)},
+            )
 
     def _rate_limit_subject(
         self,
@@ -2303,9 +2397,9 @@ class GatewayRuntime:
         if method.cache_ttl_seconds > 0 and method.cache_key:
             rendered_cache_key = self.render_template(method.cache_key, context)
             cache_key = f"{client.code}:{method.code}:{rendered_cache_key}"
-            cached = self.auth_cache.get(cache_key)
-            if cached and cached.expires_at > time.time():
-                return cached.value
+            cached_auth = self._cache.get(f"auth:{cache_key}")
+            if cached_auth is not None:
+                return cached_auth
 
         decision: dict[str, Any] = {"result": None}
 
@@ -2378,10 +2472,7 @@ class GatewayRuntime:
 
         result = decision["result"]
         if result is not None and cache_key and method.cache_ttl_seconds > 0:
-            self.auth_cache[cache_key] = CacheValue(
-                expires_at=time.time() + method.cache_ttl_seconds,
-                value=result,
-            )
+            self._cache.set(f"auth:{cache_key}", result, method.cache_ttl_seconds)
         return result
 
     def _extract_bearer_token(self, headers: Mapping[str, Any]) -> str | None:

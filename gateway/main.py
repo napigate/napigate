@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from html import escape
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -50,7 +51,8 @@ setup_logging()
 LOGGER = logging.getLogger("gateway.main")
 SETTINGS = load_settings()
 runtime = GatewayRuntime(
-    config_path=Path(get_env("NAPIGATE_CONFIG", "APIGATE_CONFIG", default="config/services.yaml"))
+    config_path=Path(get_env("NAPIGATE_CONFIG", "APIGATE_CONFIG", default="config/services.yaml")),
+    redis_url=SETTINGS.redis_url,
 )
 security = SecurityManager(
     config_path=Path(
@@ -4070,6 +4072,21 @@ parallel_race: call all targets concurrently and return first healthy response</
     """
 
 
+class PooledHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a bounded thread pool instead of unbounded thread spawning."""
+
+    def __init__(self, server_address, RequestHandlerClass, max_workers: int = 256) -> None:
+        super().__init__(server_address, RequestHandlerClass)
+        self._pool = ThreadPoolExecutor(max_workers=max_workers)
+
+    def process_request(self, request, client_address) -> None:  # type: ignore[override]
+        self._pool.submit(self.process_request_thread, request, client_address)
+
+    def server_close(self) -> None:
+        self._pool.shutdown(wait=False)
+        super().server_close()
+
+
 class GatewayHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "NapiGate/0.1"
@@ -5358,9 +5375,26 @@ class GatewayHandler(BaseHTTPRequestHandler):
         )
 
     def _write_response(self, response: OutgoingResponse) -> None:
-        body = response.body or b""
         self.send_response(response.status_code, HTTPStatus(response.status_code).phrase)
 
+        if response.body_iter is not None and self.command != "HEAD":
+            for key, value in response.headers.items():
+                if key.lower() in {"content-length", "transfer-encoding"}:
+                    continue
+                self.send_header(key, value)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            try:
+                for chunk in response.body_iter:
+                    if chunk:
+                        self.wfile.write(f"{len(chunk):x}\r\n".encode())
+                        self.wfile.write(chunk)
+                        self.wfile.write(b"\r\n")
+            finally:
+                self.wfile.write(b"0\r\n\r\n")
+            return
+
+        body = response.body or b""
         has_content_length = False
         for key, value in response.headers.items():
             if key.lower() == "content-length":
@@ -5389,8 +5423,9 @@ def main() -> None:
     runtime.config_path = Path(args.config)
     runtime.load()
     security.load()
-    server = ThreadingHTTPServer((args.host, args.port), GatewayHandler)
-    LOGGER.info("NapiGate listening on %s:%s", args.host, args.port)
+    max_workers = int(get_env("NAPIGATE_MAX_WORKERS", default="256"))
+    server = PooledHTTPServer((args.host, args.port), GatewayHandler, max_workers=max_workers)
+    LOGGER.info("NapiGate listening on %s:%s (max_workers=%s)", args.host, args.port, max_workers)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

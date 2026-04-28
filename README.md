@@ -6,7 +6,7 @@ NapiGate is a lightweight, config-driven Python API gateway built for small and 
 
 - YAML-defined services, endpoint targets, and gateway routes
 - route strategies for `single`, `round_robin`, `failover`, and `parallel_race`
-- reusable output profiles for passthrough, JSON envelope, and JSONP responses
+- reusable output profiles for passthrough, JSON envelope, and JSONP responses — selectable at route or endpoint level
 - Top-level client model with scoped access
 - stable client and endpoint slugs for admin APIs and external automation
 - Multiple auth methods per client
@@ -17,7 +17,10 @@ NapiGate is a lightweight, config-driven Python API gateway built for small and 
 - Built-in monitor UI, JSON logs endpoint, and live stream
 - File-backed users and roles for admin access
 - Daily rotating file logs with optional hourly retention cleanup
-- Minimal dependency footprint: `stdlib + requests + PyYAML`
+- Bounded thread pool (`NAPIGATE_MAX_WORKERS`) instead of unbounded per-connection threads
+- Streaming proxy for responses that need no body transformation — memory footprint stays flat for large payloads
+- Optional Redis backend for distributed rate limiting and response caching; falls back to in-memory automatically
+- Minimal dependency footprint: `stdlib + requests + PyYAML` (Redis support is an optional extra)
 
 ## Why This Project
 
@@ -34,6 +37,7 @@ The codebase is split into a few focused modules:
 
 - [`gateway/config.py`](gateway/config.py): typed config loading, validation, and route compilation
 - [`gateway/runtime.py`](gateway/runtime.py): request matching, client auth, rate limiting, CORS handling, token issuance, output transforms, response caching, async success hooks, config hot-reload, and upstream proxying
+- [`gateway/cache.py`](gateway/cache.py): pluggable cache and rate-limit backends — in-memory (default) or Redis
 - [`gateway/admin_ops.py`](gateway/admin_ops.py): config and security mutations used by the admin UI
 - [`gateway/security.py`](gateway/security.py): users, roles, password hashing, and authorization checks
 - [`gateway/monitoring.py`](gateway/monitoring.py): SQLite-backed request log storage and retention cleanup
@@ -41,7 +45,7 @@ The codebase is split into a few focused modules:
 - [`gateway/settings.py`](gateway/settings.py): `.env` loading and runtime settings
 - [`gateway/main.py`](gateway/main.py): HTTP server, admin/monitor endpoints, and CLI entrypoint
 
-The runtime uses `ThreadingHTTPServer` and keeps the gateway model intentionally simple:
+The runtime uses a bounded thread pool (`PooledHTTPServer`) and keeps the gateway model intentionally simple:
 
 1. Match the incoming request to a configured endpoint.
 2. Enforce service protection and client scope.
@@ -61,6 +65,7 @@ The runtime uses `ThreadingHTTPServer` and keeps the gateway model intentionally
 │   └── services.example.yaml
 ├── gateway/
 │   ├── admin_ops.py
+│   ├── cache.py
 │   ├── config.py
 │   ├── logging_utils.py
 │   ├── main.py
@@ -87,10 +92,18 @@ Install locally:
 pip install .
 ```
 
+To enable Redis-backed rate limiting and caching, install the optional extra:
+
+```bash
+pip install ".[redis]"
+```
+
 Or install dependencies without packaging:
 
 ```bash
 pip install requests pyyaml
+# optional Redis support:
+pip install "redis[hiredis]"
 ```
 
 The package also exposes a console entrypoint after installation:
@@ -219,6 +232,8 @@ See [`.env.example`](.env.example) for the full template.
 - `NAPIGATE_ADMIN_USERNAME`
 - `NAPIGATE_ADMIN_PASSWORD`
 - `NAPIGATE_ADMIN_ACCESS_WHITELIST_IPS`
+- `NAPIGATE_REDIS_URL`
+- `NAPIGATE_MAX_WORKERS`
 - `UID`
 - `GID`
 - `CURRENT_USER`
@@ -363,6 +378,7 @@ Endpoint fields:
 - `headers`
 - `query`
 - `pre_call`
+- `output_profile`
 
 Route fields:
 
@@ -423,7 +439,7 @@ Important contract notes:
 
 - `auth.required` is service-level only.
 - If `response` is defined, NapiGate returns it before any upstream proxy call.
-- `output_profile` is route-level and applies after local responses or upstream responses are built.
+- `output_profile` can be set at route level or endpoint level. The route value takes precedence; the endpoint value is the fallback when the route has no profile set.
 - `response_cache` is route-level and only stores successful responses for configured methods.
 - `success_hook` is route-level, async, and fires only after successful responses.
 - Legacy endpoint-local `gateway_path`, `output_profile`, `response_cache`, and `success_hook` still load as single-target routes for migration, but new config should use `routes[]`.
@@ -501,7 +517,7 @@ Behavior:
 
 ### Response Caching
 
-Route-level response caching uses in-memory TTL storage:
+Route-level response caching uses a TTL store — in-memory by default, Redis when `NAPIGATE_REDIS_URL` is set. The Redis backend uses `SETEX` with pickle serialization and the key prefix `napigate:cache:`. Rate-limit state uses `napigate:rl:`. Both namespaces are isolated from any other keys in the same Redis instance.
 
 ```yaml
 response_cache:
@@ -596,7 +612,7 @@ cors:
 
 ### Rate Limiting
 
-Service-level rate limiting uses an in-memory sliding window:
+Service-level rate limiting uses a sliding window. With no Redis configured it runs in-memory; set `NAPIGATE_REDIS_URL` to share state across multiple instances using a Redis sorted-set Lua script:
 
 ```yaml
 rate_limit:
@@ -785,7 +801,9 @@ curl \
 
 - The project intentionally avoids heavyweight frameworks.
 - Runtime and admin config validation happen before persisted changes are accepted.
-- Request and response bodies are currently buffered in memory.
+- Request bodies are buffered in memory. Response bodies stream through without buffering when the route has no transforming output profile and response caching is disabled; otherwise they are buffered to allow envelope wrapping or cache storage.
+- If you proxy NapiGate through Nginx and want streaming responses to reach the client without buffering, set `proxy_buffering off` in the relevant location block.
+- Rate-limiter sliding-window state is not cleared on config hot-reload; only the response/pre-call/auth caches are cleared.
 - `trust_env_proxy` defaults to `false`.
 - `forward_napigate_headers` defaults to `true`.
 - `gateway_responses` defaults to the disabled `{"detail": ...}` runtime error shape until you enable it.

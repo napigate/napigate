@@ -47,6 +47,7 @@ class BasicAuthSettings:
 class AppSettings:
     admin_auth: BasicAuthSettings
     admin_access_allowlist: list[str]
+    redis_url: str = ""
 
 
 def get_env(*names: str, default: str = "") -> str:
@@ -82,6 +83,8 @@ def load_settings() -> AppSettings:
         if entry not in allowlist:
             allowlist.append(entry)
 
+    redis_url = get_env("NAPIGATE_REDIS_URL").strip()
+
     return AppSettings(
         admin_auth=BasicAuthSettings(
             username=username,
@@ -89,4 +92,5 @@ def load_settings() -> AppSettings:
             realm="NapiGate Admin",
         ),
         admin_access_allowlist=allowlist,
+        redis_url=redis_url,
     )
