@@ -777,9 +777,7 @@ class GatewayRuntime:
     def _route_output_profile_slug(self, matched: MatchedEndpoint) -> str | None:
         if matched.route.output_profile:
             return matched.route.output_profile
-        if matched.route.legacy_endpoint_config:
-            return matched.endpoint.output_profile
-        return None
+        return matched.endpoint.output_profile
 
     def _route_success_hook(self, matched: MatchedEndpoint) -> SuccessHookConfig | None:
         if matched.route.success_hook is not None:

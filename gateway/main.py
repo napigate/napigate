@@ -1347,6 +1347,7 @@ def render_admin_page(
           route_strategy: {{ title: "Route Strategy", text: "single calls one target, round_robin rotates targets, failover tries the next target on 5xx or connection failure, parallel_race calls targets concurrently and returns the first healthy response.", example: "failover" }},
           route_targets: {{ title: "Route Targets", text: "Select one or more service endpoints that this public route can call.", example: "protected_httpbin / user_by_id" }},
           output_profile: {{ title: "Output Profile", text: "Choose a reusable response-shaping profile for this route. Leave blank to keep the target response untouched.", example: "standard_json" }},
+          endpoint_output_profile: {{ title: "Output Profile", text: "Default response-shaping profile for this endpoint. Routes that do not set their own output profile will use this value.", example: "standard_json" }},
           response_cache_ttl_seconds: {{ title: "Response Cache TTL", text: "Cache successful route responses in memory for this many seconds before calling a target again.", example: "60" }},
           response_cache_vary_headers: {{ title: "Cache Vary Headers", text: "Header names that should produce separate cache entries for the same path and query.", example: "Accept-Language, X-Tenant" }},
           response_cache_methods: {{ title: "Cache Methods", text: "HTTP methods eligible for response caching when the TTL is enabled.", example: "GET, HEAD" }},
@@ -3220,6 +3221,17 @@ def render_admin_page(
                   `
                   : ''
               }}
+              <label data-help="endpoint_output_profile">
+                <span>Output Profile</span>
+                <select name="output_profile">
+                  <option value="">— inherit from route —</option>
+                  ${{
+                    STATE.output_profiles.map((profile) =>
+                      `<option value="${{esc(profile.slug)}}" ${{(endpoint?.output_profile || "") === profile.slug ? "selected" : ""}}>${{esc(profile.slug)}}${{profile.enabled ? "" : " (disabled)"}}</option>`
+                    ).join("")
+                  }}
+                </select>
+              </label>
               <label class="full" data-help="endpoint_headers_yaml">
                 <span>Headers (JSON/YAML Mapping)</span>
                 <textarea name="headers_yaml">${{esc(jsonText(endpoint?.headers || {{}}))}}</textarea>
@@ -4863,6 +4875,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             pre_call_code = str(form.get("pre_call_code", "")).rstrip()
             pre_call_cache_ttl = int(str(form.get("pre_call_cache_ttl_seconds", "0")).strip() or "0")
             pre_call_cache_key = str(form.get("pre_call_cache_key", "")).strip()
+            output_profile = str(form.get("output_profile", "")).strip().lower()
 
             if not service_name:
                 raise ValueError("Service name is required.")
@@ -4886,6 +4899,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 pre_call_code=pre_call_code,
                 pre_call_cache_ttl=pre_call_cache_ttl,
                 pre_call_cache_key=pre_call_cache_key,
+                output_profile=output_profile,
             )
             runtime.load()
             self._send_admin_mutation_success(message)

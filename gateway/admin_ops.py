@@ -420,6 +420,7 @@ def save_endpoint(
     pre_call_code: str,
     pre_call_cache_ttl: int,
     pre_call_cache_key: str,
+    output_profile: str,
 ) -> str:
     document = load_config_document(config_path)
     services = document.setdefault("services", {})
@@ -484,7 +485,10 @@ def save_endpoint(
         payload["pre_call"] = pre_call_payload
     else:
         payload.pop("pre_call", None)
-    payload.pop("output_profile", None)
+    if output_profile:
+        payload["output_profile"] = output_profile
+    else:
+        payload.pop("output_profile", None)
     payload.pop("response_cache", None)
     payload.pop("success_hook", None)
 
