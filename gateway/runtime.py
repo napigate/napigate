@@ -298,6 +298,7 @@ class GatewayRuntime:
         status_code = 204
         error_message = ""
         upstream_url = "local://cors-preflight"
+        response_body = ""
 
         try:
             headers = self._build_cors_headers(matched, request, preflight=True)
@@ -308,6 +309,7 @@ class GatewayRuntime:
         except GatewayError as exc:
             status_code = exc.status_code
             error_message = exc.detail
+            response_body = self._error_response_body(exc.detail)
             raise
         finally:
             duration_ms = int((time.perf_counter() - started_at) * 1000)
@@ -320,6 +322,7 @@ class GatewayRuntime:
                 status_code=status_code,
                 duration_ms=duration_ms,
                 error_message=error_message,
+                response_body=response_body,
             )
 
     def handle_proxy(self, request: IncomingRequest) -> OutgoingResponse:
@@ -333,6 +336,7 @@ class GatewayRuntime:
         error_message = ""
         upstream_url = ""
         upstream_curl = ""
+        response_body = ""
         log_matched = matched
         authenticated_client: AuthenticatedClient | None = None
 
@@ -356,6 +360,7 @@ class GatewayRuntime:
                     self._build_cors_headers(matched, request),
                 )
                 status_code = cached_response.status_code
+                response_body = self._response_body_for_log(cached_response)
                 self._emit_success_hook(
                     matched=matched,
                     request=request,
@@ -381,6 +386,7 @@ class GatewayRuntime:
                 self._build_cors_headers(result.matched, request),
             )
             status_code = result.response.status_code
+            response_body = self._response_body_for_log(result.response)
             self._emit_success_hook(
                 matched=result.matched,
                 request=request,
@@ -403,15 +409,18 @@ class GatewayRuntime:
                 upstream_url = exc.upstream_url
             if exc.upstream_curl:
                 upstream_curl = exc.upstream_curl
+            response_body = self._error_response_body(exc.detail)
             raise
         except requests.RequestException as exc:
             status_code = 502
             error_message = str(exc)
+            response_body = self._error_response_body("Upstream request failed.")
             LOGGER.exception("Upstream HTTP error for %s", request.path)
             raise GatewayError(502, "Upstream request failed.") from exc
         except Exception as exc:  # noqa: BLE001
             status_code = 500
             error_message = str(exc)
+            response_body = self._error_response_body("Gateway internal error.")
             LOGGER.exception("Unhandled gateway error for %s", request.path)
             raise GatewayError(500, "Gateway internal error.") from exc
         finally:
@@ -425,6 +434,7 @@ class GatewayRuntime:
                 status_code=status_code,
                 duration_ms=duration_ms,
                 error_message=error_message,
+                response_body=response_body,
             )
 
     def _execute_route(
@@ -1197,7 +1207,13 @@ class GatewayRuntime:
             rendered_kwargs.setdefault("timeout", matched.service.timeout_seconds)
             rendered_kwargs.setdefault("verify", matched.service.verify_ssl)
             rendered_kwargs.setdefault("allow_redirects", False)
-            return self._send_request(matched.service, method.upper(), final_url, **rendered_kwargs)
+            response, _prepared_request = self._send_request(
+                matched.service,
+                method.upper(),
+                final_url,
+                **rendered_kwargs,
+            )
+            return response
 
         def set_var(name: str, value: Any) -> None:
             variables[name] = value
@@ -1705,6 +1721,25 @@ class GatewayRuntime:
         rendered = " \\\n  ".join(command)
         return f"{body_prefix}{rendered}" if body_prefix else rendered
 
+    def _response_body_for_log(self, response: OutgoingResponse) -> str:
+        if not response.body:
+            return ""
+        content_type = str(response.headers.get("Content-Type", "") or "")
+        parsed_body = self._parse_response_body(response.body, content_type=content_type)
+        if parsed_body in (None, ""):
+            return ""
+        if isinstance(parsed_body, (dict, list)):
+            text = json.dumps(parsed_body, ensure_ascii=False)
+        else:
+            text = str(parsed_body)
+        if len(text) > 12000:
+            trimmed = len(text) - 12000
+            return f"{text[:12000]}\n...[truncated {trimmed} chars]"
+        return text
+
+    def _error_response_body(self, detail: str) -> str:
+        return json.dumps({"detail": detail}, ensure_ascii=False)
+
     def _write_log(
         self,
         *,
@@ -1716,6 +1751,7 @@ class GatewayRuntime:
         status_code: int,
         duration_ms: int,
         error_message: str,
+        response_body: str,
     ) -> None:
         created_at = datetime.now(UTC).isoformat()
         entry = LogEntry(
@@ -1730,6 +1766,7 @@ class GatewayRuntime:
             duration_ms=duration_ms,
             client_ip=request.client_ip,
             error=error_message,
+            response_body=response_body,
             created_at=created_at,
         )
         self.log_store.write(entry)

@@ -542,6 +542,7 @@ Common:
   - hourly cleanup of rows and rotated files when `observability.log_retention_hours` is set
 - proxied request capture:
   - monitor rows now also persist the final upstream URL and rendered `curl` command after templating, auth stripping, and header/query injection
+  - monitor rows also persist the final outgoing response body text shown to the client when it can be decoded as text
 
 ## 11) Admin UI Notes
 
@@ -560,7 +561,7 @@ Common:
 - Admin tabs update the URL hash, for example `/__admin#output`, without reloading the page.
 - Admin modal save/delete actions use AJAX when JavaScript is available, refresh the in-page admin state, and preserve the active tab instead of returning to Live.
 - Inactive tabs are dark with white text by design.
-- Monitor and admin Live tables now show both `Status` and `Success` columns for each request row.
+- Monitor and admin Live tables now show `Status` plus a `Response` column for each request row.
 - Monitor and admin Live views now expose the final upstream URL plus a copyable rendered `cURL` for proxied requests.
 - Client forms support:
   - slug, title, and code
@@ -707,7 +708,7 @@ pip install requests pyyaml
   - `empty_value`
 - 2026-04-27: `pre_call` became available at service, route, and endpoint levels and now runs in that order.
 - 2026-04-28: admin deletes now clear dependent client scopes, route targets, and output-profile references instead of failing on those dependencies; empty scoped clients or targetless routes are preserved until reassigned.
-- 2026-04-28: admin and monitor log tables gained a `Success` column, and the admin panel gained a `Config` tab with `observability.log_retention_hours` so monitor rows and rotated file logs can be kept indefinitely or cleaned hourly after a configured number of hours.
+- 2026-04-28: admin and monitor log tables gained a `Response` column backed by the final outgoing response body, and the admin panel gained a `Config` tab with `observability.log_retention_hours` so monitor rows and rotated file logs can be kept indefinitely or cleaned hourly after a configured number of hours.
 - 2026-04-28: monitor storage and Live views now capture the final outgoing upstream `curl` command, including rendered URL, headers, and request body when a proxied call is actually sent.
 - Verified locally:
   - `python3 -m compileall gateway`

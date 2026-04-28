@@ -233,6 +233,20 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
           white-space: pre-wrap;
           word-break: break-word;
         }}
+        .response-cell {{
+          min-width: 260px;
+        }}
+        .response-snippet {{
+          margin: 0;
+          padding: 8px;
+          border: 1px solid #eadbc4;
+          border-radius: 10px;
+          background: #fff8ee;
+          white-space: pre-wrap;
+          word-break: break-word;
+          max-height: 120px;
+          overflow: auto;
+        }}
         .mono {{
           font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
           font-size: 11px;
@@ -288,10 +302,9 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
                   <th>Endpoint</th>
                   <th>Upstream</th>
                   <th>Status</th>
-                  <th>Success</th>
+                  <th>Response</th>
                   <th>Duration (ms)</th>
                   <th>IP</th>
-                  <th>Error</th>
                 </tr>
               </thead>
               <tbody id="log-rows"></tbody>
@@ -317,10 +330,6 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
           if (code >= 400) return "status-4xx";
           if (code >= 200) return "status-2xx";
           return "";
-        }}
-
-        function successBadge(success) {{
-          return `<span class="status-badge ${{success ? "bool-yes" : "bool-no"}}">${{success ? "Yes" : "No"}}</span>`;
         }}
 
         async function copyText(text) {{
@@ -381,6 +390,22 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
           `;
         }}
 
+        function responseText(row) {{
+          return String(row.response_body || row.error || "").trim();
+        }}
+
+        function renderResponseCell(row) {{
+          const text = responseText(row);
+          if (!text) {{
+            return '<span class="muted">-</span>';
+          }}
+          return `
+            <div class="response-cell">
+              <pre class="mono response-snippet">${{esc(text)}}</pre>
+            </div>
+          `;
+        }}
+
         function render(rows) {{
           const totalRows = rows.length;
           const total5xx = rows.filter((row) => row.status_code >= 500).length;
@@ -403,13 +428,12 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
                   <td>${{esc(row.endpoint_name)}}</td>
                   <td>${{renderUpstreamCell(row)}}</td>
                   <td><span class="status-badge ${{statusClass(row.status_code)}}">${{row.status_code}}</span></td>
-                  <td>${{successBadge(Boolean(row.success))}}</td>
+                  <td>${{renderResponseCell(row)}}</td>
                   <td>${{row.duration_ms}}</td>
                   <td class="mono">${{esc(row.client_ip)}}</td>
-                  <td>${{esc(row.error || "-")}}</td>
                 </tr>
               `).join("")
-            : '<tr><td colspan="11">No logs yet.</td></tr>';
+            : '<tr><td colspan="10">No logs yet.</td></tr>';
         }}
 
         function setOnlineState(online) {{
@@ -1832,10 +1856,15 @@ def render_admin_page(
           return `${{url}}${{separator}}${{encodeURIComponent(key)}}=${{encodeURIComponent(value)}}`;
         }}
 
-        function clientTouchesEndpoint(client, serviceName, endpointName) {{
+        function clientTouchesEndpoint(client, serviceName, endpointRef) {{
+          const endpointName = typeof endpointRef === "string" ? endpointRef : String(endpointRef?.name || "");
+          const endpointSlug = typeof endpointRef === "string" ? "" : String(endpointRef?.slug || "");
           if (client.access.mode === "all") return true;
           if (client.access.mode === "services") return client.access.services.includes(serviceName);
-          return client.access.endpoints.some((item) => item.service === serviceName && item.endpoint === endpointName);
+          return client.access.endpoints.some((item) =>
+            item.service === serviceName
+            && (item.endpoint === endpointName || (endpointSlug && item.endpoint === endpointSlug))
+          );
         }}
 
         function authPriority(type) {{
@@ -2007,6 +2036,18 @@ def render_admin_page(
           `;
         }}
 
+        function renderLiveResponseCell(row) {{
+          const responseText = String(row.response_body || row.error || "").trim();
+          if (!responseText) {{
+            return '<span class="muted">-</span>';
+          }}
+          return `
+            <div class="detail-box" style="min-width:260px;">
+              <pre style="max-height:120px; overflow:auto;">${{esc(responseText)}}</pre>
+            </div>
+          `;
+        }}
+
         function renderConfig() {{
           const wrap = document.getElementById("config-wrap");
           if (!wrap) return;
@@ -2145,10 +2186,9 @@ def render_admin_page(
 	                          <th>Service</th>
 	                          <th>Upstream</th>
 	                          <th>Status</th>
-	                          <th>Success</th>
+	                          <th>Response</th>
 	                          <th>Duration</th>
 	                          <th>Client IP</th>
-	                          <th>Error</th>
 	                        </tr>
                       </thead>
                       <tbody>
@@ -2161,10 +2201,9 @@ def render_admin_page(
 	                              <td>${{esc(row.service_name)}} / ${{esc(row.endpoint_name)}}</td>
 	                              <td>${{renderLiveUpstreamCell(row)}}</td>
 	                              <td><span class="tag ${{statusClass(row.status_code)}}">${{esc(row.status_code)}}</span></td>
-	                              <td><span class="tag ${{row.success ? "ok" : "warn"}}">${{row.success ? "Yes" : "No"}}</span></td>
+	                              <td>${{renderLiveResponseCell(row)}}</td>
 	                              <td>${{esc(row.duration_ms)}} ms</td>
 	                              <td class="mono">${{esc(row.client_ip)}}</td>
-	                              <td>${{esc(row.error || "-")}}</td>
                             </tr>
                           `).join("")
                         }}
@@ -2299,11 +2338,11 @@ def render_admin_page(
         }}
 
         function routeEligibleClients(route) {{
-          const protectedTargets = routeProtectedTargets(route);
-          if (!protectedTargets.length) return [];
+          const routeTargets = routeTargetsForCurl(route);
+          if (!routeTargets.length) return [];
           return STATE.clients.filter((client) =>
             client.enabled
-            && protectedTargets.some((target) => clientTouchesEndpoint(client, target.service.name, target.endpoint.name))
+            && routeTargets.some((target) => clientTouchesEndpoint(client, target.service.name, target.endpoint))
           );
         }}
 
@@ -2400,12 +2439,13 @@ def render_admin_page(
           const protectedTargets = routeProtectedTargets(route);
           const eligibleClients = routeEligibleClients(route);
           const shouldShowAuth = authMode === "with_auth";
+          const authRequired = protectedTargets.length > 0;
 
           clientWrap.style.display = shouldShowAuth ? "" : "none";
           methodWrap.style.display = shouldShowAuth ? "" : "none";
 
           if (!shouldShowAuth) {{
-            note.textContent = protectedTargets.length
+            note.textContent = authRequired
               ? "Command is generated without incoming client credentials."
               : "Current route targets do not require incoming client authentication.";
             output.textContent = buildRouteCurl(route.slug, methodName);
@@ -2433,27 +2473,27 @@ def render_admin_page(
             ? currentMethodCode
             : (methods[0]?.code || "");
 
-          if (!protectedTargets.length) {{
-            note.textContent = "Current route targets do not require incoming client authentication.";
-            output.textContent = buildRouteCurl(route.slug, methodName);
-            return;
-          }}
-
           if (!eligibleClients.length) {{
-            note.textContent = "No enabled client matches the protected targets on this route.";
+            note.textContent = authRequired
+              ? "No enabled client matches the protected targets on this route."
+              : "No enabled client is scoped to this route.";
             output.textContent = buildRouteCurl(route.slug, methodName);
             return;
           }}
 
           if (!methods.length) {{
-            note.textContent = "Selected client has no enabled auth methods.";
+            note.textContent = authRequired
+              ? "Selected client has no enabled auth methods."
+              : "Selected client is scoped to this route but has no enabled auth methods.";
             output.textContent = buildRouteCurl(route.slug, methodName);
             return;
           }}
 
           const selectedClient = eligibleClients.find((client) => client.slug === clientSelect.value) || null;
           const selectedMethod = methods.find((method) => method.code === methodSelect.value) || methods[0];
-          note.textContent = `Using ${{selectedClient?.title || selectedClient?.code || "client"}} via ${{selectedMethod.title || selectedMethod.code}} (${{selectedMethod.type}}).`;
+          note.textContent = authRequired
+            ? `Using ${{selectedClient?.title || selectedClient?.code || "client"}} via ${{selectedMethod.title || selectedMethod.code}} (${{selectedMethod.type}}).`
+            : `Using ${{selectedClient?.title || selectedClient?.code || "client"}} via ${{selectedMethod.title || selectedMethod.code}} (${{selectedMethod.type}}), even though current route targets do not require incoming client authentication.`;
           output.textContent = buildRouteCurl(route.slug, methodName, authSampleForMethod(selectedMethod));
         }}
 

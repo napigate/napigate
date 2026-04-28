@@ -21,6 +21,7 @@ class LogEntry:
     duration_ms: int
     client_ip: str
     error: str
+    response_body: str
     created_at: str
 
 
@@ -59,6 +60,7 @@ class RequestLogStore:
                     duration_ms INTEGER NOT NULL,
                     client_ip TEXT NOT NULL,
                     error TEXT NOT NULL,
+                    response_body TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL
                 )
                 """
@@ -72,6 +74,11 @@ class RequestLogStore:
             self._ensure_column(
                 "request_logs",
                 "upstream_curl",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                "request_logs",
+                "response_body",
                 "TEXT NOT NULL DEFAULT ''",
             )
             self._connection.commit()
@@ -130,9 +137,10 @@ class RequestLogStore:
                     duration_ms,
                     client_ip,
                     error,
+                    response_body,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry.request_id,
@@ -146,6 +154,7 @@ class RequestLogStore:
                     entry.duration_ms,
                     entry.client_ip,
                     entry.error,
+                    entry.response_body,
                     entry.created_at,
                 ),
             )
@@ -167,6 +176,7 @@ class RequestLogStore:
                     duration_ms,
                     client_ip,
                     error,
+                    response_body,
                     created_at
                 FROM request_logs
                 ORDER BY id DESC
