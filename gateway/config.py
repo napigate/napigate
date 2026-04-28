@@ -198,6 +198,7 @@ class ServiceConfig:
     timeout_seconds: float = 30.0
     verify_ssl: bool = True
     trust_env_proxy: bool = False
+    forward_napigate_headers: bool = True
     variables: dict[str, Any] = field(default_factory=dict)
     headers: dict[str, Any] = field(default_factory=dict)
     pre_call: PreCallConfig | None = None
@@ -869,6 +870,7 @@ def _load_services_block(
             timeout_seconds=float(service_data.get("timeout_seconds", 30)),
             verify_ssl=bool(service_data.get("verify_ssl", True)),
             trust_env_proxy=bool(service_data.get("trust_env_proxy", False)),
+            forward_napigate_headers=bool(service_data.get("forward_napigate_headers", True)),
             variables=dict(service_data.get("variables") or {}),
             headers=dict(service_data.get("headers") or {}),
             pre_call=_load_pre_call_config(

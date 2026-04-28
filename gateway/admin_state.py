@@ -74,6 +74,7 @@ def serialize_services(document: dict[str, Any]) -> list[dict[str, Any]]:
                 "timeout_seconds": float(service_data.get("timeout_seconds", 30)),
                 "verify_ssl": bool(service_data.get("verify_ssl", True)),
                 "trust_env_proxy": bool(service_data.get("trust_env_proxy", False)),
+                "forward_napigate_headers": bool(service_data.get("forward_napigate_headers", True)),
                 "variables": service_data.get("variables") or {},
                 "headers": service_data.get("headers") or {},
                 "pre_call": serialize_pre_call(service_data.get("pre_call")),

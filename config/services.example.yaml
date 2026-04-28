@@ -239,6 +239,7 @@ services:
     timeout_seconds: 10
     verify_ssl: true
     trust_env_proxy: false
+    forward_napigate_headers: true
     headers:
       X-Gateway-Service: status
     auth:
@@ -256,6 +257,7 @@ services:
     timeout_seconds: 20
     verify_ssl: true
     trust_env_proxy: false
+    forward_napigate_headers: true
     headers:
       X-Gateway-Service: public_httpbin
     cors:
@@ -285,6 +287,7 @@ services:
     timeout_seconds: 20
     verify_ssl: true
     trust_env_proxy: false
+    forward_napigate_headers: true
     variables:
       client_id: demo-client
       client_secret: demo-secret

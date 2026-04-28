@@ -210,6 +210,7 @@ Common:
 - `timeout_seconds`
 - `verify_ssl`
 - `trust_env_proxy`
+- `forward_napigate_headers`
 - `variables`
 - `headers`
 - `pre_call`
@@ -441,7 +442,8 @@ Common:
   - `external_service`
 - `ip_allowlist` is client-wide.
 - Consumed credentials are stripped before upstream forwarding.
-- Runtime injects:
+- On public routes, if the incoming request still matches a scoped client auth method, those consumed credential headers/query params/cookies are stripped from the upstream request even though client auth is not enforced for access control.
+- Runtime injects these headers only when the target service keeps `forward_napigate_headers: true`:
   - `X-NapiGate-Client-Slug`
   - `X-NapiGate-Client-Code`
   - `X-NapiGate-Client-Title`
@@ -635,6 +637,7 @@ pip install requests pyyaml
 - `NAPIGATE_IMAGE` selects the runtime image for Compose.
 - `NAPIGATE_PULL_POLICY` controls whether Compose pulls the runtime image.
 - `observability.log_retention_hours` controls hourly cleanup of monitor rows and rotated file logs; leave it unset for unlimited retention.
+- `forward_napigate_headers` defaults to `true`.
 - Shared template changes go to `config/services.example.yaml`.
 - `config/services.yaml` and `config/security.yaml` are reloaded automatically when their on-disk contents change.
 - Container runtime user settings come from `.env`:

@@ -339,9 +339,14 @@ class GatewayRuntime:
         response_body = ""
         log_matched = matched
         authenticated_client: AuthenticatedClient | None = None
+        forwarded_auth: AuthenticatedClient | None = None
 
         try:
             authenticated_client = self._authenticate_client(matched=matched, request=request)
+            forwarded_auth = authenticated_client or self._detect_forwarded_auth_credentials(
+                matched=matched,
+                request=request,
+            )
             self._enforce_rate_limit(
                 matched=matched,
                 request=request,
@@ -375,6 +380,7 @@ class GatewayRuntime:
                 matched=matched,
                 request=request,
                 authenticated_client=authenticated_client,
+                forwarded_auth=forwarded_auth,
                 request_id=request_id,
             )
             log_matched = result.matched
@@ -443,6 +449,7 @@ class GatewayRuntime:
         matched: MatchedEndpoint,
         request: IncomingRequest,
         authenticated_client: AuthenticatedClient | None,
+        forwarded_auth: AuthenticatedClient | None,
         request_id: str,
     ) -> TargetExecutionResult:
         if matched.route.strategy in {"single", "round_robin"}:
@@ -450,6 +457,7 @@ class GatewayRuntime:
                 matched=matched,
                 request=request,
                 authenticated_client=authenticated_client,
+                forwarded_auth=forwarded_auth,
                 request_id=request_id,
             )
 
@@ -462,6 +470,7 @@ class GatewayRuntime:
                 targets=targets,
                 request=request,
                 authenticated_client=authenticated_client,
+                forwarded_auth=forwarded_auth,
                 request_id=request_id,
             )
 
@@ -469,6 +478,7 @@ class GatewayRuntime:
             targets=targets,
             request=request,
             authenticated_client=authenticated_client,
+            forwarded_auth=forwarded_auth,
             request_id=request_id,
         )
 
@@ -478,6 +488,7 @@ class GatewayRuntime:
         targets: list[MatchedEndpoint],
         request: IncomingRequest,
         authenticated_client: AuthenticatedClient | None,
+        forwarded_auth: AuthenticatedClient | None,
         request_id: str,
     ) -> TargetExecutionResult:
         last_response: TargetExecutionResult | None = None
@@ -488,6 +499,7 @@ class GatewayRuntime:
                     matched=target,
                     request=request,
                     authenticated_client=authenticated_client,
+                    forwarded_auth=forwarded_auth,
                     request_id=request_id,
                 )
                 if result.response.status_code < 500:
@@ -529,6 +541,7 @@ class GatewayRuntime:
         targets: list[MatchedEndpoint],
         request: IncomingRequest,
         authenticated_client: AuthenticatedClient | None,
+        forwarded_auth: AuthenticatedClient | None,
         request_id: str,
     ) -> TargetExecutionResult:
         last_response: TargetExecutionResult | None = None
@@ -541,6 +554,7 @@ class GatewayRuntime:
                 matched=target,
                 request=request,
                 authenticated_client=authenticated_client,
+                forwarded_auth=forwarded_auth,
                 request_id=request_id,
             )
             for target in targets
@@ -576,6 +590,7 @@ class GatewayRuntime:
         matched: MatchedEndpoint,
         request: IncomingRequest,
         authenticated_client: AuthenticatedClient | None,
+        forwarded_auth: AuthenticatedClient | None,
         request_id: str,
     ) -> TargetExecutionResult:
         variables = dict(matched.service.variables)
@@ -653,10 +668,13 @@ class GatewayRuntime:
             service_headers=rendered_service_headers,
             endpoint_headers=rendered_endpoint_headers,
             authenticated_client=authenticated_client,
+            forwarded_auth=forwarded_auth,
+            forward_napigate_headers=matched.service.forward_napigate_headers,
             request_id=request_id,
         )
-        request_headers["X-NapiGate-Endpoint-Slug"] = matched.endpoint.slug
-        request_headers["X-NapiGate-Route-Slug"] = matched.route.slug
+        if matched.service.forward_napigate_headers:
+            request_headers["X-NapiGate-Endpoint-Slug"] = matched.endpoint.slug
+            request_headers["X-NapiGate-Route-Slug"] = matched.route.slug
 
         rendered_query = self.render_data(matched.endpoint.query, context)
         final_query = self._merge_query_params(
@@ -1425,11 +1443,14 @@ class GatewayRuntime:
         service_headers: dict[str, Any],
         endpoint_headers: dict[str, Any],
         authenticated_client: AuthenticatedClient | None,
+        forwarded_auth: AuthenticatedClient | None,
+        forward_napigate_headers: bool,
         request_id: str,
     ) -> dict[str, str]:
         filtered_headers = set(FILTERED_REQUEST_HEADERS)
-        if authenticated_client is not None:
-            filtered_headers.update(item.lower() for item in authenticated_client.consumed_headers)
+        strip_auth = forwarded_auth or authenticated_client
+        if strip_auth is not None:
+            filtered_headers.update(item.lower() for item in strip_auth.consumed_headers)
 
         outgoing = {
             key: value
@@ -1437,10 +1458,10 @@ class GatewayRuntime:
             if key.lower() not in filtered_headers
         }
 
-        if authenticated_client is not None and authenticated_client.consumed_cookie_names:
+        if strip_auth is not None and strip_auth.consumed_cookie_names:
             cookie_header = self._remove_cookie_names(
                 str(incoming_headers.get("Cookie", incoming_headers.get("cookie", ""))),
-                authenticated_client.consumed_cookie_names,
+                strip_auth.consumed_cookie_names,
             )
             if cookie_header:
                 outgoing["Cookie"] = cookie_header
@@ -1463,7 +1484,7 @@ class GatewayRuntime:
         apply_header_overrides(service_headers)
         apply_header_overrides(endpoint_headers)
         outgoing["X-Request-ID"] = request_id
-        if authenticated_client is not None:
+        if authenticated_client is not None and forward_napigate_headers:
             outgoing["X-NapiGate-Client-Slug"] = authenticated_client.client_slug
             outgoing["X-NapiGate-Client-Code"] = authenticated_client.client_code
             outgoing["X-NapiGate-Client-Title"] = authenticated_client.client_title
@@ -1883,6 +1904,41 @@ class GatewayRuntime:
         if not protected_matches:
             return None
 
+        return self._match_scoped_client_credentials(
+            targets=protected_matches,
+            request=request,
+            require_success=True,
+            enforce_ip_allowlist=True,
+        )
+
+    def _detect_forwarded_auth_credentials(
+        self,
+        *,
+        matched: MatchedEndpoint,
+        request: IncomingRequest,
+    ) -> AuthenticatedClient | None:
+        targets = self._target_matches_for_route(matched)
+        if not targets:
+            return None
+
+        return self._match_scoped_client_credentials(
+            targets=targets,
+            request=request,
+            require_success=False,
+            enforce_ip_allowlist=False,
+        )
+
+    def _match_scoped_client_credentials(
+        self,
+        *,
+        targets: list[MatchedEndpoint],
+        request: IncomingRequest,
+        require_success: bool,
+        enforce_ip_allowlist: bool,
+    ) -> AuthenticatedClient | None:
+        if not targets:
+            return None
+
         with self._lock:
             eligible_clients = [
                 client
@@ -1890,18 +1946,20 @@ class GatewayRuntime:
                 if client.enabled
                 and any(
                     self._client_scope_applies(client, matched=target)
-                    for target in protected_matches
+                    for target in targets
                 )
             ]
 
         if not eligible_clients:
-            raise GatewayError(401, "Client authentication failed.")
+            if require_success:
+                raise GatewayError(401, "Client authentication failed.")
+            return None
 
         for client in eligible_clients:
             for method in client.auth_methods:
                 if not method.enabled:
                     continue
-                for auth_match in protected_matches:
+                for auth_match in targets:
                     if not self._client_scope_applies(client, matched=auth_match):
                         continue
                     matched_client = self._match_auth_method(
@@ -1913,13 +1971,17 @@ class GatewayRuntime:
                     if matched_client is None:
                         continue
                     if client.ip_allowlist and not self._ip_allowed(request.client_ip, client.ip_allowlist):
-                        raise GatewayError(
-                            403,
-                            f"Client '{client.code}' is not allowed from IP '{request.client_ip}'.",
-                        )
+                        if require_success and enforce_ip_allowlist:
+                            raise GatewayError(
+                                403,
+                                f"Client '{client.code}' is not allowed from IP '{request.client_ip}'.",
+                            )
+                        continue
                     return matched_client
 
-        raise GatewayError(401, "Client authentication failed.")
+        if require_success:
+            raise GatewayError(401, "Client authentication failed.")
+        return None
 
     def _client_scope_applies(
         self,
@@ -1932,7 +1994,8 @@ class GatewayRuntime:
         if client.access.mode == "services":
             return matched.service.name in client.access.services
         return any(
-            target.service == matched.service.name and target.endpoint == matched.endpoint.name
+            target.service == matched.service.name
+            and target.endpoint in {matched.endpoint.name, matched.endpoint.slug}
             for target in client.access.endpoints
         )
 

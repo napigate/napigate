@@ -175,6 +175,7 @@ def save_service(
     timeout_seconds: float,
     verify_ssl: bool,
     trust_env_proxy: bool,
+    forward_napigate_headers: bool,
     variables: dict[str, Any],
     headers: dict[str, Any],
     pre_call_code: str,
@@ -209,6 +210,7 @@ def save_service(
         "timeout_seconds": timeout_seconds,
         "verify_ssl": verify_ssl,
         "trust_env_proxy": trust_env_proxy,
+        "forward_napigate_headers": forward_napigate_headers,
         "endpoints": list(existing.get("endpoints") or []),
         "auth": {
             "required": auth_required,

@@ -335,6 +335,7 @@ Services remain fully config-driven:
 - `timeout_seconds`
 - `verify_ssl`
 - `trust_env_proxy`
+- `forward_napigate_headers`
 - `variables`
 - `headers`
 - `pre_call`
@@ -745,6 +746,7 @@ curl \
 - Runtime and admin config validation happen before persisted changes are accepted.
 - Request and response bodies are currently buffered in memory.
 - `trust_env_proxy` defaults to `false`.
+- `forward_napigate_headers` defaults to `true`.
 - `config/services.yaml` and `config/security.yaml` are hot-reloaded when their file contents change on disk.
 - Admin forms include inline help tooltips with behavior notes and quick examples for each major field.
 - Shared example updates should go into `config/services.example.yaml` and `config/security.example.yaml`.

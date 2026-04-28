@@ -1310,6 +1310,7 @@ def render_admin_page(
           timeout_seconds: {{ title: "Timeout Seconds", text: "Maximum upstream wait time before the gateway aborts the request.", example: "15" }},
           verify_ssl: {{ title: "Verify SSL", text: "Reject upstream TLS certificates that are invalid, expired, or signed by an unknown CA.", example: "On for public HTTPS APIs" }},
           trust_env_proxy: {{ title: "Trust Env Proxy", text: "Allow upstream requests to use HTTP_PROXY or HTTPS_PROXY from the runtime environment.", example: "Enable only when the container must reach APIs through a proxy" }},
+          forward_napigate_headers: {{ title: "Forward NapiGate Headers", text: "Send internal X-NapiGate route and client metadata headers to the upstream service when enabled.", example: "Turn off when the upstream should only receive business headers like Token or Cookie" }},
           variables_yaml: {{ title: "Variables", text: "Reusable values injected into templates and pre_call code for this service.", example: '{{ "client_id": "demo-client" }}' }},
           headers_yaml: {{ title: "Headers", text: "Static or templated headers added to every upstream request in this service.", example: '{{ "X-Tenant": "{{ vars.tenant }}" }}' }},
           auth_required: {{ title: "Protect This Service", text: "Require a matching enabled client auth method before this service can be called.", example: "Turn on for partner or internal APIs" }},
@@ -2281,6 +2282,7 @@ def render_admin_page(
                         <span class="tag">${{scopedClientsCount(service.name)}} scoped client(s)</span>
                         <span class="tag ${{service.verify_ssl ? 'ok' : 'warn'}}">SSL ${{service.verify_ssl ? 'On' : 'Off'}}</span>
                         <span class="tag ${{service.trust_env_proxy ? 'warn' : 'ok'}}">Proxy ${{service.trust_env_proxy ? 'Env' : 'Direct'}}</span>
+                        <span class="tag ${{service.forward_napigate_headers ? 'ok' : 'warn'}}">NapiGate Headers ${{service.forward_napigate_headers ? 'On' : 'Off'}}</span>
                         ${{service.pre_call?.code ? '<span class="tag warn">pre_call</span>' : ''}}
                         <span class="tag ${{service.cors?.enabled ? 'ok' : ''}}">CORS ${{service.cors?.enabled ? 'On' : 'Off'}}</span>
                         <span class="tag ${{service.rate_limit?.enabled ? 'warn' : ''}}">Rate Limit ${{service.rate_limit?.enabled ? `${{service.rate_limit.requests}}/${{service.rate_limit.window_seconds}}s` : 'Off'}}</span>
@@ -2902,6 +2904,13 @@ def render_admin_page(
                   <div class="muted">Allow upstream requests to inherit proxy settings from the environment.</div>
                 </div>
               </label>
+              <label class="check-item" data-help="forward_napigate_headers">
+                <input type="checkbox" name="forward_napigate_headers" ${{service ? (service.forward_napigate_headers ? "checked" : "") : "checked"}}>
+                <div>
+                  <strong>Forward NapiGate Headers</strong>
+                  <div class="muted">Send internal X-NapiGate route and client metadata headers to this upstream service.</div>
+                </div>
+              </label>
               <label class="full" data-help="variables_yaml">
                 <span>Variables (JSON/YAML Mapping)</span>
                 <textarea name="variables_yaml">${{esc(jsonText(service?.variables || {{}}))}}</textarea>
@@ -3368,7 +3377,7 @@ parallel_race: call all targets concurrently and return first healthy response</
             cache_key: "",
           }};
           return `
-            <div class="auth-method-card">
+            <div class="auth-method-card" data-auth-method-card>
               <div class="auth-method-head">
                 <div data-help="auth_methods">
                   <strong>Auth Method</strong>
@@ -3582,7 +3591,7 @@ parallel_race: call all targets concurrently and return first healthy response</
         }}
 
         function collectAuthMethods(form) {{
-          const cards = Array.from(form.querySelectorAll(".auth-method-card"));
+          const cards = Array.from(form.querySelectorAll("[data-auth-method-card]"));
           if (!cards.length) {{
             throw new Error("Add at least one auth method.");
           }}
@@ -4637,6 +4646,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 timeout_seconds=timeout_seconds,
                 verify_ssl="verify_ssl" in form,
                 trust_env_proxy="trust_env_proxy" in form,
+                forward_napigate_headers="forward_napigate_headers" in form,
                 variables=variables,
                 headers=headers,
                 pre_call_code=pre_call_code,
