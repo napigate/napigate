@@ -79,6 +79,17 @@ class OutputProfileConfig:
 
 
 @dataclass(slots=True)
+class GatewayResponseConfig:
+    enabled: bool = False
+    success_key: str = "success"
+    data_key: str = "data"
+    message_key: str = "message"
+    error_key: str = "error"
+    empty_value: Any = ""
+    headers: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class SuccessHookConfig:
     enabled: bool = False
     url: str = ""
@@ -214,6 +225,7 @@ class GatewayConfig:
     services: list[ServiceConfig] = field(default_factory=list)
     routes: list[RouteConfig] = field(default_factory=list)
     output_profiles: dict[str, OutputProfileConfig] = field(default_factory=dict)
+    gateway_responses: GatewayResponseConfig = field(default_factory=GatewayResponseConfig)
     log_aggregators: list[LogAggregatorConfig] = field(default_factory=list)
     log_retention_hours: int | None = None
 
@@ -489,6 +501,27 @@ def _load_output_profiles_block(output_profiles_block: Any) -> dict[str, OutputP
             raise ValueError(f"Duplicate output profile slug '{profile.slug}'.")
         profiles[profile.slug] = profile
     return profiles
+
+
+def _load_gateway_response_config(value: Any) -> GatewayResponseConfig:
+    if value in (None, {}):
+        return GatewayResponseConfig()
+    if not isinstance(value, dict):
+        raise ValueError("Config 'gateway_responses' must be a mapping.")
+
+    headers = value.get("headers") or {}
+    if not isinstance(headers, dict):
+        raise ValueError("Config 'gateway_responses.headers' must be a mapping.")
+
+    return GatewayResponseConfig(
+        enabled=bool(value.get("enabled", False)),
+        success_key=str(value.get("success_key", "success")).strip() or "success",
+        data_key=str(value.get("data_key", "data")).strip() or "data",
+        message_key=str(value.get("message_key", "message")).strip() or "message",
+        error_key=str(value.get("error_key", "error")).strip() or "error",
+        empty_value=value.get("empty_value", ""),
+        headers=dict(headers),
+    )
 
 
 def _load_success_hook_config(value: Any, *, label: str) -> SuccessHookConfig | None:
@@ -1120,6 +1153,7 @@ def load_gateway_config(config_path: Path | str = CONFIG_PATH) -> GatewayConfig:
     raw = load_config_document(config_path)
     clients = _load_clients_block(raw.get("clients"))
     output_profiles = _load_output_profiles_block(raw.get("output_profiles"))
+    gateway_responses = _load_gateway_response_config(raw.get("gateway_responses"))
     observability = raw.get("observability")
     log_aggregators = _load_log_aggregators_block(observability)
     log_retention_hours = _load_log_retention_hours(observability)
@@ -1137,6 +1171,7 @@ def load_gateway_config(config_path: Path | str = CONFIG_PATH) -> GatewayConfig:
         services=services,
         routes=routes,
         output_profiles=output_profiles,
+        gateway_responses=gateway_responses,
         log_aggregators=log_aggregators,
         log_retention_hours=log_retention_hours,
     )

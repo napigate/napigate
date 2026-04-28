@@ -25,6 +25,7 @@ from gateway.config import (
     AuthMethodConfig,
     ClientConfig,
     EndpointConfig,
+    GatewayResponseConfig,
     OutputProfileConfig,
     PreCallConfig,
     ResponseCacheConfig,
@@ -143,6 +144,7 @@ class GatewayRuntime:
         self.routes: list[RouteConfig] = []
         self.clients: dict[str, ClientConfig] = {}
         self.output_profiles: dict[str, OutputProfileConfig] = {}
+        self.gateway_responses = GatewayResponseConfig()
         self.log_store = RequestLogStore()
         self.pre_call_cache: dict[str, CacheValue] = {}
         self.auth_cache: dict[str, CacheValue] = {}
@@ -159,12 +161,14 @@ class GatewayRuntime:
         routes = gateway_config.routes
         clients = gateway_config.clients
         output_profiles = gateway_config.output_profiles
+        gateway_responses = gateway_config.gateway_responses
         signature = self._file_signature(self.config_path)
         with self._lock:
             self.services = services
             self.routes = routes
             self.clients = clients
             self.output_profiles = output_profiles
+            self.gateway_responses = gateway_responses
             self.pre_call_cache.clear()
             self.auth_cache.clear()
             self.response_cache.clear()
@@ -1780,8 +1784,46 @@ class GatewayRuntime:
             return f"{text[:12000]}\n...[truncated {trimmed} chars]"
         return text
 
+    def _gateway_error_payload(self, detail: str) -> dict[str, Any]:
+        config = self.gateway_responses
+        if not config.enabled:
+            return {"detail": detail}
+
+        message = detail or config.empty_value
+        error = detail or config.empty_value
+        return {
+            config.success_key: False,
+            config.data_key: config.empty_value,
+            config.message_key: message,
+            config.error_key: error,
+        }
+
     def _error_response_body(self, detail: str) -> str:
-        return json.dumps({"detail": detail}, ensure_ascii=False)
+        return json.dumps(self._gateway_error_payload(detail), ensure_ascii=False)
+
+    def build_gateway_error_response(
+        self,
+        *,
+        status_code: int,
+        detail: str,
+        request: IncomingRequest | None = None,
+        preflight: bool = False,
+        extra_headers: Mapping[str, Any] | None = None,
+        include_body: bool = True,
+    ) -> OutgoingResponse:
+        headers: dict[str, Any] = {"Content-Type": "application/json; charset=utf-8"}
+        if request is not None:
+            headers = self.merge_response_headers(
+                headers,
+                self.cors_headers_for_request(request, preflight=preflight),
+            )
+        headers = self.merge_response_headers(headers, self.gateway_responses.headers)
+        headers = self.merge_response_headers(headers, extra_headers or {})
+        return OutgoingResponse(
+            status_code=status_code,
+            headers=headers,
+            body=self._error_response_body(detail).encode("utf-8") if include_body else b"",
+        )
 
     def _write_log(
         self,

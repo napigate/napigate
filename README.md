@@ -250,6 +250,16 @@ output_profiles:
   profile_slug:
     ...
 
+gateway_responses:
+  enabled: false
+  success_key: success
+  data_key: data
+  message_key: message
+  error_key: error
+  empty_value: ""
+  headers:
+    Cache-Control: no-store
+
 routes:
   - ...
 
@@ -457,6 +467,37 @@ Common output profile fields:
 - `source_success_key`, `message_source_keys`, `error_source_keys`, and `data_fields` can map an upstream response into a stable envelope such as `success`, `message`, `data`, and `error`.
 - Missing or null mapped values use `empty_value`.
 - Non-JSON binary/image responses should normally stay on `passthrough`.
+
+### Gateway-Generated Error Responses
+
+`gateway_responses` controls the JSON body used when NapiGate itself generates a public runtime error such as:
+
+- `401` client authentication failure
+- `403` gateway-side access or origin denial
+- `404` no matching route
+- `429` rate limit rejection
+- `5xx` internal or upstream gateway failures
+
+Example:
+
+```yaml
+gateway_responses:
+  enabled: true
+  success_key: success
+  data_key: data
+  message_key: message
+  error_key: error
+  empty_value: ""
+  headers:
+    Cache-Control: no-store
+```
+
+Behavior:
+
+- when `enabled: false`, gateway errors keep the default body shape: `{"detail": "..."}`
+- when `enabled: true`, gateway errors use the configured envelope keys and `empty_value`
+- `headers` are merged into gateway-generated public error responses after the JSON body is rendered
+- this setting is for public runtime responses, not admin or monitor API endpoints
 
 ### Response Caching
 
@@ -747,6 +788,7 @@ curl \
 - Request and response bodies are currently buffered in memory.
 - `trust_env_proxy` defaults to `false`.
 - `forward_napigate_headers` defaults to `true`.
+- `gateway_responses` defaults to the disabled `{"detail": ...}` runtime error shape until you enable it.
 - `config/services.yaml` and `config/security.yaml` are hot-reloaded when their file contents change on disk.
 - Admin forms include inline help tooltips with behavior notes and quick examples for each major field.
 - Shared example updates should go into `config/services.example.yaml` and `config/security.example.yaml`.

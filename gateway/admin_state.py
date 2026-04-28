@@ -247,6 +247,9 @@ def serialize_gateway_settings(document: dict[str, Any]) -> dict[str, Any]:
     observability = document.get("observability") or {}
     if not isinstance(observability, dict):
         observability = {}
+    gateway_responses = document.get("gateway_responses") or {}
+    if not isinstance(gateway_responses, dict):
+        gateway_responses = {}
     retention_hours = observability.get("log_retention_hours")
     return {
         "log_retention_hours": (
@@ -254,6 +257,15 @@ def serialize_gateway_settings(document: dict[str, Any]) -> dict[str, Any]:
             if retention_hours not in (None, "", 0, "0")
             else ""
         ),
+        "gateway_responses": {
+            "enabled": bool(gateway_responses.get("enabled", False)),
+            "success_key": str(gateway_responses.get("success_key", "success") or "success"),
+            "data_key": str(gateway_responses.get("data_key", "data") or "data"),
+            "message_key": str(gateway_responses.get("message_key", "message") or "message"),
+            "error_key": str(gateway_responses.get("error_key", "error") or "error"),
+            "empty_value": gateway_responses.get("empty_value", ""),
+            "headers": gateway_responses.get("headers") or {},
+        },
     }
 
 

@@ -150,6 +150,13 @@ def save_gateway_settings(
     config_path: Path,
     *,
     log_retention_hours: int | None,
+    gateway_response_enabled: bool,
+    gateway_response_success_key: str,
+    gateway_response_data_key: str,
+    gateway_response_message_key: str,
+    gateway_response_error_key: str,
+    gateway_response_empty_value: Any,
+    gateway_response_headers: dict[str, Any],
 ) -> str:
     document = load_config_document(config_path)
     observability = document.get("observability")
@@ -161,6 +168,16 @@ def save_gateway_settings(
         observability.pop("log_retention_hours", None)
     else:
         observability["log_retention_hours"] = int(log_retention_hours)
+
+    document["gateway_responses"] = {
+        "enabled": bool(gateway_response_enabled),
+        "success_key": gateway_response_success_key,
+        "data_key": gateway_response_data_key,
+        "message_key": gateway_response_message_key,
+        "error_key": gateway_response_error_key,
+        "empty_value": gateway_response_empty_value,
+        "headers": gateway_response_headers,
+    }
 
     save_config_document(config_path, document)
     return "Gateway settings saved."
