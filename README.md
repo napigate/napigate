@@ -123,6 +123,44 @@ python3 -m gateway.main --host 0.0.0.0 --port 8000 --config config/services.yaml
 - Health: `http://127.0.0.1:8000/__health`
 - OAuth token endpoint: `POST /__oauth/token`
 
+### Nginx Reverse Proxy
+
+If you proxy NapiGate through Nginx, keep SSE buffering disabled for `__monitor/stream`, otherwise the live monitor can appear stuck in a connecting state even though direct access works.
+
+Example:
+
+```nginx
+server {
+    listen 80;
+    server_name gateway.example.com;
+
+    location /__monitor/stream {
+        proxy_pass http://127.0.0.1:8000/__monitor/stream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+        chunked_transfer_encoding off;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_read_timeout 300s;
+    }
+}
+```
+
 ## Docker
 
 1. Prepare local files:

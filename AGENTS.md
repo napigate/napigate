@@ -509,6 +509,7 @@ Common:
   - `GET /__monitor/logs`
 - Live stream:
   - `GET /__monitor/stream`
+  - when proxied through Nginx or similar reverse proxies, SSE buffering must stay disabled so the live monitor does not remain stuck in a connecting state
 - OAuth token endpoint:
   - `POST /__oauth/token`
 - Admin config API:
