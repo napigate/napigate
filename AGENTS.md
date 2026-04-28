@@ -228,6 +228,8 @@ Common:
 - `query`
 - `pre_call`
 
+- `headers` can also blank out inherited incoming headers for an upstream target by setting a header value to an empty string.
+
 ### Route Fields
 
 - `name`

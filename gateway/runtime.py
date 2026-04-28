@@ -646,8 +646,8 @@ class GatewayRuntime:
         upstream_path = self.render_template(matched.endpoint.upstream_path, context)
         upstream_url = self._join_url(matched.service.base_url, str(upstream_path))
 
-        rendered_service_headers = self.render_data(matched.service.headers, context)
-        rendered_endpoint_headers = self.render_data(matched.endpoint.headers, context)
+        rendered_service_headers = self._render_header_mapping(matched.service.headers, context)
+        rendered_endpoint_headers = self._render_header_mapping(matched.endpoint.headers, context)
         request_headers = self._prepare_request_headers(
             incoming_headers=request.headers,
             service_headers=rendered_service_headers,
@@ -1386,6 +1386,16 @@ class GatewayRuntime:
             }
         return value
 
+    def _render_header_mapping(
+        self,
+        headers: Mapping[str, Any],
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            str(key): (None if value is None else self.render_data(value, context))
+            for key, value in headers.items()
+        }
+
     def render_template(self, template: str, context: dict[str, Any]) -> Any:
         match = TEMPLATE_PATTERN.fullmatch(template)
         if match:
@@ -1438,8 +1448,20 @@ class GatewayRuntime:
                 outgoing.pop("Cookie", None)
                 outgoing.pop("cookie", None)
 
-        outgoing.update({key: str(value) for key, value in service_headers.items()})
-        outgoing.update({key: str(value) for key, value in endpoint_headers.items()})
+        def apply_header_overrides(headers: Mapping[str, Any]) -> None:
+            for key, value in headers.items():
+                existing_key = next(
+                    (candidate for candidate in outgoing if candidate.lower() == key.lower()),
+                    None,
+                )
+                if value in (None, ""):
+                    if existing_key is not None:
+                        outgoing.pop(existing_key, None)
+                    continue
+                outgoing[existing_key or key] = str(value)
+
+        apply_header_overrides(service_headers)
+        apply_header_overrides(endpoint_headers)
         outgoing["X-Request-ID"] = request_id
         if authenticated_client is not None:
             outgoing["X-NapiGate-Client-Slug"] = authenticated_client.client_slug
