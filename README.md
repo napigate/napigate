@@ -266,12 +266,8 @@ output_profiles:
     ...
 
 gateway_responses:
-  enabled: false
-  success_key: success
-  data_key: data
-  message_key: message
-  error_key: error
-  empty_value: ""
+  mode: profile
+  output_profile: custom_contract
   headers:
     Cache-Control: no-store
 
@@ -456,6 +452,7 @@ Supported profile types:
 - `passthrough`
 - `json_envelope`
 - `jsonp`
+- `custom`
 
 Common output profile fields:
 
@@ -474,6 +471,7 @@ Common output profile fields:
 - `empty_value`
 - `jsonp_callback_param`
 - `jsonp_default_callback`
+- `transform_code`
 - `headers`
 
 `json_envelope` behavior:
@@ -481,8 +479,45 @@ Common output profile fields:
 - If the upstream JSON already contains the configured `passthrough_keys`, NapiGate does not wrap it again.
 - Otherwise, the payload is placed into `data_key`.
 - `source_success_key`, `message_source_keys`, `error_source_keys`, and `data_fields` can map an upstream response into a stable envelope such as `success`, `message`, `data`, and `error`.
+- `data_fields` values can be plain source paths such as `payload.user` or `{{field}}` templates such as `{{Name}} {{family}}`.
 - Missing or null mapped values use `empty_value`.
 - Non-JSON binary/image responses should normally stay on `passthrough`.
+
+`custom` behavior:
+
+- `transform_code` is a safe Python-like snippet that must assign the final response body to `result`.
+- Available input names are `payload`, `status_code`, `detail`, `empty_value`, `content_type`, `headers`, and `query`.
+- Safe helpers include `pick()`, `pick_first()`, `exists()`, `success()`, `text()`, `len()`, `bool()`, `int()`, `float()`, and `str()`.
+- Allowed syntax is intentionally narrow: assignments, `if/else`, literals, indexing, boolean/comparison expressions, and safe helper calls.
+- Imports, arbitrary builtins, attribute access, and unsafe calls are rejected during validation.
+
+Example custom profile:
+
+```yaml
+output_profiles:
+  custom_contract:
+    title: Custom Safe Transform
+    enabled: true
+    type: custom
+    transform_code: |
+      full_name = text(pick("Name")) + " " + text(pick("family"))
+      result = {
+        "ok": success(pick("IsSuccessful", status_code < 400)),
+        "message": pick_first("SuccessfulDesc", "WarningDesc", "ErrorDesc", default=detail),
+        "error": pick("ErrorDesc", detail),
+        "data": {
+          "fullname": full_name,
+          "payload": payload,
+        },
+      }
+```
+
+Admin workflow:
+
+1. Open `Output` in the admin UI.
+2. Create or edit a profile and set `Profile Type` to `custom`.
+3. Write `transform_code` so the final body is assigned to `result`.
+4. Save the profile, then attach it to a route or select it from `Config > Gateway Response Output`.
 
 ### Gateway-Generated Error Responses
 
@@ -498,22 +533,29 @@ Example:
 
 ```yaml
 gateway_responses:
+  mode: profile
+  output_profile: custom_contract
   enabled: true
-  success_key: success
-  data_key: data
-  message_key: message
-  error_key: error
-  empty_value: ""
   headers:
     Cache-Control: no-store
 ```
 
 Behavior:
 
-- when `enabled: false`, gateway errors keep the default body shape: `{"detail": "..."}`
-- when `enabled: true`, gateway errors use the configured envelope keys and `empty_value`
+- `mode: default` keeps the default body shape: `{"detail": "..."}`
+- `mode: inline` uses the legacy inline envelope fields in `gateway_responses`, such as `success_key`, `data_key`, `message_key`, `error_key`, and `empty_value`
+- `mode: profile` builds a gateway error payload with `detail`, `message`, `error`, `status_code`, and `status`, then runs the selected `output_profile` against that payload
+- when `mode: profile`, `output_profile` must reference an existing top-level output profile
 - `headers` are merged into gateway-generated public error responses after the JSON body is rendered
 - this setting is for public runtime responses, not admin or monitor API endpoints
+
+Recommended admin flow:
+
+1. Open `Output` and create the reusable profile first. A `custom` profile is the best fit when you want a fully controlled contract.
+2. Open `Config > Gateway Response Output`.
+3. Set `Gateway Response Mode` to `selected output profile`.
+4. Choose the profile from `Gateway Error Output Profile`.
+5. Save settings. From that point on, gateway-generated public errors will pass through the selected profile.
 
 ### Response Caching
 
@@ -806,7 +848,7 @@ curl \
 - Rate-limiter sliding-window state is not cleared on config hot-reload; only the response/pre-call/auth caches are cleared.
 - `trust_env_proxy` defaults to `false`.
 - `forward_napigate_headers` defaults to `true`.
-- `gateway_responses` defaults to the disabled `{"detail": ...}` runtime error shape until you enable it.
+- `gateway_responses` defaults to `mode: default`, which keeps the runtime error shape as `{"detail": ...}` until you switch to `inline` or `profile`.
 - `config/services.yaml` and `config/security.yaml` are hot-reloaded when their file contents change on disk.
 - Admin forms include inline help tooltips with behavior notes and quick examples for each major field.
 - Shared example updates should go into `config/services.example.yaml` and `config/security.example.yaml`.

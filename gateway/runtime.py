@@ -38,6 +38,7 @@ from gateway.config import (
 from gateway.integrations import IntegrationDispatcher
 from gateway.logging_utils import configure_log_retention_hours
 from gateway.monitoring import LogEntry, RequestLogStore
+from gateway.output_sandbox import execute_custom_output_code
 
 
 LOGGER = logging.getLogger("gateway.runtime")
@@ -58,6 +59,9 @@ FILTERED_REQUEST_HEADERS = {
     "connection",
 }
 TEMPLATE_PATTERN = re.compile(r"{{\s*([^{}]+?)\s*}}")
+DATA_FIELD_TEMPLATE_PATTERN = re.compile(
+    r"\$\{\s*([^{}]+?)\s*\}|\{\{\s*([^{}]+?)\s*\}\}"
+)
 
 
 class GatewayError(Exception):
@@ -308,7 +312,7 @@ class GatewayRuntime:
         except GatewayError as exc:
             status_code = exc.status_code
             error_message = exc.detail
-            response_body = self._error_response_body(exc.detail)
+            response_body = self._error_response_body(exc.status_code, exc.detail, request)
             raise
         finally:
             duration_ms = int((time.perf_counter() - started_at) * 1000)
@@ -414,18 +418,18 @@ class GatewayRuntime:
                 upstream_url = exc.upstream_url
             if exc.upstream_curl:
                 upstream_curl = exc.upstream_curl
-            response_body = self._error_response_body(exc.detail)
+            response_body = self._error_response_body(exc.status_code, exc.detail, request)
             raise
         except requests.RequestException as exc:
             status_code = 502
             error_message = str(exc)
-            response_body = self._error_response_body("Upstream request failed.")
+            response_body = self._error_response_body(502, "Upstream request failed.", request)
             LOGGER.exception("Upstream HTTP error for %s", request.path)
             raise GatewayError(502, "Upstream request failed.") from exc
         except Exception as exc:  # noqa: BLE001
             status_code = 500
             error_message = str(exc)
-            response_body = self._error_response_body("Gateway internal error.")
+            response_body = self._error_response_body(500, "Gateway internal error.", request)
             LOGGER.exception("Unhandled gateway error for %s", request.path)
             raise GatewayError(500, "Gateway internal error.") from exc
         finally:
@@ -971,7 +975,20 @@ class GatewayRuntime:
             profile = self.output_profiles.get(profile_slug)
         if profile is None or not profile.enabled:
             return response
+        return self._apply_output_profile_config(
+            profile=profile,
+            request=request,
+            response=response,
+        )
 
+    def _apply_output_profile_config(
+        self,
+        *,
+        profile: OutputProfileConfig,
+        request: IncomingRequest | None,
+        response: OutgoingResponse,
+        detail: str = "",
+    ) -> OutgoingResponse:
         if profile.type == "passthrough":
             response.headers = self.merge_response_headers(response.headers, profile.headers)
             return response
@@ -981,7 +998,7 @@ class GatewayRuntime:
 
         if profile.type == "jsonp":
             callback_raw = str(
-                request.query.get(profile.jsonp_callback_param)
+                (request.query.get(profile.jsonp_callback_param) if request is not None else None)
                 or profile.jsonp_default_callback
                 or "callback"
             )
@@ -995,6 +1012,23 @@ class GatewayRuntime:
         if content_type.startswith("image/") or content_type == "application/octet-stream":
             response.headers = self.merge_response_headers(response.headers, profile.headers)
             return response
+
+        if profile.type == "custom":
+            transformed = execute_custom_output_code(
+                profile.transform_code or "",
+                payload=parsed_body,
+                status_code=response.status_code,
+                detail=detail,
+                empty_value=profile.empty_value,
+                content_type=content_type,
+                headers=response.headers,
+                query=request.query if request is not None else {},
+            )
+            body = json.dumps(transformed, ensure_ascii=False).encode("utf-8")
+            headers = dict(response.headers)
+            headers["Content-Type"] = "application/json; charset=utf-8"
+            headers = self.merge_response_headers(headers, profile.headers)
+            return OutgoingResponse(status_code=response.status_code, headers=headers, body=body)
 
         if self._is_existing_output_envelope(parsed_body, profile):
             envelope = parsed_body
@@ -1030,7 +1064,7 @@ class GatewayRuntime:
 
             if profile.data_fields:
                 data_value = {
-                    field_name: self._payload_path_value_or_default(
+                    field_name: self._resolve_output_data_field_value(
                         parsed_body,
                         source_path,
                         profile.empty_value,
@@ -1130,6 +1164,44 @@ class GatewayRuntime:
             if value not in (None, ""):
                 return value
         return default
+
+    def _resolve_output_data_field_value(self, payload: Any, expression: str, default: Any) -> Any:
+        template = str(expression or "").strip()
+        if not template:
+            return default
+        match = DATA_FIELD_TEMPLATE_PATTERN.fullmatch(template)
+        if match:
+            return self._payload_path_value_or_default(
+                payload,
+                self._data_field_placeholder_path(match),
+                default,
+            )
+        if DATA_FIELD_TEMPLATE_PATTERN.search(template):
+            return DATA_FIELD_TEMPLATE_PATTERN.sub(
+                lambda item: self._stringify_output_data_field_value(
+                    self._payload_path_value_or_default(
+                        payload,
+                        self._data_field_placeholder_path(item),
+                        default,
+                    )
+                ),
+                template,
+            )
+        return self._payload_path_value_or_default(payload, template, default)
+
+    def _data_field_placeholder_path(self, match: re.Match[str]) -> str:
+        return str(match.group(1) or match.group(2) or "").strip()
+
+    def _stringify_output_data_field_value(self, value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        if value is None:
+            return "null"
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, (int, float)):
+            return str(value)
+        return json.dumps(value, ensure_ascii=False)
 
     def _success_flag(self, value: Any) -> bool:
         if isinstance(value, bool):
@@ -1882,11 +1954,8 @@ class GatewayRuntime:
             return f"{text[:12000]}\n...[truncated {trimmed} chars]"
         return text
 
-    def _gateway_error_payload(self, detail: str) -> dict[str, Any]:
+    def _inline_gateway_error_payload(self, detail: str) -> dict[str, Any]:
         config = self.gateway_responses
-        if not config.enabled:
-            return {"detail": detail}
-
         message = detail or config.empty_value
         error = detail or config.empty_value
         return {
@@ -1896,8 +1965,74 @@ class GatewayRuntime:
             config.error_key: error,
         }
 
-    def _error_response_body(self, detail: str) -> str:
-        return json.dumps(self._gateway_error_payload(detail), ensure_ascii=False)
+    def _gateway_error_seed_payload(self, status_code: int, detail: str) -> dict[str, Any]:
+        return {
+            "detail": detail,
+            "message": detail,
+            "error": detail,
+            "status_code": status_code,
+            "status": status_code,
+        }
+
+    def _shape_gateway_error_response(
+        self,
+        *,
+        status_code: int,
+        detail: str,
+        request: IncomingRequest | None = None,
+    ) -> OutgoingResponse:
+        config = self.gateway_responses
+        if config.mode == "profile" and config.output_profile:
+            with self._lock:
+                profile = self.output_profiles.get(config.output_profile)
+            if profile is None:
+                LOGGER.warning(
+                    "Gateway response output profile '%s' was not found. Falling back to default detail shape.",
+                    config.output_profile,
+                )
+            else:
+                try:
+                    seed_response = OutgoingResponse(
+                        status_code=status_code,
+                        headers={"Content-Type": "application/json; charset=utf-8"},
+                        body=json.dumps(
+                            self._gateway_error_seed_payload(status_code, detail),
+                            ensure_ascii=False,
+                        ).encode("utf-8"),
+                    )
+                    return self._apply_output_profile_config(
+                        profile=profile,
+                        request=request,
+                        response=seed_response,
+                        detail=detail,
+                    )
+                except Exception:  # noqa: BLE001
+                    LOGGER.exception(
+                        "Gateway response output profile '%s' failed. Falling back to default detail shape.",
+                        config.output_profile,
+                    )
+        if config.mode == "inline":
+            payload = self._inline_gateway_error_payload(detail)
+        else:
+            payload = {"detail": detail}
+        return OutgoingResponse(
+            status_code=status_code,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            body=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        )
+
+    def _error_response_body(
+        self,
+        status_code: int,
+        detail: str,
+        request: IncomingRequest | None = None,
+    ) -> str:
+        shaped = self._shape_gateway_error_response(
+            status_code=status_code,
+            detail=detail,
+            request=request,
+        )
+        return shaped.body.decode("utf-8", errors="ignore")
 
     def build_gateway_error_response(
         self,
@@ -1909,7 +2044,12 @@ class GatewayRuntime:
         extra_headers: Mapping[str, Any] | None = None,
         include_body: bool = True,
     ) -> OutgoingResponse:
-        headers: dict[str, Any] = {"Content-Type": "application/json; charset=utf-8"}
+        shaped = self._shape_gateway_error_response(
+            status_code=status_code,
+            detail=detail,
+            request=request,
+        )
+        headers: dict[str, Any] = dict(shaped.headers)
         if request is not None:
             headers = self.merge_response_headers(
                 headers,
@@ -1920,7 +2060,7 @@ class GatewayRuntime:
         return OutgoingResponse(
             status_code=status_code,
             headers=headers,
-            body=self._error_response_body(detail).encode("utf-8") if include_body else b"",
+            body=shaped.body if include_body else b"",
         )
 
     def _write_log(

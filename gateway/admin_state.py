@@ -236,6 +236,7 @@ def serialize_output_profiles(document: dict[str, Any]) -> list[dict[str, Any]]:
                 "empty_value": profile.get("empty_value", ""),
                 "jsonp_callback_param": str(profile.get("jsonp_callback_param", "callback") or "callback"),
                 "jsonp_default_callback": str(profile.get("jsonp_default_callback", "callback") or "callback"),
+                "transform_code": str(profile.get("transform_code", "") or ""),
                 "headers": profile.get("headers") or {},
             }
         )
@@ -250,6 +251,17 @@ def serialize_gateway_settings(document: dict[str, Any]) -> dict[str, Any]:
     gateway_responses = document.get("gateway_responses") or {}
     if not isinstance(gateway_responses, dict):
         gateway_responses = {}
+    gateway_response_output_profile = (
+        str(gateway_responses.get("output_profile", "") or "").strip().lower()
+    )
+    gateway_response_mode = str(gateway_responses.get("mode", "") or "").strip().lower()
+    if gateway_response_mode not in {"default", "inline", "profile"}:
+        if gateway_response_output_profile:
+            gateway_response_mode = "profile"
+        elif bool(gateway_responses.get("enabled", False)):
+            gateway_response_mode = "inline"
+        else:
+            gateway_response_mode = "default"
     retention_hours = observability.get("log_retention_hours")
     return {
         "log_retention_hours": (
@@ -258,7 +270,9 @@ def serialize_gateway_settings(document: dict[str, Any]) -> dict[str, Any]:
             else ""
         ),
         "gateway_responses": {
-            "enabled": bool(gateway_responses.get("enabled", False)),
+            "enabled": gateway_response_mode != "default",
+            "mode": gateway_response_mode,
+            "output_profile": gateway_response_output_profile,
             "success_key": str(gateway_responses.get("success_key", "success") or "success"),
             "data_key": str(gateway_responses.get("data_key", "data") or "data"),
             "message_key": str(gateway_responses.get("message_key", "message") or "message"),

@@ -145,6 +145,14 @@ def _clear_output_profile_references(document: dict[str, Any], *, profile_slug: 
         if str(route.get("output_profile", "")).strip().lower() == profile_slug:
             route.pop("output_profile", None)
 
+    gateway_responses = document.get("gateway_responses")
+    if isinstance(gateway_responses, dict):
+        if str(gateway_responses.get("output_profile", "")).strip().lower() == profile_slug:
+            gateway_responses.pop("output_profile", None)
+            if str(gateway_responses.get("mode", "")).strip().lower() == "profile":
+                gateway_responses["mode"] = "default"
+                gateway_responses["enabled"] = False
+
 
 def _rename_output_profile_references(
     document: dict[str, Any],
@@ -172,12 +180,18 @@ def _rename_output_profile_references(
         if str(route.get("output_profile", "")).strip().lower() == from_slug:
             route["output_profile"] = to_slug
 
+    gateway_responses = document.get("gateway_responses")
+    if isinstance(gateway_responses, dict):
+        if str(gateway_responses.get("output_profile", "")).strip().lower() == from_slug:
+            gateway_responses["output_profile"] = to_slug
+
 
 def save_gateway_settings(
     config_path: Path,
     *,
     log_retention_hours: int | None,
-    gateway_response_enabled: bool,
+    gateway_response_mode: str,
+    gateway_response_output_profile: str,
     gateway_response_success_key: str,
     gateway_response_data_key: str,
     gateway_response_message_key: str,
@@ -197,7 +211,9 @@ def save_gateway_settings(
         observability["log_retention_hours"] = int(log_retention_hours)
 
     document["gateway_responses"] = {
-        "enabled": bool(gateway_response_enabled),
+        "enabled": gateway_response_mode != "default",
+        "mode": gateway_response_mode,
+        "output_profile": gateway_response_output_profile,
         "success_key": gateway_response_success_key,
         "data_key": gateway_response_data_key,
         "message_key": gateway_response_message_key,
@@ -703,6 +719,7 @@ def save_output_profile(
     empty_value: Any,
     jsonp_callback_param: str,
     jsonp_default_callback: str,
+    transform_code: str,
     headers: dict[str, Any],
 ) -> str:
     document = load_config_document(config_path)
@@ -736,6 +753,10 @@ def save_output_profile(
             "jsonp_default_callback": jsonp_default_callback,
         }
     )
+    if profile_type == "custom" and transform_code:
+        payload["transform_code"] = transform_code
+    else:
+        payload.pop("transform_code", None)
     if passthrough_keys:
         payload["passthrough_keys"] = passthrough_keys
     else:
@@ -756,6 +777,15 @@ def save_output_profile(
         payload["data_fields"] = data_fields
     else:
         payload.pop("data_fields", None)
+    if profile_type != "json_envelope":
+        payload.pop("passthrough_keys", None)
+        payload.pop("source_success_key", None)
+        payload.pop("message_source_keys", None)
+        payload.pop("error_source_keys", None)
+        payload.pop("data_fields", None)
+    if profile_type != "jsonp":
+        payload.pop("jsonp_callback_param", None)
+        payload.pop("jsonp_default_callback", None)
     if headers:
         payload["headers"] = headers
     else:

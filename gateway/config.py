@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from gateway.output_sandbox import validate_custom_output_code
 
 
 CONFIG_PATH = Path("config/services.yaml")
@@ -75,12 +76,15 @@ class OutputProfileConfig:
     empty_value: Any = ""
     jsonp_callback_param: str = "callback"
     jsonp_default_callback: str = "callback"
+    transform_code: str | None = None
     headers: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
 class GatewayResponseConfig:
     enabled: bool = False
+    mode: str = "default"
+    output_profile: str | None = None
     success_key: str = "success"
     data_key: str = "data"
     message_key: str = "message"
@@ -438,8 +442,8 @@ def _load_output_profile(
         raise ValueError(f"{label} must be a mapping.")
 
     profile_type = str(value.get("type", "passthrough")).strip().lower() or "passthrough"
-    if profile_type not in {"passthrough", "json_envelope", "jsonp"}:
-        raise ValueError(f"{label}.type must be passthrough, json_envelope, or jsonp.")
+    if profile_type not in {"passthrough", "json_envelope", "jsonp", "custom"}:
+        raise ValueError(f"{label}.type must be passthrough, json_envelope, jsonp, or custom.")
 
     headers = value.get("headers") or {}
     if not isinstance(headers, dict):
@@ -465,6 +469,14 @@ def _load_output_profile(
         for field_name, source_path in data_fields_raw.items()
         if str(field_name).strip() and str(source_path).strip()
     }
+    transform_code = str(value.get("transform_code", "") or "").strip() or None
+    if profile_type == "custom":
+        if not transform_code:
+            raise ValueError(f"{label}.transform_code is required when type is custom.")
+        try:
+            validate_custom_output_code(transform_code)
+        except ValueError as exc:
+            raise ValueError(f"{label}.transform_code {exc}") from exc
     return OutputProfileConfig(
         slug=_normalize_slug(slug, label=f"{label} slug", fallback=slug),
         title=str(value.get("title", slug)).strip() or slug,
@@ -484,6 +496,7 @@ def _load_output_profile(
         or "callback",
         jsonp_default_callback=str(value.get("jsonp_default_callback", "callback")).strip()
         or "callback",
+        transform_code=transform_code,
         headers=dict(headers),
     )
 
@@ -503,7 +516,11 @@ def _load_output_profiles_block(output_profiles_block: Any) -> dict[str, OutputP
     return profiles
 
 
-def _load_gateway_response_config(value: Any) -> GatewayResponseConfig:
+def _load_gateway_response_config(
+    value: Any,
+    *,
+    output_profiles: dict[str, OutputProfileConfig],
+) -> GatewayResponseConfig:
     if value in (None, {}):
         return GatewayResponseConfig()
     if not isinstance(value, dict):
@@ -512,9 +529,30 @@ def _load_gateway_response_config(value: Any) -> GatewayResponseConfig:
     headers = value.get("headers") or {}
     if not isinstance(headers, dict):
         raise ValueError("Config 'gateway_responses.headers' must be a mapping.")
+    output_profile = str(value.get("output_profile", "") or "").strip().lower() or None
+    mode_raw = str(value.get("mode", "") or "").strip().lower()
+    if mode_raw and mode_raw not in {"default", "inline", "profile"}:
+        raise ValueError("Config 'gateway_responses.mode' must be default, inline, or profile.")
+    if mode_raw:
+        mode = mode_raw
+    elif output_profile:
+        mode = "profile"
+    elif bool(value.get("enabled", False)):
+        mode = "inline"
+    else:
+        mode = "default"
+    if mode == "profile":
+        if not output_profile:
+            raise ValueError("Config 'gateway_responses.output_profile' is required when mode is profile.")
+        if output_profile not in output_profiles:
+            raise ValueError(
+                f"Config 'gateway_responses.output_profile' references unknown output profile '{output_profile}'."
+            )
 
     return GatewayResponseConfig(
-        enabled=bool(value.get("enabled", False)),
+        enabled=mode != "default",
+        mode=mode,
+        output_profile=output_profile,
         success_key=str(value.get("success_key", "success")).strip() or "success",
         data_key=str(value.get("data_key", "data")).strip() or "data",
         message_key=str(value.get("message_key", "message")).strip() or "message",
@@ -1153,7 +1191,10 @@ def load_gateway_config(config_path: Path | str = CONFIG_PATH) -> GatewayConfig:
     raw = load_config_document(config_path)
     clients = _load_clients_block(raw.get("clients"))
     output_profiles = _load_output_profiles_block(raw.get("output_profiles"))
-    gateway_responses = _load_gateway_response_config(raw.get("gateway_responses"))
+    gateway_responses = _load_gateway_response_config(
+        raw.get("gateway_responses"),
+        output_profiles=output_profiles,
+    )
     observability = raw.get("observability")
     log_aggregators = _load_log_aggregators_block(observability)
     log_retention_hours = _load_log_retention_hours(observability)

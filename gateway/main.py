@@ -37,6 +37,7 @@ from gateway.admin_ops import (
 from gateway.admin_state import build_admin_page_state
 from gateway.config import load_config_document, save_config_document
 from gateway.logging_utils import setup_logging, shutdown_logging
+from gateway.output_sandbox import validate_custom_output_code
 from gateway.runtime import GatewayError, GatewayRuntime, IncomingRequest, OutgoingResponse
 from gateway.security import (
     AuthenticatedPrincipal,
@@ -514,8 +515,7 @@ def render_admin_page(
           --ok: #137333;
           --okbg: #e6f4ea;
           --errbg: #fce8e6;
-          --tabbg: #eef3fd;
-          --sidebar-bg: rgba(255, 255, 255, 0.88);
+          --tabbg: #f7faff;
         }}
         * {{ box-sizing: border-box; }}
         body {{
@@ -534,7 +534,6 @@ def render_admin_page(
           overflow: hidden;
         }}
         .app-shell {{
-          display: flex;
           min-height: 100vh;
         }}
         .sidebar-backdrop {{
@@ -545,29 +544,33 @@ def render_admin_page(
           pointer-events: none;
           transition: opacity 0.22s ease;
           z-index: 40;
+          display: none;
         }}
         .sidebar {{
-          position: sticky;
-          top: 0;
-          width: 272px;
+          position: fixed;
+          inset: 0 auto 0 0;
+          width: min(300px, calc(100vw - 28px));
           height: 100vh;
-          display: flex;
+          display: none;
           flex-direction: column;
           gap: 18px;
-          padding: 22px 16px 16px;
+          padding: 20px 14px 16px;
           background:
             linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(244, 247, 253, 0.92) 100%),
-            var(--sidebar-bg);
+            rgba(255, 255, 255, 0.94);
           border-right: 1px solid rgba(221, 227, 234, 0.92);
           backdrop-filter: blur(18px);
           flex-shrink: 0;
           z-index: 50;
+          transform: translateX(-104%);
+          transition: transform 0.22s ease;
+          box-shadow: 0 22px 54px rgba(15, 23, 42, 0.24);
         }}
         .sidebar-brand {{
           display: flex;
           flex-direction: column;
           gap: 6px;
-          padding: 4px 6px 8px;
+          padding: 4px 6px 2px;
         }}
         .sidebar-kicker {{
           color: var(--accent-2);
@@ -590,10 +593,9 @@ def render_admin_page(
         .sidebar-nav {{
           display: flex;
           flex-direction: column;
-          gap: 6px;
+          gap: 8px;
         }}
         .main-shell {{
-          flex: 1;
           min-width: 0;
         }}
         .mobile-bar {{
@@ -610,42 +612,52 @@ def render_admin_page(
           box-shadow: 0 10px 22px rgba(60, 64, 67, 0.10);
         }}
         .wrap {{
-          max-width: 1500px;
-          margin: 0 auto;
-          padding: 24px 18px 28px;
+          width: 100%;
+          max-width: none;
+          margin: 0;
+          padding: 18px 18px 28px;
         }}
         .hero {{
           display: flex;
           justify-content: space-between;
-          gap: 18px;
-          align-items: flex-start;
-          margin-bottom: 16px;
+          gap: 14px;
+          align-items: center;
+          margin-bottom: 12px;
         }}
         .title {{
           margin: 0;
-          font-size: 30px;
+          font-size: 26px;
           font-weight: 900;
         }}
         .subtitle {{
           margin-top: 5px;
           color: var(--muted);
           line-height: 1.55;
-          font-size: 13px;
-          max-width: 760px;
+          font-size: 12px;
+          max-width: 880px;
         }}
         .meta-box {{
           display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+        }}
+        .sidebar-meta {{
+          display: flex;
           flex-direction: column;
           gap: 8px;
-          flex: 0 0 280px;
         }}
         .chip {{
-          padding: 10px 12px;
-          border-radius: 16px;
-          background: rgba(255, 255, 255, 0.86);
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          max-width: 100%;
+          padding: 6px 10px;
+          border-radius: 999px;
+          background: rgba(255, 255, 255, 0.94);
           border: 1px solid var(--line);
           font-size: 12px;
-          box-shadow: 0 10px 24px rgba(60, 64, 67, 0.06);
+          box-shadow: 0 8px 18px rgba(60, 64, 67, 0.05);
+          overflow-wrap: anywhere;
         }}
         .flash {{
           margin-bottom: 12px;
@@ -678,33 +690,45 @@ def render_admin_page(
           box-shadow: 0 0 0 2px rgba(217, 48, 37, 0.08);
         }}
         .panel {{
-          background: rgba(255, 255, 255, 0.78);
+          background: rgba(255, 255, 255, 0.82);
           border: 1px solid var(--line);
-          border-radius: 24px;
+          border-radius: 18px;
           overflow: visible;
-          box-shadow: 0 18px 44px rgba(60, 64, 67, 0.10);
-          backdrop-filter: blur(18px);
+          box-shadow: 0 14px 34px rgba(60, 64, 67, 0.08);
+          backdrop-filter: blur(14px);
+        }}
+        .tabs {{
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          align-items: center;
+          padding: 12px 14px;
+          background: var(--tabbg);
+          border-bottom: 1px solid var(--line);
+        }}
+        .desktop-tabs {{
+          display: flex;
         }}
         .tab {{
-          width: 100%;
-          border: 1px solid transparent;
-          border-radius: 14px;
-          background: transparent;
+          border: 1px solid #d7e2f0;
+          border-radius: 999px;
+          background: #fff;
           color: var(--muted);
-          padding: 11px 12px;
+          padding: 7px 11px;
           font: inherit;
           font-weight: 800;
-          font-size: 13px;
+          font-size: 12px;
           cursor: pointer;
           text-decoration: none;
           line-height: 1.2;
-          display: flex;
+          display: inline-flex;
           align-items: center;
-          justify-content: flex-start;
-          transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+          justify-content: center;
+          white-space: nowrap;
+          transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease;
         }}
         .tab:hover {{
-          background: #eef3fd;
+          background: #f3f7fd;
           color: var(--ink);
           border-color: #d7e3f3;
         }}
@@ -712,17 +736,38 @@ def render_admin_page(
           background: #202124;
           color: white;
           border-color: #202124;
-          box-shadow: 0 12px 24px rgba(32, 33, 36, 0.16);
         }}
         .tab.logout {{
-          margin-top: 8px;
-          background: #fff;
+          background: #3c4043;
+          color: #fff;
+          border-color: #3c4043;
+        }}
+        .sidebar-nav .tab,
+        .sidebar-nav .tab.logout {{
+          width: 100%;
+          justify-content: flex-start;
+          padding: 11px 12px;
+          border-radius: 14px;
+        }}
+        .sidebar-nav .tab.logout {{
+          margin-top: 6px;
+        }}
+        .sidebar-nav .tab.active {{
+          box-shadow: 0 12px 24px rgba(32, 33, 36, 0.16);
+        }}
+        .sidebar-nav .tab.logout:hover {{
+          color: #fff;
+          border-color: #202124;
+          background: #202124;
+        }}
+        .desktop-tabs .tab.logout:hover {{
           color: var(--danger);
+          background: #fff;
           border-color: #f2cfcb;
         }}
         .section {{
           display: none;
-          padding: 18px;
+          padding: 14px;
         }}
         .section.active {{
           display: block;
@@ -1235,19 +1280,18 @@ def render_admin_page(
         @media (max-width: 1100px) {{
           .hero {{
             flex-direction: column;
+            align-items: flex-start;
           }}
           .meta-box {{
             width: 100%;
-            flex: none;
           }}
         }}
         @media (max-width: 900px) {{
+          .sidebar-backdrop {{
+            display: block;
+          }}
           .sidebar {{
-            position: fixed;
-            inset: 0 auto 0 0;
-            transform: translateX(-104%);
-            transition: transform 0.22s ease;
-            box-shadow: 0 22px 54px rgba(15, 23, 42, 0.24);
+            display: flex;
           }}
           body.sidebar-open .sidebar {{
             transform: translateX(0);
@@ -1277,14 +1321,13 @@ def render_admin_page(
             font-size: 11px;
             margin-top: 2px;
           }}
+          .desktop-tabs {{
+            display: none;
+          }}
           .wrap {{
             padding: 18px 12px 20px;
           }}
           .hero, .section-head {{
-            flex-direction: column;
-            align-items: flex-start;
-          }}
-          .live-head {{
             flex-direction: column;
             align-items: flex-start;
           }}
@@ -1293,6 +1336,17 @@ def render_admin_page(
           }}
           .output-mode-note {{
             grid-template-columns: 1fr;
+          }}
+          .meta-box {{
+            width: 100%;
+          }}
+          .chip {{
+            border-radius: 14px;
+            align-items: flex-start;
+          }}
+          .live-head {{
+            flex-direction: column;
+            align-items: flex-start;
           }}
           .section {{
             padding: 14px;
@@ -1323,7 +1377,7 @@ def render_admin_page(
             <button class="tab" data-tab="roles">Roles</button>
             <a class="tab logout" href="/__logout">Logout</a>
           </nav>
-          <div class="meta-box">
+          <div class="sidebar-meta">
             <div class="chip">User: <strong>{escape(principal.username)}</strong></div>
             <div class="chip">Services Config: <span class="mono">{escape(str(runtime.config_path))}</span></div>
             <div class="chip">Security Config: <span class="mono">{escape(str(security.config_path))}</span></div>
@@ -1348,14 +1402,25 @@ def render_admin_page(
                 </div>
               </div>
               <div class="meta-box">
-                <div class="chip">Hot reload for config and security files.</div>
-                <div class="chip">Live monitor and admin state stay on the same page.</div>
-                <div class="chip">Routes, output shaping, and client auth stay isolated.</div>
+                <div class="chip">User: <strong>{escape(principal.username)}</strong></div>
+                <div class="chip">Services Config: <span class="mono">{escape(str(runtime.config_path))}</span></div>
+                <div class="chip">Security Config: <span class="mono">{escape(str(security.config_path))}</span></div>
               </div>
             </div>
             {flash}
             <div id="admin-flash"></div>
             <div class="panel">
+              <nav class="tabs desktop-tabs" aria-label="Admin sections">
+                <button class="tab active" data-tab="live">Live</button>
+                <button class="tab" data-tab="config">Config</button>
+                <button class="tab" data-tab="services">Services</button>
+                <button class="tab" data-tab="routes">Routes</button>
+                <button class="tab" data-tab="output">Output</button>
+                <button class="tab" data-tab="clients">Clients</button>
+                <button class="tab" data-tab="users">Users</button>
+                <button class="tab" data-tab="roles">Roles</button>
+                <a class="tab logout" href="/__logout">Logout</a>
+              </nav>
               <section class="section active" data-section="live">
             <div class="section-head">
               <div>
@@ -1589,7 +1654,7 @@ def render_admin_page(
           user_roles: {{ title: "Roles", text: "Assigned roles define the permissions this user receives after login.", example: "admin, monitor" }},
           profile_slug: {{ title: "Output Profile Slug", text: "Stable machine-friendly identifier used by endpoints to select this profile.", example: "standard_json" }},
           profile_title: {{ title: "Output Profile Title", text: "Readable label shown in the admin UI.", example: "Standard JSON Envelope" }},
-          profile_type: {{ title: "Output Profile Type", text: "Choose passthrough, standard JSON envelope wrapping, or JSONP callback output.", example: "json_envelope" }},
+          profile_type: {{ title: "Output Profile Type", text: "Choose passthrough, standard JSON envelope wrapping, JSONP callback output, or a safe custom transform rule.", example: "custom" }},
           profile_enabled: {{ title: "Output Profile Enabled", text: "Disabled output profiles stay saved but cannot transform endpoint responses until re-enabled.", example: "Turn off temporarily during a response-contract rollout" }},
           success_key: {{ title: "Success Key", text: "Key name that should contain the boolean success flag in a JSON envelope.", example: "success" }},
           data_key: {{ title: "Data Key", text: "Key name that should contain the upstream payload in a JSON envelope.", example: "data" }},
@@ -1599,13 +1664,15 @@ def render_admin_page(
           source_success_key: {{ title: "Success Source Path", text: "Optional dot path read from the upstream payload to compute the envelope success flag.", example: "meta.ok" }},
           message_source_keys: {{ title: "Message Source Paths", text: "Comma-separated dot paths checked in order to populate the envelope message before falling back to the message key.", example: "meta.message, error.message" }},
           error_source_keys: {{ title: "Error Source Paths", text: "Comma-separated dot paths checked in order to populate the envelope error field when the response is not successful.", example: "error.detail, meta.error" }},
-          data_fields_yaml: {{ title: "Mapped Data Fields", text: "Optional output field mapping where each key becomes part of the envelope data object and each value is a dot path read from the upstream payload.", example: '{{ "user": "payload.user", "request_id": "meta.request_id" }}' }},
+          data_fields_yaml: {{ title: "Mapped Data Fields", text: "Optional output field mapping where each key becomes part of the envelope data object. Each value can be either a plain source path or a template string with {{{{field}}}} placeholders read from the upstream payload.", example: '{{ "user": "payload.user", "fullname": "{{{{Name}}}} {{{{family}}}}", "request_id": "{{{{meta.request_id}}}}" }}' }},
           empty_value_yaml: {{ title: "Empty Value", text: "Fallback YAML or JSON value used when a mapped source path is missing or null.", example: "null" }},
+          transform_code: {{ title: "Custom Transform Code", text: "Safe Python-like code for output shaping. It must assign the final body to result. Only assignments, if/else, literals, indexing, and safe helpers like pick(), pick_first(), exists(), success(), and text() are allowed.", example: 'result = {{ "message": pick("message", detail), "error": pick("error", detail) }}' }},
           jsonp_callback_param: {{ title: "JSONP Callback Param", text: "Query-string parameter name that carries the JavaScript callback function.", example: "callback" }},
           jsonp_default_callback: {{ title: "JSONP Default Callback", text: "Fallback callback name used when the request omits the callback parameter.", example: "callback" }},
           output_headers_yaml: {{ title: "Profile Headers", text: "Headers applied after the output profile transforms the response.", example: '{{ "Cache-Control": "no-store" }}' }},
           log_retention_hours: {{ title: "Log Retention Hours", text: "When set, request log rows and rotated file logs older than this many hours are deleted by an hourly cleanup worker. Leave blank for unlimited retention.", example: "168" }},
-          gateway_response_enabled: {{ title: "Gateway Response Envelope", text: "When enabled, public runtime errors generated by NapiGate use the configured JSON envelope instead of the default detail-only shape.", example: "Useful when clients expect success, data, message, and error on 401, 404, 429, or 500 responses" }},
+          gateway_response_mode: {{ title: "Gateway Response Mode", text: "Choose the default detail-only error body, a selected output profile, or the legacy inline envelope fields below.", example: "profile" }},
+          gateway_response_output_profile: {{ title: "Gateway Response Output Profile", text: "When mode is profile, NapiGate first builds a gateway error payload with detail, message, error, status_code, and status, then sends that payload through the selected output profile.", example: "gateway_error_contract" }},
           gateway_response_empty_value: {{ title: "Gateway Empty Value", text: "Fallback value written into empty envelope fields for gateway-generated errors. Blank means an empty string.", example: 'null or ""' }},
           gateway_response_headers: {{ title: "Gateway Response Headers", text: "Extra headers merged into gateway-generated public error responses after the JSON body is rendered.", example: '{{ "Cache-Control": "no-store" }}' }},
         }};
@@ -1771,7 +1838,7 @@ def render_admin_page(
           hideHelpTooltip();
         }});
 
-        const VALID_TABS = Array.from(document.querySelectorAll(".tab[data-tab]")).map((tab) => tab.dataset.tab);
+        const VALID_TABS = Array.from(new Set(Array.from(document.querySelectorAll(".tab[data-tab]")).map((tab) => tab.dataset.tab)));
         let activeTab = VALID_TABS.includes(window.location.hash.slice(1)) ? window.location.hash.slice(1) : "live";
 
         function showAdminNotice(message, type = "ok") {{
@@ -1916,8 +1983,12 @@ def render_admin_page(
           }});
 
           const profileType = form.querySelector('[name="profile_type"]')?.value;
-          if (profileType && !["passthrough", "json_envelope", "jsonp"].includes(profileType)) {{
+          if (profileType && !["passthrough", "json_envelope", "jsonp", "custom"].includes(profileType)) {{
             fail(form.querySelector('[name="profile_type"]'), "Invalid output profile mode.");
+          }}
+          const transformCodeField = form.querySelector('[name="transform_code"]');
+          if (profileType === "custom" && transformCodeField && !transformCodeField.value.trim()) {{
+            fail(transformCodeField, "Custom transform code is required.");
           }}
           const jsonpCallback = form.querySelector('[name="jsonp_default_callback"]');
           if (profileType === "jsonp" && jsonpCallback?.value && !isSafeJsonpCallback(jsonpCallback.value.trim())) {{
@@ -1941,6 +2012,16 @@ def render_admin_page(
           const routeStrategy = form.querySelector('[name="strategy"]')?.value;
           if (routeStrategy && !["single", "round_robin", "failover", "parallel_race"].includes(routeStrategy)) {{
             fail(form.querySelector('[name="strategy"]'), "Invalid route strategy.");
+          }}
+          const gatewayResponseMode = form.querySelector('[name="gateway_response_mode"]')?.value;
+          if (gatewayResponseMode && !["default", "profile", "inline"].includes(gatewayResponseMode)) {{
+            fail(form.querySelector('[name="gateway_response_mode"]'), "Invalid gateway response mode.");
+          }}
+          if (gatewayResponseMode === "profile") {{
+            const gatewayResponseProfile = form.querySelector('[name="gateway_response_output_profile"]');
+            if (gatewayResponseProfile && !String(gatewayResponseProfile.value || "").trim()) {{
+              fail(gatewayResponseProfile, "Select an output profile for gateway-generated errors.");
+            }}
           }}
           if (form.action.endsWith("/__admin/route/save")) {{
             const targetInputs = Array.from(form.querySelectorAll("[data-route-target]"));
@@ -2035,6 +2116,13 @@ def render_admin_page(
           if (profile.type === "jsonp") {{
             return `callback = query.${{profile.jsonp_callback_param || "callback"}} ?? "${{profile.jsonp_default_callback || "callback"}}"`;
           }}
+          if (profile.type === "custom") {{
+            const firstLine = String(profile.transform_code || "")
+              .split(/\\r?\\n/)
+              .map((line) => line.trim())
+              .find(Boolean);
+            return firstLine || "custom result = ...";
+          }}
           const successKey = profile.success_key || "success";
           const dataKey = profile.data_key || "data";
           return `${{successKey}} = response.${{successKey}} ?? status<400; ${{dataKey}} = response.${{dataKey}} ?? body`;
@@ -2067,6 +2155,7 @@ def render_admin_page(
             emptyValue: valueOf("empty_value_yaml"),
             jsonpParam: valueOf("jsonp_callback_param", "callback") || "callback",
             jsonpDefault: valueOf("jsonp_default_callback", "callback") || "callback",
+            transformCode: valueOf("transform_code"),
           }};
         }}
 
@@ -2077,6 +2166,13 @@ def render_admin_page(
           if (config.type === "jsonp") {{
             return `<code>callback = query["${{esc(config.jsonpParam)}}"] ?? <span class="value">"${{esc(config.jsonpDefault)}}"</span>\n\n<span class="keyword">return</span> callback + "(" + json(response.body) + ");"</code>`;
           }}
+          if (config.type === "custom") {{
+            const customCode = esc(config.transformCode || `result = {{
+  "message": pick("message", detail),
+  "error": pick("error", detail),
+}}`);
+            return `<code># Assign the final shaped body to result.\n# Available names: payload, status_code, detail, headers, query.\n# Safe helpers: pick(), pick_first(), exists(), success(), text().\n\n${{customCode}}</code>`;
+          }}
           const guardKeys = config.passthroughKeys.length ? config.passthroughKeys : [config.successKey, config.dataKey];
           const successValue = config.sourceSuccessKey
             ? `bool(payload.${{esc(config.sourceSuccessKey)}} ?? <span class="fallback">${{esc(config.emptyValue || "empty_value")}}</span>)`
@@ -2085,7 +2181,7 @@ def render_admin_page(
             ? `first(payload.${{esc(config.messageSourceKeys.join(", payload."))}}) ?? <span class="fallback">${{esc(config.emptyValue || "empty_value")}}</span>`
             : `response["${{esc(config.messageKey)}}"] ?? <span class="fallback">auto_message(response)</span>`;
           const dataValue = config.dataFields
-            ? `<span class="fallback">mapped fields from data_fields</span>`
+            ? `<span class="fallback">mapped fields from data_fields using source paths or {{{{field}}}} templates</span>`
             : `response["${{esc(config.dataKey)}}"] ?? <span class="fallback">response.body</span>`;
           const errorValue = config.errorSourceKeys.length
             ? `first(payload.${{esc(config.errorSourceKeys.join(", payload."))}}) ?? <span class="fallback">${{esc(config.emptyValue || "empty_value")}}</span>`
@@ -2107,6 +2203,13 @@ def render_admin_page(
             form.querySelectorAll("[data-output-jsonp-field]").forEach((field) => {{
               field.hidden = select.value !== "jsonp";
             }});
+            form.querySelectorAll("[data-output-custom-field]").forEach((field) => {{
+              field.hidden = select.value !== "custom";
+            }});
+            const customCode = form.querySelector('[name="transform_code"]');
+            if (customCode) {{
+              customCode.required = select.value === "custom";
+            }}
             if (preview) {{
               preview.innerHTML = outputProfilePseudoCode(outputProfilePreviewConfig(form));
             }}
@@ -2125,7 +2228,57 @@ def render_admin_page(
             "empty_value_yaml",
             "jsonp_callback_param",
             "jsonp_default_callback",
+            "transform_code",
           ].forEach((name) => {{
+            form.querySelector(`[name="${{name}}"]`)?.addEventListener("input", sync);
+            form.querySelector(`[name="${{name}}"]`)?.addEventListener("change", sync);
+          }});
+          sync();
+        }}
+
+        function gatewayResponsePreviewConfig(form) {{
+          const valueOf = (name, fallback = "") => String(form?.querySelector(`[name="${{name}}"]`)?.value || fallback).trim();
+          return {{
+            mode: valueOf("gateway_response_mode", "default") || "default",
+            outputProfile: valueOf("gateway_response_output_profile"),
+            successKey: valueOf("gateway_response_success_key", "success") || "success",
+            dataKey: valueOf("gateway_response_data_key", "data") || "data",
+            messageKey: valueOf("gateway_response_message_key", "message") || "message",
+            errorKey: valueOf("gateway_response_error_key", "error") || "error",
+          }};
+        }}
+
+        function gatewayResponsePseudoCode(config) {{
+          if (config.mode === "default") {{
+            return `<code><span class="keyword">return</span> {{ "detail": error.detail }}</code>`;
+          }}
+          if (config.mode === "profile") {{
+            const selectedProfile = outputProfileBySlug(config.outputProfile);
+            const profileLabel = selectedProfile ? `${{selectedProfile.slug}} (${{selectedProfile.type}})` : "<select-profile>";
+            const profileRule = selectedProfile?.type === "custom"
+              ? esc(selectedProfile.transform_code || "result = {{ ... }}")
+              : esc(outputProfileRuleSummary(selectedProfile) || "select an output profile");
+            return `<code>seed = {{\n  "detail": error.detail,\n  "message": error.detail,\n  "error": error.detail,\n  "status_code": status_code,\n  "status": status_code,\n}}\n\n# The selected profile receives payload=seed.\n# In custom mode you also get detail and status_code directly.\n# Selected profile: ${{profileLabel}}\n${{profileRule}}</code>`;
+          }}
+          return `<code><span class="keyword">return</span> {{\n  "${{esc(config.successKey)}}": <span class="value">false</span>,\n  "${{esc(config.dataKey)}}": <span class="fallback">empty_value</span>,\n  "${{esc(config.messageKey)}}": error.detail ?? <span class="fallback">empty_value</span>,\n  "${{esc(config.errorKey)}}": error.detail ?? <span class="fallback">empty_value</span>\n}}</code>`;
+        }}
+
+        function syncGatewayResponseSettings(form) {{
+          const modeSelect = form?.querySelector('[name="gateway_response_mode"]');
+          const preview = form?.querySelector("[data-gateway-response-preview]");
+          if (!modeSelect) return;
+          const sync = () => {{
+            form.querySelectorAll("[data-gateway-profile-field]").forEach((field) => {{
+              field.hidden = modeSelect.value !== "profile";
+            }});
+            form.querySelectorAll("[data-gateway-inline-field]").forEach((field) => {{
+              field.hidden = modeSelect.value !== "inline";
+            }});
+            if (preview) {{
+              preview.innerHTML = gatewayResponsePseudoCode(gatewayResponsePreviewConfig(form));
+            }}
+          }};
+          ["gateway_response_mode", "gateway_response_output_profile", "gateway_response_success_key", "gateway_response_data_key", "gateway_response_message_key", "gateway_response_error_key"].forEach((name) => {{
             form.querySelector(`[name="${{name}}"]`)?.addEventListener("input", sync);
             form.querySelector(`[name="${{name}}"]`)?.addEventListener("change", sync);
           }});
@@ -2456,7 +2609,8 @@ def render_admin_page(
 
           const retentionValue = String(STATE.settings?.log_retention_hours || "");
           const gatewayResponses = STATE.settings?.gateway_responses || {{}};
-          const gatewayResponseEnabled = Boolean(gatewayResponses.enabled);
+          const gatewayResponseMode = String(gatewayResponses.mode || "default") || "default";
+          const gatewayResponseOutputProfile = String(gatewayResponses.output_profile || "");
           const gatewaySuccessKey = String(gatewayResponses.success_key || "success");
           const gatewayDataKey = String(gatewayResponses.data_key || "data");
           const gatewayMessageKey = String(gatewayResponses.message_key || "message");
@@ -2469,7 +2623,18 @@ def render_admin_page(
           );
           const canEdit = has("services_manage");
           const retentionLabel = retentionValue ? `${{retentionValue}} hour(s)` : "Unlimited";
-          const gatewayResponseLabel = gatewayResponseEnabled ? "Envelope enabled" : "Default detail shape";
+          const gatewayResponseProfileOptions = STATE.output_profiles.length
+            ? STATE.output_profiles.map((profile) => `
+                <option value="${{esc(profile.slug)}}" ${{gatewayResponseOutputProfile === profile.slug ? "selected" : ""}}>
+                  ${{esc(profile.slug)}}${{profile.enabled ? "" : " (disabled)"}}
+                </option>
+              `).join("")
+            : '<option value="">No output profiles</option>';
+          const gatewayResponseLabel = gatewayResponseMode === "profile"
+            ? (gatewayResponseOutputProfile ? `Profile: ${{gatewayResponseOutputProfile}}` : "Profile not selected")
+            : gatewayResponseMode === "inline"
+              ? "Legacy inline envelope"
+              : "Default detail shape";
 
           wrap.innerHTML = `
             <form method="post" action="/__admin/settings/save" onsubmit="return submitGatewaySettings(event, this)">
@@ -2514,28 +2679,23 @@ def render_admin_page(
                   </div>
                 </div>
                 <div class="form-grid">
-                  <label class="check-item full" data-help="gateway_response_enabled">
-                    <input type="checkbox" name="gateway_response_enabled" ${{gatewayResponseEnabled ? "checked" : ""}} ${{canEdit ? "" : "disabled"}}>
-                    <div>
-                      <strong>Use JSON envelope for gateway-generated errors</strong>
-                      <div class="muted">When off, runtime errors stay on the default <span class="mono">{{"detail": "..."}}</span> body.</div>
+                  <label data-help="gateway_response_mode">
+                    <span>Gateway Response Mode</span>
+                    <select name="gateway_response_mode" ${{canEdit ? "" : "disabled"}}>
+                      <option value="default" ${{gatewayResponseMode === "default" ? "selected" : ""}}>default detail</option>
+                      <option value="profile" ${{gatewayResponseMode === "profile" ? "selected" : ""}}>selected output profile</option>
+                      <option value="inline" ${{gatewayResponseMode === "inline" ? "selected" : ""}}>legacy inline envelope</option>
+                    </select>
+                  </label>
+                  <label class="full" data-help="gateway_response_output_profile" data-gateway-profile-field>
+                    <span>Gateway Error Output Profile</span>
+                    <select name="gateway_response_output_profile" ${{canEdit ? "" : "disabled"}}>
+                      <option value="">Select an output profile</option>
+                      ${{gatewayResponseProfileOptions}}
+                    </select>
+                    <div class="muted" style="margin-top:6px;">
+                      The selected profile receives a gateway error payload with <span class="mono">detail</span>, <span class="mono">message</span>, <span class="mono">error</span>, <span class="mono">status_code</span>, and <span class="mono">status</span>.
                     </div>
-                  </label>
-                  <label data-help="success_key">
-                    <span>Success Key</span>
-                    <input name="gateway_response_success_key" value="${{esc(gatewaySuccessKey)}}" ${{canEdit ? "" : "disabled"}}>
-                  </label>
-                  <label data-help="data_key">
-                    <span>Data Key</span>
-                    <input name="gateway_response_data_key" value="${{esc(gatewayDataKey)}}" ${{canEdit ? "" : "disabled"}}>
-                  </label>
-                  <label data-help="message_key">
-                    <span>Message Key</span>
-                    <input name="gateway_response_message_key" value="${{esc(gatewayMessageKey)}}" ${{canEdit ? "" : "disabled"}}>
-                  </label>
-                  <label data-help="error_key">
-                    <span>Error Key</span>
-                    <input name="gateway_response_error_key" value="${{esc(gatewayErrorKey)}}" ${{canEdit ? "" : "disabled"}}>
                   </label>
                   <div class="output-flow full">
                     <div class="output-flow-head">
@@ -2545,17 +2705,25 @@ def render_admin_page(
                       </div>
                       <span class="tag">pseudo-code</span>
                     </div>
-                    <pre class="pseudo-code"><code><span class="keyword">if not</span> gateway_responses.enabled:
-  <span class="keyword">return</span> {{ "detail": error.detail }}
-
-<span class="keyword">return</span> {{
-  "${{esc(gatewaySuccessKey)}}": <span class="value">false</span>,
-  "${{esc(gatewayDataKey)}}": <span class="fallback">empty_value</span>,
-  "${{esc(gatewayMessageKey)}}": error.detail ?? <span class="fallback">empty_value</span>,
-  "${{esc(gatewayErrorKey)}}": error.detail ?? <span class="fallback">empty_value</span>
-}}</code></pre>
+                    <pre class="pseudo-code" data-gateway-response-preview></pre>
                   </div>
-                  <label class="full" data-help="gateway_response_empty_value">
+                  <label data-help="success_key" data-gateway-inline-field>
+                    <span>Success Key</span>
+                    <input name="gateway_response_success_key" value="${{esc(gatewaySuccessKey)}}" ${{canEdit ? "" : "disabled"}}>
+                  </label>
+                  <label data-help="data_key" data-gateway-inline-field>
+                    <span>Data Key</span>
+                    <input name="gateway_response_data_key" value="${{esc(gatewayDataKey)}}" ${{canEdit ? "" : "disabled"}}>
+                  </label>
+                  <label data-help="message_key" data-gateway-inline-field>
+                    <span>Message Key</span>
+                    <input name="gateway_response_message_key" value="${{esc(gatewayMessageKey)}}" ${{canEdit ? "" : "disabled"}}>
+                  </label>
+                  <label data-help="error_key" data-gateway-inline-field>
+                    <span>Error Key</span>
+                    <input name="gateway_response_error_key" value="${{esc(gatewayErrorKey)}}" ${{canEdit ? "" : "disabled"}}>
+                  </label>
+                  <label class="full" data-help="gateway_response_empty_value" data-gateway-inline-field>
                     <span>Empty Value (YAML/JSON Scalar Or Structure)</span>
                     <textarea name="gateway_response_empty_value">${{esc(gatewayEmptyValueText)}}</textarea>
                   </label>
@@ -2575,6 +2743,10 @@ def render_admin_page(
             </form>
           `;
           decorateHelp(wrap);
+          const form = wrap.querySelector("form");
+          if (form) {{
+            syncGatewayResponseSettings(form);
+          }}
         }}
 
         async function submitGatewaySettings(event, form) {{
@@ -4234,6 +4406,7 @@ parallel_race: call all targets concurrently and return first healthy response</
           const jsonpParam = profile?.jsonp_callback_param || "callback";
           const jsonpDefault = profile?.jsonp_default_callback || "callback";
           const passthroughKeys = outputProfileListText(profile?.passthrough_keys || []);
+          const transformCode = profile?.transform_code || "";
           openModal(profile ? "Edit Output Profile" : "Add Output Profile", `
             <form method="post" action="/__admin/output-profile/save" class="form-grid" data-output-profile-form>
               <input type="hidden" name="original_slug" value="${{esc(profile?.slug || "")}}">
@@ -4251,6 +4424,7 @@ parallel_race: call all targets concurrently and return first healthy response</
                   <option value="passthrough" ${{(profile?.type || "passthrough") === "passthrough" ? "selected" : ""}}>passthrough</option>
                   <option value="json_envelope" ${{profile?.type === "json_envelope" ? "selected" : ""}}>json_envelope</option>
                   <option value="jsonp" ${{profile?.type === "jsonp" ? "selected" : ""}}>jsonp</option>
+                  <option value="custom" ${{profile?.type === "custom" ? "selected" : ""}}>custom</option>
                 </select>
               </label>
               <label class="check-item" data-help="profile_enabled">
@@ -4288,6 +4462,13 @@ parallel_race: call all targets concurrently and return first healthy response</
                     <div><strong>Best for</strong> Browser clients that still need JSONP.</div>
                     <div><strong>Callback param</strong> Configure the query key below.</div>
                     <div><strong>Body</strong> The parsed response body is wrapped in JavaScript.</div>
+                  </div>
+                </div>
+                <div class="output-rule" data-output-rule="custom">
+                  <div class="output-mode-note">
+                    <div><strong>Allowed code</strong> Assignments, if/else blocks, literals, indexing, and safe helper calls only.</div>
+                    <div><strong>Available inputs</strong> payload, status_code, detail, headers, query, and helper functions like pick() and text().</div>
+                    <div><strong>Required output</strong> Your code must assign the final shaped body to <span class="mono">result</span>.</div>
                   </div>
                 </div>
               </div>
@@ -4330,7 +4511,7 @@ parallel_race: call all targets concurrently and return first healthy response</
                     <input name="error_source_keys" value="${{esc(errorSourceKeys)}}">
                   </label>
                   <label class="full" data-help="data_fields_yaml">
-                    <span>Mapped Data Fields (JSON/YAML Mapping)</span>
+                    <span>Mapped Data Fields (JSON/YAML, supports {{{{field}}}} templates)</span>
                     <textarea name="data_fields_yaml">${{esc(dataFields)}}</textarea>
                   </label>
                   <label class="full" data-help="empty_value_yaml">
@@ -4346,6 +4527,13 @@ parallel_race: call all targets concurrently and return first healthy response</
               <label data-help="jsonp_default_callback" data-output-jsonp-field>
                 <span>JSONP Default Callback</span>
                 <input name="jsonp_default_callback" value="${{esc(jsonpDefault)}}">
+              </label>
+              <label class="full" data-help="transform_code" data-output-custom-field>
+                <span>Custom Transform Code</span>
+                <textarea name="transform_code" placeholder="result = {{&#10;  &quot;message&quot;: pick(&quot;message&quot;, detail),&#10;  &quot;error&quot;: pick(&quot;error&quot;, detail),&#10;}}">${{esc(transformCode)}}</textarea>
+                <div class="muted" style="margin-top:6px;">
+                  Gateway error profiles receive a payload with <span class="mono">detail</span>, <span class="mono">message</span>, <span class="mono">error</span>, <span class="mono">status_code</span>, and <span class="mono">status</span>.
+                </div>
               </label>
               <label class="full" data-help="output_headers_yaml">
                 <span>Profile Headers (JSON/YAML Mapping)</span>
@@ -5121,6 +5309,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
             form = self._parse_form()
             retention_raw = str(form.get("log_retention_hours", "")).strip()
             log_retention_hours = int(retention_raw) if retention_raw else None
+            gateway_response_mode = str(form.get("gateway_response_mode", "default")).strip().lower() or "default"
+            gateway_response_output_profile = (
+                str(form.get("gateway_response_output_profile", "")).strip().lower()
+            )
             gateway_response_success_key = self._validate_output_key(
                 str(form.get("gateway_response_success_key", "success")),
                 "Gateway success key",
@@ -5148,10 +5340,22 @@ class GatewayHandler(BaseHTTPRequestHandler):
             )
             if log_retention_hours is not None and log_retention_hours <= 0:
                 raise ValueError("Log retention hours must be a positive number.")
+            if gateway_response_mode not in {"default", "profile", "inline"}:
+                raise ValueError("Gateway response mode must be default, profile, or inline.")
+            if gateway_response_mode == "profile" and not gateway_response_output_profile:
+                raise ValueError("Select an output profile for gateway-generated errors.")
+            if (
+                gateway_response_output_profile
+                and gateway_response_output_profile not in runtime.output_profiles
+            ):
+                raise ValueError(
+                    f"Gateway response output profile '{gateway_response_output_profile}' was not found."
+                )
             message = save_gateway_settings(
                 runtime.config_path,
                 log_retention_hours=log_retention_hours,
-                gateway_response_enabled="gateway_response_enabled" in form,
+                gateway_response_mode=gateway_response_mode,
+                gateway_response_output_profile=gateway_response_output_profile,
                 gateway_response_success_key=gateway_response_success_key,
                 gateway_response_data_key=gateway_response_data_key,
                 gateway_response_message_key=gateway_response_message_key,
@@ -5492,6 +5696,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 "Empty value",
                 default="",
             )
+            transform_code = str(form.get("transform_code", "")).rstrip()
             jsonp_callback_param = self._validate_jsonp_callback_param(
                 str(form.get("jsonp_callback_param", "callback"))
             )
@@ -5504,8 +5709,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 raise ValueError("Output profile slug is required.")
             if not profile_title:
                 raise ValueError("Output profile title is required.")
-            if profile_type not in {"passthrough", "json_envelope", "jsonp"}:
-                raise ValueError("Output profile type must be passthrough, json_envelope, or jsonp.")
+            if profile_type not in {"passthrough", "json_envelope", "jsonp", "custom"}:
+                raise ValueError("Output profile type must be passthrough, json_envelope, jsonp, or custom.")
+            if profile_type == "custom":
+                validate_custom_output_code(transform_code)
 
             message = save_output_profile(
                 runtime.config_path,
@@ -5526,6 +5733,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 empty_value=empty_value,
                 jsonp_callback_param=jsonp_callback_param,
                 jsonp_default_callback=jsonp_default_callback,
+                transform_code=transform_code,
                 headers=headers,
             )
             runtime.load()
@@ -5733,6 +5941,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             error_source_keys = payload.get("error_source_keys") or []
             data_fields = payload.get("data_fields") or {}
             empty_value = payload.get("empty_value", "")
+            transform_code = str(payload.get("transform_code", "") or "").rstrip()
 
             if not isinstance(headers, dict):
                 raise ValueError("Output profile headers must be a mapping.")
@@ -5744,6 +5953,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 raise ValueError("Output profile error_source_keys must be a list.")
             if not isinstance(data_fields, dict):
                 raise ValueError("Output profile data_fields must be a mapping.")
+            if profile_type not in {"passthrough", "json_envelope", "jsonp", "custom"}:
+                raise ValueError("Output profile type must be passthrough, json_envelope, jsonp, or custom.")
+            if profile_type == "custom":
+                validate_custom_output_code(transform_code)
 
             message = save_output_profile(
                 runtime.config_path,
@@ -5776,6 +5989,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 jsonp_default_callback=self._validate_jsonp_default_callback(
                     str(payload.get("jsonp_default_callback", "callback"))
                 ),
+                transform_code=transform_code,
                 headers=headers,
             )
             runtime.load()
