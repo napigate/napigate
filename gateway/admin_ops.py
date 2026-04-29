@@ -146,6 +146,33 @@ def _clear_output_profile_references(document: dict[str, Any], *, profile_slug: 
             route.pop("output_profile", None)
 
 
+def _rename_output_profile_references(
+    document: dict[str, Any],
+    *,
+    from_slug: str,
+    to_slug: str,
+) -> None:
+    if not from_slug or from_slug == to_slug:
+        return
+    for service_data in (document.get("services") or {}).values():
+        if not isinstance(service_data, dict):
+            continue
+        for endpoint in service_data.get("endpoints") or []:
+            if not isinstance(endpoint, dict):
+                continue
+            if str(endpoint.get("output_profile", "")).strip().lower() == from_slug:
+                endpoint["output_profile"] = to_slug
+
+    routes = _existing_routes_block(document)
+    if routes is None:
+        return
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        if str(route.get("output_profile", "")).strip().lower() == from_slug:
+            route["output_profile"] = to_slug
+
+
 def save_gateway_settings(
     config_path: Path,
     *,
@@ -669,6 +696,11 @@ def save_output_profile(
     message_key: str,
     error_key: str,
     passthrough_keys: list[str],
+    source_success_key: str,
+    message_source_keys: list[str],
+    error_source_keys: list[str],
+    data_fields: dict[str, str],
+    empty_value: Any,
     jsonp_callback_param: str,
     jsonp_default_callback: str,
     headers: dict[str, Any],
@@ -682,6 +714,11 @@ def save_output_profile(
         if profile_slug in profiles:
             raise ValueError(f"Output profile '{profile_slug}' already exists.")
         payload = dict(profiles.pop(original_slug, {}))
+        _rename_output_profile_references(
+            document,
+            from_slug=original_slug,
+            to_slug=profile_slug,
+        )
     else:
         payload = dict(profiles.get(profile_slug, {}))
 
@@ -694,6 +731,7 @@ def save_output_profile(
             "data_key": data_key,
             "message_key": message_key,
             "error_key": error_key,
+            "empty_value": empty_value,
             "jsonp_callback_param": jsonp_callback_param,
             "jsonp_default_callback": jsonp_default_callback,
         }
@@ -702,6 +740,22 @@ def save_output_profile(
         payload["passthrough_keys"] = passthrough_keys
     else:
         payload.pop("passthrough_keys", None)
+    if source_success_key:
+        payload["source_success_key"] = source_success_key
+    else:
+        payload.pop("source_success_key", None)
+    if message_source_keys:
+        payload["message_source_keys"] = message_source_keys
+    else:
+        payload.pop("message_source_keys", None)
+    if error_source_keys:
+        payload["error_source_keys"] = error_source_keys
+    else:
+        payload.pop("error_source_keys", None)
+    if data_fields:
+        payload["data_fields"] = data_fields
+    else:
+        payload.pop("data_fields", None)
     if headers:
         payload["headers"] = headers
     else:

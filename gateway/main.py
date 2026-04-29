@@ -515,9 +515,11 @@ def render_admin_page(
           --okbg: #e6f4ea;
           --errbg: #fce8e6;
           --tabbg: #eef3fd;
+          --sidebar-bg: rgba(255, 255, 255, 0.88);
         }}
         * {{ box-sizing: border-box; }}
         body {{
+          min-height: 100vh;
           margin: 0;
           font-family: "Google Sans Text", "Segoe UI", sans-serif;
           color: var(--ink);
@@ -528,41 +530,122 @@ def render_admin_page(
             radial-gradient(circle at bottom left, rgba(66, 133, 244, 0.08), transparent 35%),
             var(--bg);
         }}
+        body.sidebar-open {{
+          overflow: hidden;
+        }}
+        .app-shell {{
+          display: flex;
+          min-height: 100vh;
+        }}
+        .sidebar-backdrop {{
+          position: fixed;
+          inset: 0;
+          background: rgba(15, 23, 42, 0.40);
+          opacity: 0;
+          pointer-events: none;
+          transition: opacity 0.22s ease;
+          z-index: 40;
+        }}
+        .sidebar {{
+          position: sticky;
+          top: 0;
+          width: 272px;
+          height: 100vh;
+          display: flex;
+          flex-direction: column;
+          gap: 18px;
+          padding: 22px 16px 16px;
+          background:
+            linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(244, 247, 253, 0.92) 100%),
+            var(--sidebar-bg);
+          border-right: 1px solid rgba(221, 227, 234, 0.92);
+          backdrop-filter: blur(18px);
+          flex-shrink: 0;
+          z-index: 50;
+        }}
+        .sidebar-brand {{
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          padding: 4px 6px 8px;
+        }}
+        .sidebar-kicker {{
+          color: var(--accent-2);
+          font-size: 11px;
+          font-weight: 800;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+        }}
+        .sidebar-title {{
+          margin: 0;
+          font-size: 26px;
+          font-weight: 900;
+          line-height: 1;
+        }}
+        .sidebar-subtitle {{
+          color: var(--muted);
+          font-size: 12px;
+          line-height: 1.55;
+        }}
+        .sidebar-nav {{
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }}
+        .main-shell {{
+          flex: 1;
+          min-width: 0;
+        }}
+        .mobile-bar {{
+          display: none;
+        }}
+        .mobile-toggle {{
+          width: 42px;
+          height: 42px;
+          border-radius: 14px;
+          border: 1px solid #d7e2f0;
+          background: rgba(255, 255, 255, 0.92);
+          color: var(--ink);
+          font-size: 18px;
+          box-shadow: 0 10px 22px rgba(60, 64, 67, 0.10);
+        }}
         .wrap {{
           max-width: 1500px;
-          margin: 18px auto 28px;
-          padding: 0 14px;
+          margin: 0 auto;
+          padding: 24px 18px 28px;
         }}
         .hero {{
           display: flex;
           justify-content: space-between;
-          gap: 12px;
-          align-items: center;
-          margin-bottom: 12px;
+          gap: 18px;
+          align-items: flex-start;
+          margin-bottom: 16px;
         }}
         .title {{
           margin: 0;
-          font-size: 26px;
+          font-size: 30px;
           font-weight: 900;
         }}
         .subtitle {{
           margin-top: 5px;
           color: var(--muted);
           line-height: 1.55;
-          font-size: 12px;
+          font-size: 13px;
+          max-width: 760px;
         }}
         .meta-box {{
           display: flex;
+          flex-direction: column;
           gap: 8px;
-          flex-wrap: wrap;
-          justify-content: flex-start;
+          flex: 0 0 280px;
         }}
         .chip {{
-          padding: 5px 10px;
-          border-radius: 999px;
-          background: #fff;
+          padding: 10px 12px;
+          border-radius: 16px;
+          background: rgba(255, 255, 255, 0.86);
           border: 1px solid var(--line);
           font-size: 12px;
+          box-shadow: 0 10px 24px rgba(60, 64, 67, 0.06);
         }}
         .flash {{
           margin-bottom: 12px;
@@ -595,46 +678,51 @@ def render_admin_page(
           box-shadow: 0 0 0 2px rgba(217, 48, 37, 0.08);
         }}
         .panel {{
-          background: var(--paper);
+          background: rgba(255, 255, 255, 0.78);
           border: 1px solid var(--line);
-          border-radius: 18px;
-          overflow: hidden;
-          box-shadow: 0 14px 34px rgba(60, 64, 67, 0.10);
-        }}
-        .tabs {{
-          display: flex;
-          gap: 6px;
-          flex-wrap: wrap;
-          padding: 10px;
-          background: var(--tabbg);
-          border-bottom: 1px solid var(--line);
+          border-radius: 24px;
+          overflow: visible;
+          box-shadow: 0 18px 44px rgba(60, 64, 67, 0.10);
+          backdrop-filter: blur(18px);
         }}
         .tab {{
-          border: 1px solid #202124;
-          border-radius: 999px;
-          background: #202124;
-          color: #fff;
-          padding: 7px 11px;
+          width: 100%;
+          border: 1px solid transparent;
+          border-radius: 14px;
+          background: transparent;
+          color: var(--muted);
+          padding: 11px 12px;
           font: inherit;
           font-weight: 800;
-          font-size: 12px;
+          font-size: 13px;
           cursor: pointer;
           text-decoration: none;
           line-height: 1.2;
+          display: flex;
+          align-items: center;
+          justify-content: flex-start;
+          transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+        }}
+        .tab:hover {{
+          background: #eef3fd;
+          color: var(--ink);
+          border-color: #d7e3f3;
         }}
         .tab.active {{
-          background: var(--accent);
+          background: #202124;
           color: white;
-          border-color: var(--accent);
+          border-color: #202124;
+          box-shadow: 0 12px 24px rgba(32, 33, 36, 0.16);
         }}
         .tab.logout {{
-          background: #3c4043;
-          color: #fff;
-          border-color: #3c4043;
+          margin-top: 8px;
+          background: #fff;
+          color: var(--danger);
+          border-color: #f2cfcb;
         }}
         .section {{
           display: none;
-          padding: 14px;
+          padding: 18px;
         }}
         .section.active {{
           display: block;
@@ -662,9 +750,11 @@ def render_admin_page(
           border-radius: 16px;
           padding: 12px;
           background: #fff;
+          overflow-x: auto;
         }}
         table {{
           width: 100%;
+          min-width: 760px;
           border-collapse: collapse;
           background: white;
           border-radius: 14px;
@@ -817,6 +907,7 @@ def render_admin_page(
           border-radius: 16px;
           padding: 12px;
           background: #fff;
+          overflow-x: auto;
         }}
         .live-table-card table {{
           border-radius: 12px;
@@ -837,11 +928,13 @@ def render_admin_page(
         .modal {{
           width: min(980px, 100%);
           max-height: 92vh;
-          overflow: auto;
+          overflow: hidden;
           background: white;
           border-radius: 18px;
           box-shadow: 0 22px 56px rgba(60, 64, 67, 0.18);
           border: 1px solid #d8e0ea;
+          display: flex;
+          flex-direction: column;
         }}
         .modal-head {{
           display: flex;
@@ -856,6 +949,8 @@ def render_admin_page(
         }}
         .modal-body {{
           padding: 14px;
+          overflow: auto;
+          max-height: calc(92vh - 62px);
         }}
         .modal-title {{
           margin: 0;
@@ -890,12 +985,11 @@ def render_admin_page(
           flex-wrap: wrap;
         }}
         .help-tip {{
-          position: relative;
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          width: 16px;
-          height: 16px;
+          width: 18px;
+          height: 18px;
           border-radius: 999px;
           border: 1px solid #c9d6eb;
           background: #f8fbff;
@@ -904,35 +998,12 @@ def render_admin_page(
           font-weight: 900;
           cursor: help;
           outline: none;
+          flex-shrink: 0;
         }}
         .help-tip:hover,
         .help-tip:focus {{
           border-color: #1a73e8;
           background: #edf4ff;
-        }}
-        .help-popover {{
-          position: absolute;
-          top: calc(100% + 8px);
-          inset-inline-end: 0;
-          width: min(300px, calc(100vw - 40px));
-          padding: 10px 12px;
-          border-radius: 14px;
-          border: 1px solid #d9e4f2;
-          background: #fff;
-          color: var(--ink);
-          box-shadow: 0 16px 34px rgba(60, 64, 67, 0.16);
-          opacity: 0;
-          transform: translateY(6px);
-          pointer-events: none;
-          transition: opacity 0.18s ease, transform 0.18s ease;
-          text-align: left;
-          z-index: 20;
-        }}
-        .help-tip:hover .help-popover,
-        .help-tip:focus .help-popover,
-        .help-tip:focus-within .help-popover {{
-          opacity: 1;
-          transform: translateY(0);
         }}
         .help-title {{
           display: block;
@@ -959,6 +1030,28 @@ def render_admin_page(
         .help-example code {{
           font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
           font-size: 10px;
+        }}
+        .floating-help {{
+          position: fixed;
+          left: 0;
+          top: 0;
+          width: min(320px, calc(100vw - 24px));
+          padding: 10px 12px;
+          border-radius: 14px;
+          border: 1px solid #d9e4f2;
+          background: #fff;
+          color: var(--ink);
+          box-shadow: 0 20px 38px rgba(60, 64, 67, 0.18);
+          text-align: left;
+          z-index: 1200;
+          opacity: 0;
+          transform: translateY(6px);
+          pointer-events: none;
+          transition: opacity 0.16s ease, transform 0.16s ease;
+        }}
+        .floating-help.open {{
+          opacity: 1;
+          transform: translateY(0);
         }}
         .form-grid .full {{
           grid-column: 1 / -1;
@@ -1085,6 +1178,24 @@ def render_admin_page(
           font-size: 11px;
           margin-bottom: 3px;
         }}
+        .output-config {{
+          border: 1px solid #dbe5f2;
+          border-radius: 14px;
+          background: #f8fafd;
+          padding: 12px;
+        }}
+        .output-config-head {{
+          margin-bottom: 10px;
+        }}
+        .output-config-title {{
+          font-size: 13px;
+          font-weight: 800;
+        }}
+        .output-config-note {{
+          color: var(--muted);
+          font-size: 11px;
+          margin-top: 3px;
+        }}
         .stack {{
           display: flex;
           flex-direction: column;
@@ -1121,7 +1232,54 @@ def render_admin_page(
           width: auto;
           margin-top: 2px;
         }}
+        @media (max-width: 1100px) {{
+          .hero {{
+            flex-direction: column;
+          }}
+          .meta-box {{
+            width: 100%;
+            flex: none;
+          }}
+        }}
         @media (max-width: 900px) {{
+          .sidebar {{
+            position: fixed;
+            inset: 0 auto 0 0;
+            transform: translateX(-104%);
+            transition: transform 0.22s ease;
+            box-shadow: 0 22px 54px rgba(15, 23, 42, 0.24);
+          }}
+          body.sidebar-open .sidebar {{
+            transform: translateX(0);
+          }}
+          body.sidebar-open .sidebar-backdrop {{
+            opacity: 1;
+            pointer-events: auto;
+          }}
+          .mobile-bar {{
+            position: sticky;
+            top: 0;
+            z-index: 30;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 14px 16px;
+            background: rgba(246, 248, 252, 0.92);
+            border-bottom: 1px solid rgba(221, 227, 234, 0.88);
+            backdrop-filter: blur(16px);
+          }}
+          .mobile-bar-title {{
+            font-size: 15px;
+            font-weight: 800;
+          }}
+          .mobile-bar-subtitle {{
+            color: var(--muted);
+            font-size: 11px;
+            margin-top: 2px;
+          }}
+          .wrap {{
+            padding: 18px 12px 20px;
+          }}
           .hero, .section-head {{
             flex-direction: column;
             align-items: flex-start;
@@ -1136,34 +1294,25 @@ def render_admin_page(
           .output-mode-note {{
             grid-template-columns: 1fr;
           }}
-          .tabs {{
-            justify-content: stretch;
+          .section {{
+            padding: 14px;
           }}
-          .tab {{
-            flex: 1 1 calc(50% - 8px);
+          table {{
+            min-width: 640px;
           }}
         }}
       </style>
     </head>
     <body>
-      <div class="wrap">
-        <div class="hero">
-          <div>
-            <h1 class="title">NapiGate Admin Panel</h1>
-            <div class="subtitle">
-              Manage gateway settings, services, endpoint targets, gateway routes, output profiles, scoped gateway clients, users, and roles
-            </div>
+      <div class="app-shell">
+        <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+        <aside class="sidebar" id="admin-sidebar">
+          <div class="sidebar-brand">
+            <div class="sidebar-kicker">Gateway Control</div>
+            <h1 class="sidebar-title">NapiGate</h1>
+            <div class="sidebar-subtitle">Admin panel for routes, clients, output profiles, and security.</div>
           </div>
-          <div class="meta-box">
-            <div class="chip">User: <strong>{escape(principal.username)}</strong></div>
-            <div class="chip">Services Config: <span class="mono">{escape(str(runtime.config_path))}</span></div>
-            <div class="chip">Security Config: <span class="mono">{escape(str(security.config_path))}</span></div>
-          </div>
-        </div>
-        {flash}
-        <div id="admin-flash"></div>
-        <div class="panel">
-          <div class="tabs">
+          <nav class="sidebar-nav" aria-label="Admin sections">
             <button class="tab active" data-tab="live">Live</button>
             <button class="tab" data-tab="config">Config</button>
             <button class="tab" data-tab="services">Services</button>
@@ -1173,9 +1322,41 @@ def render_admin_page(
             <button class="tab" data-tab="users">Users</button>
             <button class="tab" data-tab="roles">Roles</button>
             <a class="tab logout" href="/__logout">Logout</a>
+          </nav>
+          <div class="meta-box">
+            <div class="chip">User: <strong>{escape(principal.username)}</strong></div>
+            <div class="chip">Services Config: <span class="mono">{escape(str(runtime.config_path))}</span></div>
+            <div class="chip">Security Config: <span class="mono">{escape(str(security.config_path))}</span></div>
+          </div>
+        </aside>
+
+        <main class="main-shell">
+          <div class="mobile-bar">
+            <button class="mobile-toggle" id="sidebar-toggle" type="button" aria-controls="admin-sidebar" aria-expanded="false">☰</button>
+            <div>
+              <div class="mobile-bar-title">NapiGate Admin</div>
+              <div class="mobile-bar-subtitle">Routes, clients, output profiles, and security.</div>
+            </div>
           </div>
 
-          <section class="section active" data-section="live">
+          <div class="wrap">
+            <div class="hero">
+              <div>
+                <h1 class="title">NapiGate Admin Panel</h1>
+                <div class="subtitle">
+                  Manage gateway settings, services, endpoint targets, gateway routes, output profiles, scoped gateway clients, users, and roles
+                </div>
+              </div>
+              <div class="meta-box">
+                <div class="chip">Hot reload for config and security files.</div>
+                <div class="chip">Live monitor and admin state stay on the same page.</div>
+                <div class="chip">Routes, output shaping, and client auth stay isolated.</div>
+              </div>
+            </div>
+            {flash}
+            <div id="admin-flash"></div>
+            <div class="panel">
+              <section class="section active" data-section="live">
             <div class="section-head">
               <div>
                 <h2 class="section-title">Live</h2>
@@ -1184,9 +1365,9 @@ def render_admin_page(
               <div class="actions" id="live-top-actions"></div>
             </div>
             <div id="live-wrap"></div>
-          </section>
+              </section>
 
-          <section class="section" data-section="config">
+              <section class="section" data-section="config">
             <div class="section-head">
               <div>
                 <h2 class="section-title">Config</h2>
@@ -1194,9 +1375,9 @@ def render_admin_page(
               </div>
             </div>
             <div id="config-wrap"></div>
-          </section>
+              </section>
 
-          <section class="section" data-section="services">
+              <section class="section" data-section="services">
             <div class="section-head">
               <div>
                 <h2 class="section-title">Services</h2>
@@ -1205,9 +1386,9 @@ def render_admin_page(
               <div class="actions" id="services-top-actions"></div>
             </div>
             <div class="card" id="services-table-wrap"></div>
-          </section>
+              </section>
 
-          <section class="section" data-section="routes">
+              <section class="section" data-section="routes">
             <div class="section-head">
               <div>
                 <h2 class="section-title">Routes</h2>
@@ -1216,9 +1397,9 @@ def render_admin_page(
               <div class="actions" id="routes-top-actions"></div>
             </div>
             <div class="card" id="routes-table-wrap"></div>
-          </section>
+              </section>
 
-          <section class="section" data-section="clients">
+              <section class="section" data-section="clients">
             <div class="section-head">
               <div>
                 <h2 class="section-title">Clients</h2>
@@ -1227,9 +1408,9 @@ def render_admin_page(
               <div class="actions" id="clients-top-actions"></div>
             </div>
             <div class="card" id="clients-table-wrap"></div>
-          </section>
+              </section>
 
-          <section class="section" data-section="output">
+              <section class="section" data-section="output">
             <div class="section-head">
               <div>
                 <h2 class="section-title">Output</h2>
@@ -1238,9 +1419,9 @@ def render_admin_page(
               <div class="actions" id="output-top-actions"></div>
             </div>
             <div class="card" id="output-table-wrap"></div>
-          </section>
+              </section>
 
-          <section class="section" data-section="users">
+              <section class="section" data-section="users">
             <div class="section-head">
               <div>
                 <h2 class="section-title">Users</h2>
@@ -1249,9 +1430,9 @@ def render_admin_page(
               <div class="actions" id="users-top-actions"></div>
             </div>
             <div class="card" id="users-table-wrap"></div>
-          </section>
+              </section>
 
-          <section class="section" data-section="roles">
+              <section class="section" data-section="roles">
             <div class="section-head">
               <div>
                 <h2 class="section-title">Roles</h2>
@@ -1260,9 +1441,13 @@ def render_admin_page(
               <div class="actions" id="roles-top-actions"></div>
             </div>
             <div class="card" id="roles-table-wrap"></div>
-          </section>
-        </div>
+              </section>
+            </div>
+          </div>
+        </main>
       </div>
+
+      <div class="floating-help" id="help-tooltip" hidden></div>
 
       <div class="overlay" id="modal-overlay">
         <div class="modal">
@@ -1282,6 +1467,10 @@ def render_admin_page(
         const modalBody = document.getElementById("modal-body");
         const modalClose = document.getElementById("modal-close");
         const adminFlash = document.getElementById("admin-flash");
+        const sidebar = document.getElementById("admin-sidebar");
+        const sidebarToggle = document.getElementById("sidebar-toggle");
+        const sidebarBackdrop = document.getElementById("sidebar-backdrop");
+        const helpTooltip = document.getElementById("help-tooltip");
 
         function esc(value) {{
           return String(value ?? "")
@@ -1407,6 +1596,11 @@ def render_admin_page(
           message_key: {{ title: "Message Key", text: "Key name used for human-readable response messages.", example: "message" }},
           error_key: {{ title: "Error Key", text: "Key name used for error details when the endpoint fails.", example: "error" }},
           passthrough_keys: {{ title: "Existing Envelope Keys", text: "If the upstream JSON already contains these keys, NapiGate will not wrap it again.", example: "success, data, message" }},
+          source_success_key: {{ title: "Success Source Path", text: "Optional dot path read from the upstream payload to compute the envelope success flag.", example: "meta.ok" }},
+          message_source_keys: {{ title: "Message Source Paths", text: "Comma-separated dot paths checked in order to populate the envelope message before falling back to the message key.", example: "meta.message, error.message" }},
+          error_source_keys: {{ title: "Error Source Paths", text: "Comma-separated dot paths checked in order to populate the envelope error field when the response is not successful.", example: "error.detail, meta.error" }},
+          data_fields_yaml: {{ title: "Mapped Data Fields", text: "Optional output field mapping where each key becomes part of the envelope data object and each value is a dot path read from the upstream payload.", example: '{{ "user": "payload.user", "request_id": "meta.request_id" }}' }},
+          empty_value_yaml: {{ title: "Empty Value", text: "Fallback YAML or JSON value used when a mapped source path is missing or null.", example: "null" }},
           jsonp_callback_param: {{ title: "JSONP Callback Param", text: "Query-string parameter name that carries the JavaScript callback function.", example: "callback" }},
           jsonp_default_callback: {{ title: "JSONP Default Callback", text: "Fallback callback name used when the request omits the callback parameter.", example: "callback" }},
           output_headers_yaml: {{ title: "Profile Headers", text: "Headers applied after the output profile transforms the response.", example: '{{ "Cache-Control": "no-store" }}' }},
@@ -1419,19 +1613,96 @@ def render_admin_page(
         function helpMarkup(key) {{
           const info = FIELD_HELP[key];
           if (!info) return "";
-          const example = info.example
-            ? `<span class="help-example">Example: <code>${{esc(info.example)}}</code></span>`
-            : "";
           return `
-            <span class="help-tip" tabindex="0" aria-label="${{esc(info.title)}} help">
-              ?
-              <span class="help-popover">
-                <span class="help-title">${{esc(info.title)}}</span>
-                <span class="help-body">${{esc(info.text)}}</span>
-                ${{example}}
-              </span>
-            </span>
+            <span
+              class="help-tip"
+              tabindex="0"
+              role="button"
+              aria-label="${{esc(info.title)}} help"
+              data-help-title="${{esc(info.title)}}"
+              data-help-text="${{esc(info.text)}}"
+              data-help-example="${{esc(info.example || "")}}"
+            >?</span>
           `;
+        }}
+
+        let activeHelpAnchor = null;
+
+        function setSidebarOpen(open) {{
+          document.body.classList.toggle("sidebar-open", !!open);
+          if (sidebarToggle) {{
+            sidebarToggle.setAttribute("aria-expanded", open ? "true" : "false");
+          }}
+        }}
+
+        function hideHelpTooltip() {{
+          activeHelpAnchor = null;
+          if (!helpTooltip) return;
+          helpTooltip.classList.remove("open");
+          helpTooltip.hidden = true;
+          helpTooltip.innerHTML = "";
+        }}
+
+        function positionHelpTooltip(anchor) {{
+          if (!helpTooltip || !anchor) return;
+          const rect = anchor.getBoundingClientRect();
+          const margin = 12;
+          helpTooltip.style.left = "0px";
+          helpTooltip.style.top = "0px";
+          helpTooltip.hidden = false;
+          helpTooltip.classList.add("open");
+          const tooltipRect = helpTooltip.getBoundingClientRect();
+          let left = rect.right - tooltipRect.width;
+          if (left < margin) left = margin;
+          if (left + tooltipRect.width > window.innerWidth - margin) {{
+            left = window.innerWidth - tooltipRect.width - margin;
+          }}
+          let top = rect.bottom + 10;
+          if (top + tooltipRect.height > window.innerHeight - margin) {{
+            top = rect.top - tooltipRect.height - 10;
+          }}
+          if (top < margin) {{
+            top = Math.max(margin, window.innerHeight - tooltipRect.height - margin);
+          }}
+          helpTooltip.style.left = `${{Math.round(left)}}px`;
+          helpTooltip.style.top = `${{Math.round(top)}}px`;
+        }}
+
+        function showHelpTooltip(anchor) {{
+          if (!helpTooltip || !anchor) return;
+          activeHelpAnchor = anchor;
+          const example = anchor.dataset.helpExample
+            ? `<span class="help-example">Example: <code>${{esc(anchor.dataset.helpExample)}}</code></span>`
+            : "";
+          helpTooltip.innerHTML = `
+            <span class="help-title">${{esc(anchor.dataset.helpTitle || "")}}</span>
+            <span class="help-body">${{esc(anchor.dataset.helpText || "")}}</span>
+            ${{example}}
+          `;
+          positionHelpTooltip(anchor);
+        }}
+
+        function bindHelpTips(root = document) {{
+          root.querySelectorAll(".help-tip").forEach((tip) => {{
+            if (tip.dataset.helpBound === "1") return;
+            tip.dataset.helpBound = "1";
+            tip.addEventListener("mouseenter", () => showHelpTooltip(tip));
+            tip.addEventListener("focus", () => showHelpTooltip(tip));
+            tip.addEventListener("mouseleave", () => {{
+              if (activeHelpAnchor === tip) hideHelpTooltip();
+            }});
+            tip.addEventListener("blur", () => {{
+              if (activeHelpAnchor === tip) hideHelpTooltip();
+            }});
+            tip.addEventListener("click", (event) => {{
+              event.preventDefault();
+              if (activeHelpAnchor === tip && !helpTooltip.hidden) {{
+                hideHelpTooltip();
+                return;
+              }}
+              showHelpTooltip(tip);
+            }});
+          }});
         }}
 
         function decorateHelp(root = modalBody) {{
@@ -1445,6 +1716,7 @@ def render_admin_page(
             wrapper.innerHTML = `${{anchor.outerHTML}}${{markup}}`;
             anchor.replaceWith(wrapper);
           }});
+          bindHelpTips(root);
         }}
 
         let liveRows = Array.isArray(STATE.live?.logs) ? STATE.live.logs : [];
@@ -1455,10 +1727,12 @@ def render_admin_page(
           modalTitle.textContent = title;
           modalBody.innerHTML = bodyHtml;
           decorateHelp(modalBody);
+          hideHelpTooltip();
           overlay.classList.add("open");
         }}
 
         function closeModal() {{
+          hideHelpTooltip();
           overlay.classList.remove("open");
           modalBody.innerHTML = "";
         }}
@@ -1466,6 +1740,35 @@ def render_admin_page(
         modalClose.addEventListener("click", closeModal);
         overlay.addEventListener("click", (event) => {{
           if (event.target === overlay) closeModal();
+        }});
+        sidebarToggle?.addEventListener("click", () => {{
+          setSidebarOpen(!document.body.classList.contains("sidebar-open"));
+        }});
+        sidebarBackdrop?.addEventListener("click", () => setSidebarOpen(false));
+        document.addEventListener("click", (event) => {{
+          if (!event.target.closest(".help-tip")) hideHelpTooltip();
+        }});
+        window.addEventListener("resize", () => {{
+          if (activeHelpAnchor) {{
+            positionHelpTooltip(activeHelpAnchor);
+          }}
+          if (window.innerWidth > 900) {{
+            setSidebarOpen(false);
+          }}
+        }});
+        window.addEventListener("scroll", () => {{
+          if (activeHelpAnchor) positionHelpTooltip(activeHelpAnchor);
+        }}, true);
+        document.addEventListener("keydown", (event) => {{
+          if (event.key !== "Escape") return;
+          if (overlay.classList.contains("open")) {{
+            closeModal();
+            return;
+          }}
+          if (document.body.classList.contains("sidebar-open")) {{
+            setSidebarOpen(false);
+          }}
+          hideHelpTooltip();
         }});
 
         const VALID_TABS = Array.from(document.querySelectorAll(".tab[data-tab]")).map((tab) => tab.dataset.tab);
@@ -1489,6 +1792,9 @@ def render_admin_page(
           }});
           if (options.push && window.location.hash.slice(1) !== target) {{
             history.pushState({{ tab: target }}, "", `#${{target}}`);
+          }}
+          if (window.innerWidth <= 900) {{
+            setSidebarOpen(false);
           }}
         }}
 
@@ -1617,6 +1923,11 @@ def render_admin_page(
           if (profileType === "jsonp" && jsonpCallback?.value && !isSafeJsonpCallback(jsonpCallback.value.trim())) {{
             fail(jsonpCallback, "Use a JavaScript identifier path, for example callback or window.handleResponse.");
           }}
+          const passthroughKeysField = form.querySelector('[name="passthrough_keys"]');
+          if (passthroughKeysField?.value) {{
+            const invalid = splitList(passthroughKeysField.value).find((item) => !isSafeIdentifier(item));
+            if (invalid) fail(passthroughKeysField, `Unsafe envelope key: ${{invalid}}.`);
+          }}
           const methods = form.querySelector('[name="methods"]');
           if (methods?.value) {{
             const validMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
@@ -1729,18 +2040,95 @@ def render_admin_page(
           return `${{successKey}} = response.${{successKey}} ?? status<400; ${{dataKey}} = response.${{dataKey}} ?? body`;
         }}
 
+        function outputProfileListText(values) {{
+          return Array.isArray(values) ? values.join(", ") : "";
+        }}
+
+        function outputProfileDataFieldsText(value) {{
+          if (!value || Array.isArray(value) || typeof value !== "object" || !Object.keys(value).length) {{
+            return "";
+          }}
+          return JSON.stringify(value, null, 2);
+        }}
+
+        function outputProfilePreviewConfig(form) {{
+          const valueOf = (name, fallback = "") => String(form?.querySelector(`[name="${{name}}"]`)?.value || fallback).trim();
+          return {{
+            type: valueOf("profile_type", "passthrough") || "passthrough",
+            successKey: valueOf("success_key", "success") || "success",
+            dataKey: valueOf("data_key", "data") || "data",
+            messageKey: valueOf("message_key", "message") || "message",
+            errorKey: valueOf("error_key", "error") || "error",
+            passthroughKeys: splitList(valueOf("passthrough_keys")),
+            sourceSuccessKey: valueOf("source_success_key"),
+            messageSourceKeys: splitList(valueOf("message_source_keys")),
+            errorSourceKeys: splitList(valueOf("error_source_keys")),
+            dataFields: valueOf("data_fields_yaml"),
+            emptyValue: valueOf("empty_value_yaml"),
+            jsonpParam: valueOf("jsonp_callback_param", "callback") || "callback",
+            jsonpDefault: valueOf("jsonp_default_callback", "callback") || "callback",
+          }};
+        }}
+
+        function outputProfilePseudoCode(config) {{
+          if (config.type === "passthrough") {{
+            return `<code><span class="keyword">return</span> upstream.response\n\n# No wrapping, no JSON editing, no key rewriting.</code>`;
+          }}
+          if (config.type === "jsonp") {{
+            return `<code>callback = query["${{esc(config.jsonpParam)}}"] ?? <span class="value">"${{esc(config.jsonpDefault)}}"</span>\n\n<span class="keyword">return</span> callback + "(" + json(response.body) + ");"</code>`;
+          }}
+          const guardKeys = config.passthroughKeys.length ? config.passthroughKeys : [config.successKey, config.dataKey];
+          const successValue = config.sourceSuccessKey
+            ? `bool(payload.${{esc(config.sourceSuccessKey)}} ?? <span class="fallback">${{esc(config.emptyValue || "empty_value")}}</span>)`
+            : `response["${{esc(config.successKey)}}"] ?? <span class="fallback">(status &lt; 400)</span>`;
+          const messageValue = config.messageSourceKeys.length
+            ? `first(payload.${{esc(config.messageSourceKeys.join(", payload."))}}) ?? <span class="fallback">${{esc(config.emptyValue || "empty_value")}}</span>`
+            : `response["${{esc(config.messageKey)}}"] ?? <span class="fallback">auto_message(response)</span>`;
+          const dataValue = config.dataFields
+            ? `<span class="fallback">mapped fields from data_fields</span>`
+            : `response["${{esc(config.dataKey)}}"] ?? <span class="fallback">response.body</span>`;
+          const errorValue = config.errorSourceKeys.length
+            ? `first(payload.${{esc(config.errorSourceKeys.join(", payload."))}}) ?? <span class="fallback">${{esc(config.emptyValue || "empty_value")}}</span>`
+            : `response["${{esc(config.errorKey)}}"] ?? <span class="fallback">auto_error(response)</span>`;
+          return `<code>if response has ${{guardKeys.map((key) => `"${{esc(key)}}"`).join(" + ")}}:\n  <span class="keyword">return</span> response\n\n<span class="keyword">return</span> {{\n  "${{esc(config.successKey)}}": ${{successValue}},\n  "${{esc(config.messageKey)}}": ${{messageValue}},\n  "${{esc(config.dataKey)}}": ${{dataValue}},\n  "${{esc(config.errorKey)}}": ${{errorValue}}\n}}</code>`;
+        }}
+
         function syncOutputProfileRules(form) {{
           const select = form?.querySelector('[name="profile_type"]');
           if (!select) return;
+          const preview = form.querySelector("[data-output-preview]");
           const sync = () => {{
             form.querySelectorAll("[data-output-rule]").forEach((panel) => {{
               panel.classList.toggle("is-active", panel.dataset.outputRule === select.value);
             }});
+            form.querySelectorAll("[data-output-envelope-field]").forEach((field) => {{
+              field.hidden = select.value !== "json_envelope";
+            }});
             form.querySelectorAll("[data-output-jsonp-field]").forEach((field) => {{
               field.hidden = select.value !== "jsonp";
             }});
+            if (preview) {{
+              preview.innerHTML = outputProfilePseudoCode(outputProfilePreviewConfig(form));
+            }}
           }};
-          select.addEventListener("change", sync);
+          [
+            "profile_type",
+            "success_key",
+            "data_key",
+            "message_key",
+            "error_key",
+            "passthrough_keys",
+            "source_success_key",
+            "message_source_keys",
+            "error_source_keys",
+            "data_fields_yaml",
+            "empty_value_yaml",
+            "jsonp_callback_param",
+            "jsonp_default_callback",
+          ].forEach((name) => {{
+            form.querySelector(`[name="${{name}}"]`)?.addEventListener("input", sync);
+            form.querySelector(`[name="${{name}}"]`)?.addEventListener("change", sync);
+          }});
           sync();
         }}
 
@@ -3838,17 +4226,17 @@ parallel_race: call all targets concurrently and return first healthy response</
           const dataKey = profile?.data_key || "data";
           const messageKey = profile?.message_key || "message";
           const errorKey = profile?.error_key || "error";
+          const sourceSuccessKey = profile?.source_success_key || "";
+          const messageSourceKeys = outputProfileListText(profile?.message_source_keys || []);
+          const errorSourceKeys = outputProfileListText(profile?.error_source_keys || []);
+          const dataFields = outputProfileDataFieldsText(profile?.data_fields || {{}});
+          const emptyValue = configValueText(profile?.empty_value ?? "");
           const jsonpParam = profile?.jsonp_callback_param || "callback";
           const jsonpDefault = profile?.jsonp_default_callback || "callback";
-          const passthroughKeys = (profile?.passthrough_keys || []).join(",");
+          const passthroughKeys = outputProfileListText(profile?.passthrough_keys || []);
           openModal(profile ? "Edit Output Profile" : "Add Output Profile", `
             <form method="post" action="/__admin/output-profile/save" class="form-grid" data-output-profile-form>
               <input type="hidden" name="original_slug" value="${{esc(profile?.slug || "")}}">
-              <input type="hidden" name="success_key" value="${{esc(successKey)}}">
-              <input type="hidden" name="data_key" value="${{esc(dataKey)}}">
-              <input type="hidden" name="message_key" value="${{esc(messageKey)}}">
-              <input type="hidden" name="error_key" value="${{esc(errorKey)}}">
-              <input type="hidden" name="passthrough_keys" value="${{esc(passthroughKeys)}}">
               <label data-help="profile_title">
                 <span>Profile Title</span>
                 <input name="profile_title" value="${{esc(profile?.title || "")}}" required>
@@ -3876,14 +4264,12 @@ parallel_race: call all targets concurrently and return first healthy response</
                 <div class="output-flow-head">
                   <div>
                     <div class="output-flow-title">Response shaping rule</div>
-                    <div class="output-flow-subtitle">The selected mode is stored as config, but the envelope contract reads like code.</div>
+                    <div class="output-flow-subtitle">The selected mode is stored as config, and the preview updates as you edit the contract.</div>
                   </div>
                   <span class="tag">pseudo-code</span>
                 </div>
+                <pre class="pseudo-code" data-output-preview></pre>
                 <div class="output-rule" data-output-rule="passthrough">
-                  <pre class="pseudo-code"><code><span class="keyword">return</span> upstream.response
-
-# No wrapping, no JSON editing, no key rewriting.</code></pre>
                   <div class="output-mode-note">
                     <div><strong>Best for</strong> Images, files, raw APIs, existing contracts.</div>
                     <div><strong>Headers</strong> Profile headers can still be merged.</div>
@@ -3891,30 +4277,66 @@ parallel_race: call all targets concurrently and return first healthy response</
                   </div>
                 </div>
                 <div class="output-rule" data-output-rule="json_envelope">
-                  <pre class="pseudo-code"><code><span class="keyword">if</span> response has "${{esc(successKey)}}" and "${{esc(dataKey)}}":
-  <span class="keyword">return</span> response
-
-<span class="keyword">return</span> {{
-  "${{esc(successKey)}}": response["${{esc(successKey)}}"] ?? <span class="fallback">(status &lt; 400)</span>,
-  "${{esc(dataKey)}}": response["${{esc(dataKey)}}"] ?? <span class="fallback">response.body</span>,
-  "${{esc(messageKey)}}": response["${{esc(messageKey)}}"] ?? <span class="fallback">auto_message(response)</span>,
-  "${{esc(errorKey)}}": response["${{esc(errorKey)}}"] ?? <span class="fallback">auto_error(response)</span>
-}}</code></pre>
                   <div class="output-mode-note">
-                    <div><strong>Success</strong> Uses response.${{esc(successKey)}} when present, otherwise HTTP status.</div>
-                    <div><strong>Data</strong> Uses response.${{esc(dataKey)}} when present, otherwise the body.</div>
-                    <div><strong>Existing envelope</strong> Existing ${{esc(successKey)}} + ${{esc(dataKey)}} responses are not double-wrapped.</div>
+                    <div><strong>Success</strong> Read the normal success key or compute it from a source path.</div>
+                    <div><strong>Data</strong> Reuse the upstream body directly or build a mapped data object.</div>
+                    <div><strong>Existing envelope</strong> Existing keys listed below are allowed to pass through unchanged.</div>
                   </div>
                 </div>
                 <div class="output-rule" data-output-rule="jsonp">
-                  <pre class="pseudo-code"><code>callback = query["${{esc(jsonpParam)}}"] ?? <span class="value">"${{esc(jsonpDefault)}}"</span>
-
-<span class="keyword">return</span> callback + "(" + json(response.body) + ");"</code></pre>
                   <div class="output-mode-note">
                     <div><strong>Best for</strong> Browser clients that still need JSONP.</div>
                     <div><strong>Callback param</strong> Configure the query key below.</div>
                     <div><strong>Body</strong> The parsed response body is wrapped in JavaScript.</div>
                   </div>
+                </div>
+              </div>
+              <div class="output-config full" data-output-envelope-field>
+                <div class="output-config-head">
+                  <div class="output-config-title">Envelope contract</div>
+                  <div class="output-config-note">These fields control the actual JSON output shape and how values are extracted from upstream payloads.</div>
+                </div>
+                <div class="form-grid">
+                  <label data-help="success_key">
+                    <span>Success Key</span>
+                    <input name="success_key" value="${{esc(successKey)}}" required>
+                  </label>
+                  <label data-help="data_key">
+                    <span>Data Key</span>
+                    <input name="data_key" value="${{esc(dataKey)}}" required>
+                  </label>
+                  <label data-help="message_key">
+                    <span>Message Key</span>
+                    <input name="message_key" value="${{esc(messageKey)}}" required>
+                  </label>
+                  <label data-help="error_key">
+                    <span>Error Key</span>
+                    <input name="error_key" value="${{esc(errorKey)}}" required>
+                  </label>
+                  <label class="full" data-help="passthrough_keys">
+                    <span>Existing Envelope Keys (CSV)</span>
+                    <input name="passthrough_keys" value="${{esc(passthroughKeys)}}">
+                  </label>
+                  <label data-help="source_success_key">
+                    <span>Success Source Path</span>
+                    <input name="source_success_key" value="${{esc(sourceSuccessKey)}}">
+                  </label>
+                  <label data-help="message_source_keys">
+                    <span>Message Source Paths (CSV)</span>
+                    <input name="message_source_keys" value="${{esc(messageSourceKeys)}}">
+                  </label>
+                  <label data-help="error_source_keys">
+                    <span>Error Source Paths (CSV)</span>
+                    <input name="error_source_keys" value="${{esc(errorSourceKeys)}}">
+                  </label>
+                  <label class="full" data-help="data_fields_yaml">
+                    <span>Mapped Data Fields (JSON/YAML Mapping)</span>
+                    <textarea name="data_fields_yaml">${{esc(dataFields)}}</textarea>
+                  </label>
+                  <label class="full" data-help="empty_value_yaml">
+                    <span>Empty Value (JSON/YAML)</span>
+                    <textarea name="empty_value_yaml">${{esc(emptyValue)}}</textarea>
+                  </label>
                 </div>
               </div>
               <label data-help="jsonp_callback_param" data-output-jsonp-field>
@@ -5056,6 +5478,20 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 self._validate_output_key(item, "Existing envelope key")
                 for item in passthrough_keys
             ]
+            source_success_key = str(form.get("source_success_key", "")).strip()
+            message_source_keys = self._parse_name_list(str(form.get("message_source_keys", "")))
+            error_source_keys = self._parse_name_list(str(form.get("error_source_keys", "")))
+            data_fields_raw = self._parse_yaml_mapping(str(form.get("data_fields_yaml", "")), "Data fields")
+            data_fields = {
+                self._validate_output_key(str(field_name), "Data field key"): str(source_path).strip()
+                for field_name, source_path in data_fields_raw.items()
+                if str(field_name).strip() and str(source_path).strip()
+            }
+            empty_value = self._parse_yaml_value(
+                str(form.get("empty_value_yaml", "")),
+                "Empty value",
+                default="",
+            )
             jsonp_callback_param = self._validate_jsonp_callback_param(
                 str(form.get("jsonp_callback_param", "callback"))
             )
@@ -5083,6 +5519,11 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 message_key=message_key,
                 error_key=error_key,
                 passthrough_keys=passthrough_keys,
+                source_success_key=source_success_key,
+                message_source_keys=message_source_keys,
+                error_source_keys=error_source_keys,
+                data_fields=data_fields,
+                empty_value=empty_value,
                 jsonp_callback_param=jsonp_callback_param,
                 jsonp_default_callback=jsonp_default_callback,
                 headers=headers,
@@ -5287,11 +5728,22 @@ class GatewayHandler(BaseHTTPRequestHandler):
             profile_type = str(payload.get("type", "passthrough")).strip().lower()
             headers = payload.get("headers") or {}
             passthrough_keys = payload.get("passthrough_keys") or []
+            source_success_key = str(payload.get("source_success_key", "")).strip()
+            message_source_keys = payload.get("message_source_keys") or []
+            error_source_keys = payload.get("error_source_keys") or []
+            data_fields = payload.get("data_fields") or {}
+            empty_value = payload.get("empty_value", "")
 
             if not isinstance(headers, dict):
                 raise ValueError("Output profile headers must be a mapping.")
             if not isinstance(passthrough_keys, list):
                 raise ValueError("Output profile passthrough_keys must be a list.")
+            if not isinstance(message_source_keys, list):
+                raise ValueError("Output profile message_source_keys must be a list.")
+            if not isinstance(error_source_keys, list):
+                raise ValueError("Output profile error_source_keys must be a list.")
+            if not isinstance(data_fields, dict):
+                raise ValueError("Output profile data_fields must be a mapping.")
 
             message = save_output_profile(
                 runtime.config_path,
@@ -5309,6 +5761,15 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     for item in passthrough_keys
                     if str(item).strip()
                 ],
+                source_success_key=source_success_key,
+                message_source_keys=[str(item).strip() for item in message_source_keys if str(item).strip()],
+                error_source_keys=[str(item).strip() for item in error_source_keys if str(item).strip()],
+                data_fields={
+                    self._validate_output_key(str(field_name), "Data field key"): str(source_path).strip()
+                    for field_name, source_path in data_fields.items()
+                    if str(field_name).strip() and str(source_path).strip()
+                },
+                empty_value=empty_value,
                 jsonp_callback_param=self._validate_jsonp_callback_param(
                     str(payload.get("jsonp_callback_param", "callback"))
                 ),

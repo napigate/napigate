@@ -597,6 +597,7 @@ Common:
   - `Roles`
   - `Logout`
 - Live is the first tab.
+- Desktop admin navigation is now a left sidebar; on mobile it becomes a slide-out drawer from the left with a backdrop toggle.
 - Admin tabs update the URL hash, for example `/__admin#output`, without reloading the page.
 - Admin modal save/delete actions use AJAX when JavaScript is available, refresh the in-page admin state, and preserve the active tab instead of returning to Live.
 - Inactive tabs are dark with white text by design.
@@ -618,8 +619,21 @@ Common:
 - Route and endpoint `Copy cURL` actions open a modal first so the admin can generate a request without auth or choose a client plus auth method before copying the command.
 - Endpoint forms define target behavior only; gateway path, method exposure, output profile, response cache, and success hook are configured from route forms.
 - Output profiles now have their own tab and modal CRUD.
-- Output profile forms show response shaping as pseudo-code instead of raw success/data/message/error key inputs; `passthrough` is the raw unmodified-output mode.
+- Output profile forms now expose the editable envelope contract directly:
+  - `success_key`
+  - `data_key`
+  - `message_key`
+  - `error_key`
+  - `passthrough_keys`
+  - `source_success_key`
+  - `message_source_keys`
+  - `error_source_keys`
+  - `data_fields`
+  - `empty_value`
+  - live pseudo-code preview updates while editing
+  - `passthrough` remains the raw unmodified-output mode
 - Admin forms now include inline tooltip help and examples for the visible input fields.
+- Tooltip help now renders in a floating layer so it stays visible above modals instead of being clipped by dialog overflow.
 - Admin modal forms include client-side validation for required fields, numbers, URLs, identifiers, obvious browser-markup injection, JSONP callback names, and output-profile pseudo-code key safety; server-side validation also rejects unsafe output envelope keys and JSONP callback values.
 - Endpoint forms now also expose:
   - slug
@@ -758,6 +772,12 @@ pip install requests pyyaml
 - 2026-04-28: monitor storage and Live views now capture the final outgoing upstream `curl` command, including rendered URL, headers, and request body when a proxied call is actually sent.
 - 2026-04-28: gateway-wide `gateway_responses` settings were added under Config so public runtime errors can keep the default detail shape or switch to a configurable JSON envelope with custom keys, empty values, and headers.
 - 2026-04-29: endpoint forms now expose an output profile selector; routes that have no `output_profile` fall back to the endpoint's `output_profile` value.
+- 2026-04-29: admin output-profile editing and layout were upgraded:
+  - output-profile modals now edit the full envelope contract, source-path mappings, `data_fields`, and `empty_value`
+  - output-profile pseudo-code preview updates live while the form changes
+  - renaming an output-profile slug now rewrites dependent route and endpoint references instead of leaving stale slugs behind
+  - admin navigation moved to a left sidebar on desktop and a slide-out drawer on mobile
+  - tooltip help now floats above modals instead of being clipped by dialog overflow
 - 2026-04-29: pluggable cache and rate-limit backends were introduced in `gateway/cache.py`:
   - in-memory backends remain the default
   - Redis backends activate when `NAPIGATE_REDIS_URL` is set; connection failure degrades to in-memory automatically
