@@ -832,10 +832,13 @@ class GatewayRuntime:
             return matched.endpoint.response_cache
         return matched.route.response_cache
 
-    def _route_output_profile_slug(self, matched: MatchedEndpoint) -> str | None:
-        if matched.route.output_profile:
-            return matched.route.output_profile
-        return matched.endpoint.output_profile
+    def _output_profile_slugs(self, matched: MatchedEndpoint) -> list[str]:
+        slugs: list[str] = []
+        for slug in (matched.endpoint.output_profile, matched.route.output_profile):
+            if not slug or slug in slugs:
+                continue
+            slugs.append(slug)
+        return slugs
 
     def _route_success_hook(self, matched: MatchedEndpoint) -> SuccessHookConfig | None:
         if matched.route.success_hook is not None:
@@ -967,19 +970,21 @@ class GatewayRuntime:
         request: IncomingRequest,
         response: OutgoingResponse,
     ) -> OutgoingResponse:
-        profile_slug = self._route_output_profile_slug(matched)
-        if not profile_slug:
+        profile_slugs = self._output_profile_slugs(matched)
+        if not profile_slugs:
             return response
 
         with self._lock:
-            profile = self.output_profiles.get(profile_slug)
-        if profile is None or not profile.enabled:
-            return response
-        return self._apply_output_profile_config(
-            profile=profile,
-            request=request,
-            response=response,
-        )
+            profiles = [self.output_profiles.get(profile_slug) for profile_slug in profile_slugs]
+        for profile in profiles:
+            if profile is None or not profile.enabled:
+                continue
+            response = self._apply_output_profile_config(
+                profile=profile,
+                request=request,
+                response=response,
+            )
+        return response
 
     def _apply_output_profile_config(
         self,
@@ -1878,10 +1883,9 @@ class GatewayRuntime:
 
     def _should_stream_response(self, matched: MatchedEndpoint) -> bool:
         """Return True when the response can be streamed without buffering."""
-        profile_slug = self._route_output_profile_slug(matched)
-        if profile_slug:
+        for profile_slug in self._output_profile_slugs(matched):
             profile = self.output_profiles.get(profile_slug)
-            if profile and profile.type != "passthrough":
+            if profile and profile.enabled and profile.type != "passthrough":
                 return False
         cache_config = self._route_response_cache_config(matched)
         if cache_config.enabled and cache_config.ttl_seconds > 0:

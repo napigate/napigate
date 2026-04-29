@@ -435,7 +435,7 @@ Important contract notes:
 
 - `auth.required` is service-level only.
 - If `response` is defined, NapiGate returns it before any upstream proxy call.
-- `output_profile` can be set at route level or endpoint level. The route value takes precedence; the endpoint value is the fallback when the route has no profile set.
+- `output_profile` can be set at route level or endpoint level. Endpoint output is shaped first, then the route output profile runs on that result when a route profile is set.
 - `response_cache` is route-level and only stores successful responses for configured methods.
 - `success_hook` is route-level, async, and fires only after successful responses.
 - Legacy endpoint-local `gateway_path`, `output_profile`, `response_cache`, and `success_hook` still load as single-target routes for migration, but new config should use `routes[]`.
@@ -843,7 +843,7 @@ curl \
 
 - The project intentionally avoids heavyweight frameworks.
 - Runtime and admin config validation happen before persisted changes are accepted.
-- Request bodies are buffered in memory. Response bodies stream through without buffering when the route has no transforming output profile and response caching is disabled; otherwise they are buffered to allow envelope wrapping or cache storage.
+- Request bodies are buffered in memory. Response bodies stream through without buffering when the endpoint-plus-route output-profile chain has no transforming profile and response caching is disabled; otherwise they are buffered to allow envelope wrapping or cache storage.
 - If you proxy NapiGate through Nginx and want streaming responses to reach the client without buffering, set `proxy_buffering off` in the relevant location block.
 - Rate-limiter sliding-window state is not cleared on config hot-reload; only the response/pre-call/auth caches are cleared.
 - `trust_env_proxy` defaults to `false`.

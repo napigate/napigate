@@ -243,7 +243,7 @@ Common:
 - `pre_call`
 - `output_profile`
 
-- `output_profile` at endpoint level is the fallback when the route has no `output_profile` set.
+- `output_profile` at endpoint level runs first; if the route also has an `output_profile`, the route profile runs on the endpoint-shaped result.
 - `headers` can also blank out inherited incoming headers for an upstream target by setting a header value to an empty string.
 
 ### Route Fields
@@ -412,7 +412,7 @@ Common:
 ## 6.8) Output Profile Behavior
 
 - `output_profiles` are reusable top-level response contracts.
-- Routes opt in through `output_profile`; endpoints can also set `output_profile` as a fallback when the route has none.
+- Endpoints can set `output_profile`, and routes can also set `output_profile`; runtime applies the endpoint profile first and then applies the route profile to that shaped result.
 - Supported types:
   - `passthrough`
   - `json_envelope`
