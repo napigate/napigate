@@ -54,6 +54,7 @@ def serialize_services(document: dict[str, Any]) -> list[dict[str, Any]]:
                     "headers": endpoint.get("headers") or {},
                     "query": endpoint.get("query") or {},
                     "pre_call": serialize_pre_call(endpoint.get("pre_call")),
+                    "output_profile": str(endpoint.get("output_profile", "") or ""),
                     "response": (
                         {
                             "status_code": int(response.get("status_code", 200) or 200),

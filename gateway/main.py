@@ -141,6 +141,31 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
         .chip.ok {{ color: var(--ok); }}
         .chip.offline {{ color: var(--bad); }}
         .chip.warn {{ color: var(--warn); }}
+        .chip.paused {{
+          color: #1d4ed8;
+          border-color: #bfdbfe;
+          background: #eff6ff;
+        }}
+        .toolbar-btn {{
+          border: 1px solid #e7c9a6;
+          border-radius: 10px;
+          padding: 6px 10px;
+          background: #fff8ee;
+          color: var(--ink);
+          font: inherit;
+          font-size: 12px;
+          font-weight: 700;
+          cursor: pointer;
+        }}
+        .toolbar-btn.active {{
+          color: #1d4ed8;
+          border-color: #93c5fd;
+          background: #eff6ff;
+        }}
+        .toolbar-btn:disabled {{
+          opacity: 0.55;
+          cursor: default;
+        }}
         .links a {{
           color: var(--accent);
           text-decoration: none;
@@ -170,6 +195,10 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
           font-weight: 700;
           margin-top: 2px;
         }}
+        .table-wrap {{
+          overflow: auto;
+          max-height: 80vh;
+        }}
         table {{
           width: 100%;
           border-collapse: collapse;
@@ -186,6 +215,40 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
           position: sticky;
           top: 0;
           font-size: 11.5px;
+          z-index: 1;
+        }}
+        .th-inner {{
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 6px;
+        }}
+        .filter-btn {{
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 24px;
+          height: 24px;
+          border: 1px solid transparent;
+          border-radius: 8px;
+          background: transparent;
+          color: var(--muted);
+          cursor: pointer;
+          flex: 0 0 auto;
+        }}
+        .filter-btn:hover {{
+          color: var(--accent);
+          border-color: #eadbc4;
+          background: #fff8ee;
+        }}
+        .filter-btn.active {{
+          color: var(--accent);
+          border-color: #d6b08b;
+          background: #fce7d2;
+        }}
+        .filter-btn svg {{
+          width: 13px;
+          height: 13px;
         }}
         tbody tr:nth-child(even) {{
           background: #fffaf2;
@@ -256,6 +319,76 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
           direction: ltr;
           unicode-bidi: plaintext;
         }}
+        .overlay {{
+          position: fixed;
+          inset: 0;
+          display: none;
+          align-items: center;
+          justify-content: center;
+          padding: 14px;
+          background: rgba(15, 23, 42, 0.42);
+          z-index: 1000;
+        }}
+        .overlay.open {{
+          display: flex;
+        }}
+        .modal {{
+          width: min(460px, 100%);
+          background: var(--paper);
+          border: 1px solid var(--line);
+          border-radius: 18px;
+          box-shadow: 0 22px 56px rgba(107, 114, 128, 0.22);
+          overflow: hidden;
+        }}
+        .modal-head {{
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          padding: 12px 14px;
+          border-bottom: 1px solid #eadbc4;
+        }}
+        .modal-title {{
+          margin: 0;
+          font-size: 16px;
+          font-weight: 700;
+        }}
+        .icon-btn {{
+          border: 1px solid #eadbc4;
+          background: #fff8ee;
+          color: var(--ink);
+          width: 34px;
+          height: 34px;
+          border-radius: 10px;
+          font: inherit;
+          font-size: 18px;
+          cursor: pointer;
+        }}
+        .modal-body {{
+          padding: 14px;
+        }}
+        .field {{
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          font-size: 12px;
+          font-weight: 700;
+        }}
+        .field input {{
+          width: 100%;
+          border: 1px solid #d7cbb7;
+          border-radius: 10px;
+          padding: 10px 12px;
+          background: #fff;
+          color: var(--ink);
+          font: inherit;
+        }}
+        .modal-actions {{
+          display: flex;
+          justify-content: flex-end;
+          gap: 8px;
+          margin-top: 12px;
+        }}
       </style>
     </head>
     <body>
@@ -268,6 +401,9 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
             </div>
             <div class="toolbar">
               <div id="connection-badge" class="chip warn">Connecting...</div>
+              <button id="pause-button" class="toolbar-btn" type="button">Pause</button>
+              <button id="clear-filters-button" class="toolbar-btn" type="button" disabled>Clear Filters</button>
+              <div id="filter-summary" class="chip">Filters: none</div>
               <div class="chip">Config: <span class="mono">{escape(str(runtime.config_path))}</span></div>
               <div class="links">
                 <a href="/__monitor/logs">JSON</a>
@@ -290,24 +426,24 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
               <div class="stat-value" id="stat-duration">0 ms</div>
             </div>
             <div class="stat">
-              <div class="stat-label">Last Updated</div>
+              <div class="stat-label">Latest Visible</div>
               <div class="stat-value" id="stat-updated">-</div>
             </div>
           </div>
-          <div style="overflow:auto; max-height:80vh;">
+          <div class="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>Time</th>
-                  <th>Method</th>
-                  <th>Gateway Path</th>
-                  <th>Service</th>
-                  <th>Endpoint</th>
-                  <th>Upstream</th>
-                  <th>Status</th>
-                  <th>Response</th>
-                  <th>Duration (ms)</th>
-                  <th>IP</th>
+                  <th><div class="th-inner"><span>Time</span><button class="filter-btn" type="button" data-filter-column="created_at" onclick="openFilterModal('created_at')" title="Filter Time" aria-label="Filter Time"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
+                  <th><div class="th-inner"><span>Method</span><button class="filter-btn" type="button" data-filter-column="method" onclick="openFilterModal('method')" title="Filter Method" aria-label="Filter Method"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
+                  <th><div class="th-inner"><span>Gateway Path</span><button class="filter-btn" type="button" data-filter-column="gateway_path" onclick="openFilterModal('gateway_path')" title="Filter Gateway Path" aria-label="Filter Gateway Path"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
+                  <th><div class="th-inner"><span>Service</span><button class="filter-btn" type="button" data-filter-column="service_name" onclick="openFilterModal('service_name')" title="Filter Service" aria-label="Filter Service"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
+                  <th><div class="th-inner"><span>Endpoint</span><button class="filter-btn" type="button" data-filter-column="endpoint_name" onclick="openFilterModal('endpoint_name')" title="Filter Endpoint" aria-label="Filter Endpoint"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
+                  <th><div class="th-inner"><span>Upstream</span><button class="filter-btn" type="button" data-filter-column="upstream" onclick="openFilterModal('upstream')" title="Filter Upstream" aria-label="Filter Upstream"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
+                  <th><div class="th-inner"><span>Status</span><button class="filter-btn" type="button" data-filter-column="status_code" onclick="openFilterModal('status_code')" title="Filter Status" aria-label="Filter Status"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
+                  <th><div class="th-inner"><span>Response</span><button class="filter-btn" type="button" data-filter-column="response" onclick="openFilterModal('response')" title="Filter Response" aria-label="Filter Response"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
+                  <th><div class="th-inner"><span>Duration (ms)</span><button class="filter-btn" type="button" data-filter-column="duration_ms" onclick="openFilterModal('duration_ms')" title="Filter Duration" aria-label="Filter Duration"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
+                  <th><div class="th-inner"><span>IP</span><button class="filter-btn" type="button" data-filter-column="client_ip" onclick="openFilterModal('client_ip')" title="Filter IP" aria-label="Filter IP"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
                 </tr>
               </thead>
               <tbody id="log-rows"></tbody>
@@ -315,10 +451,61 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
           </div>
         </div>
       </div>
+      <div class="overlay" id="filter-overlay">
+        <div class="modal">
+          <div class="modal-head">
+            <h2 class="modal-title" id="filter-title">Filter</h2>
+            <button id="filter-close" class="icon-btn" type="button" aria-label="Close">×</button>
+          </div>
+          <div class="modal-body">
+            <form id="filter-form">
+              <label class="field">
+                <span>Search text</span>
+                <input id="filter-input" type="text" autocomplete="off" placeholder="Type any part of the value">
+              </label>
+              <div class="modal-actions">
+                <button id="filter-clear-button" class="toolbar-btn" type="button">Clear This Filter</button>
+                <button id="filter-apply-button" class="toolbar-btn active" type="submit">Apply Filter</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
       <script>
         const initialRows = {initial_rows};
         const tbody = document.getElementById("log-rows");
         const badge = document.getElementById("connection-badge");
+        const pauseButton = document.getElementById("pause-button");
+        const clearFiltersButton = document.getElementById("clear-filters-button");
+        const filterSummary = document.getElementById("filter-summary");
+        const filterOverlay = document.getElementById("filter-overlay");
+        const filterTitle = document.getElementById("filter-title");
+        const filterInput = document.getElementById("filter-input");
+        const filterForm = document.getElementById("filter-form");
+        const filterClose = document.getElementById("filter-close");
+        const filterClearButton = document.getElementById("filter-clear-button");
+        let allRows = Array.isArray(initialRows) ? initialRows : [];
+        let activeFilters = {{}};
+        let currentFilterColumn = "";
+        let monitorPaused = false;
+        let monitorConnectionState = "connecting";
+        let source = null;
+
+        const FILTER_FIELDS = {{
+          created_at: {{ label: "Time", value: (row) => String(row.created_at || "") }},
+          method: {{ label: "Method", value: (row) => String(row.method || "") }},
+          gateway_path: {{ label: "Gateway Path", value: (row) => String(row.gateway_path || "") }},
+          service_name: {{ label: "Service", value: (row) => String(row.service_name || "") }},
+          endpoint_name: {{ label: "Endpoint", value: (row) => String(row.endpoint_name || "") }},
+          upstream: {{
+            label: "Upstream",
+            value: (row) => [row.upstream_url, row.upstream_curl].filter(Boolean).join(" "),
+          }},
+          status_code: {{ label: "Status", value: (row) => String(row.status_code || "") }},
+          response: {{ label: "Response", value: (row) => responseText(row) }},
+          duration_ms: {{ label: "Duration", value: (row) => String(row.duration_ms || "") }},
+          client_ip: {{ label: "IP", value: (row) => String(row.client_ip || "") }},
+        }};
 
         function esc(value) {{
           return String(value ?? "")
@@ -333,6 +520,66 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
           if (code >= 400) return "status-4xx";
           if (code >= 200) return "status-2xx";
           return "";
+        }}
+
+        function normalized(value) {{
+          return String(value ?? "").toLowerCase().trim();
+        }}
+
+        function activeFilterEntries() {{
+          return Object.entries(activeFilters).filter(([, value]) => String(value || "").trim());
+        }}
+
+        function filterValue(row, column) {{
+          const field = FILTER_FIELDS[column];
+          return field ? String(field.value(row) || "") : "";
+        }}
+
+        function filteredRows() {{
+          const entries = activeFilterEntries();
+          if (!entries.length) {{
+            return allRows;
+          }}
+          return allRows.filter((row) =>
+            entries.every(([column, value]) => normalized(filterValue(row, column)).includes(normalized(value)))
+          );
+        }}
+
+        function updateFilterButtons() {{
+          document.querySelectorAll("[data-filter-column]").forEach((button) => {{
+            const column = button.dataset.filterColumn;
+            const activeValue = String(activeFilters[column] || "").trim();
+            button.classList.toggle("active", Boolean(activeValue));
+            button.title = activeValue
+              ? `Filter ${{FILTER_FIELDS[column].label}}: ${{activeValue}}`
+              : `Filter ${{FILTER_FIELDS[column].label}}`;
+          }});
+          const activeCount = activeFilterEntries().length;
+          clearFiltersButton.disabled = activeCount === 0;
+          if (currentFilterColumn) {{
+            filterClearButton.disabled = !String(activeFilters[currentFilterColumn] || "").trim();
+          }}
+        }}
+
+        function connectionBadgeState() {{
+          if (monitorPaused) {{
+            return {{ label: "Live paused", className: "chip paused" }};
+          }}
+          if (monitorConnectionState === "online") {{
+            return {{ label: "Live connection established", className: "chip ok" }};
+          }}
+          if (monitorConnectionState === "error") {{
+            return {{ label: "Reconnecting...", className: "chip offline" }};
+          }}
+          return {{ label: "Connecting...", className: "chip warn" }};
+        }}
+
+        function renderConnectionBadge() {{
+          const state = connectionBadgeState();
+          badge.textContent = state.label;
+          badge.className = state.className;
+          pauseButton.textContent = monitorPaused ? "Resume" : "Pause";
+          pauseButton.classList.toggle("active", monitorPaused);
         }}
 
         async function copyText(text) {{
@@ -409,17 +656,21 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
           `;
         }}
 
-        function render(rows) {{
+        function render(rows = filteredRows()) {{
           const totalRows = rows.length;
           const total5xx = rows.filter((row) => row.status_code >= 500).length;
           const avgDuration = totalRows
-            ? Math.round(rows.reduce((sum, row) => sum + row.duration_ms, 0) / totalRows)
+            ? Math.round(rows.reduce((sum, row) => sum + Number(row.duration_ms || 0), 0) / totalRows)
             : 0;
+          const activeCount = activeFilterEntries().length;
 
           document.getElementById("stat-rows").textContent = String(totalRows);
           document.getElementById("stat-errors").textContent = String(total5xx);
           document.getElementById("stat-duration").textContent = `${{avgDuration}} ms`;
-          document.getElementById("stat-updated").textContent = new Date().toLocaleTimeString("en-US");
+          document.getElementById("stat-updated").textContent = rows[0]?.created_at || "-";
+          filterSummary.textContent = activeCount
+            ? `${{totalRows}} / ${{allRows.length}} rows | ${{activeCount}} filter(s)`
+            : "Filters: none";
 
           tbody.innerHTML = rows.length
             ? rows.map((row) => `
@@ -436,23 +687,155 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
                   <td class="mono">${{esc(row.client_ip)}}</td>
                 </tr>
               `).join("")
-            : '<tr><td colspan="10">No logs yet.</td></tr>';
+            : `<tr><td colspan="10">${{allRows.length ? "No logs match the active filters." : "No logs yet."}}</td></tr>`;
+          updateFilterButtons();
+          renderConnectionBadge();
         }}
 
-        function setOnlineState(online) {{
-          badge.textContent = online ? "Live connection established" : "Reconnecting...";
-          badge.className = online ? "chip ok" : "chip offline";
+        function openFilterModal(column) {{
+          const field = FILTER_FIELDS[column];
+          if (!field) {{
+            return;
+          }}
+          currentFilterColumn = column;
+          filterTitle.textContent = `Filter ${{field.label}}`;
+          filterInput.value = String(activeFilters[column] || "");
+          filterClearButton.disabled = !String(activeFilters[column] || "").trim();
+          filterOverlay.classList.add("open");
+          window.setTimeout(() => {{
+            filterInput.focus();
+            filterInput.select();
+          }}, 0);
         }}
 
-        render(initialRows);
+        function closeFilterModal() {{
+          filterOverlay.classList.remove("open");
+          currentFilterColumn = "";
+        }}
 
-        const source = new EventSource("/__monitor/stream");
-        source.onopen = () => setOnlineState(true);
-        source.onmessage = (event) => {{
-          render(JSON.parse(event.data));
-          setOnlineState(true);
-        }};
-        source.onerror = () => setOnlineState(false);
+        function applyCurrentFilter(value) {{
+          if (!currentFilterColumn) {{
+            return;
+          }}
+          const trimmed = String(value || "").trim();
+          if (trimmed) {{
+            activeFilters[currentFilterColumn] = trimmed;
+          }} else {{
+            delete activeFilters[currentFilterColumn];
+          }}
+          closeFilterModal();
+          render();
+        }}
+
+        function clearCurrentFilter() {{
+          if (!currentFilterColumn) {{
+            return;
+          }}
+          delete activeFilters[currentFilterColumn];
+          closeFilterModal();
+          render();
+        }}
+
+        function clearAllFilters() {{
+          activeFilters = {{}};
+          render();
+        }}
+
+        async function fetchLogsSnapshot() {{
+          const response = await fetch("/__monitor/logs", {{
+            headers: {{ "Accept": "application/json" }},
+            cache: "no-store",
+          }});
+          if (!response.ok) {{
+            throw new Error(`HTTP ${{response.status}}`);
+          }}
+          const payload = await response.json();
+          allRows = Array.isArray(payload) ? payload : [];
+          render();
+        }}
+
+        function disconnectStream() {{
+          if (source) {{
+            source.close();
+            source = null;
+          }}
+        }}
+
+        function connectStream() {{
+          if (monitorPaused || source) {{
+            return;
+          }}
+          monitorConnectionState = "connecting";
+          renderConnectionBadge();
+          const currentSource = new EventSource("/__monitor/stream");
+          source = currentSource;
+          currentSource.onopen = () => {{
+            if (source !== currentSource || monitorPaused) {{
+              return;
+            }}
+            monitorConnectionState = "online";
+            renderConnectionBadge();
+          }};
+          currentSource.onmessage = (event) => {{
+            if (source !== currentSource || monitorPaused) {{
+              return;
+            }}
+            allRows = JSON.parse(event.data);
+            monitorConnectionState = "online";
+            render();
+          }};
+          currentSource.onerror = () => {{
+            if (source !== currentSource || monitorPaused) {{
+              return;
+            }}
+            monitorConnectionState = "error";
+            renderConnectionBadge();
+          }};
+        }}
+
+        async function toggleMonitorPause() {{
+          monitorPaused = !monitorPaused;
+          if (monitorPaused) {{
+            disconnectStream();
+            renderConnectionBadge();
+            return;
+          }}
+
+          monitorConnectionState = "connecting";
+          renderConnectionBadge();
+          try {{
+            await fetchLogsSnapshot();
+          }} catch (_error) {{
+            monitorConnectionState = "error";
+            renderConnectionBadge();
+          }}
+          connectStream();
+        }}
+
+        pauseButton.addEventListener("click", () => {{
+          void toggleMonitorPause();
+        }});
+        clearFiltersButton.addEventListener("click", clearAllFilters);
+        filterClose.addEventListener("click", closeFilterModal);
+        filterClearButton.addEventListener("click", clearCurrentFilter);
+        filterForm.addEventListener("submit", (event) => {{
+          event.preventDefault();
+          applyCurrentFilter(filterInput.value);
+        }});
+        filterOverlay.addEventListener("click", (event) => {{
+          if (event.target === filterOverlay) {{
+            closeFilterModal();
+          }}
+        }});
+        document.addEventListener("keydown", (event) => {{
+          if (event.key === "Escape" && filterOverlay.classList.contains("open")) {{
+            closeFilterModal();
+          }}
+        }});
+
+        render();
+        connectStream();
+        window.openFilterModal = openFilterModal;
       </script>
     </body>
     </html>
@@ -939,6 +1322,11 @@ def render_admin_page(
           color: #b45309;
           background: #fff7e8;
           border-color: #f3dfb4;
+        }}
+        .live-badge.paused {{
+          color: #1d4ed8;
+          background: #eff6ff;
+          border-color: #bfdbfe;
         }}
         .live-dot {{
           width: 8px;
@@ -1789,6 +2177,7 @@ def render_admin_page(
         let liveRows = Array.isArray(STATE.live?.logs) ? STATE.live.logs : [];
         let liveConnectionState = STATE.live?.can_view ? "connecting" : "locked";
         let livePollTimer = null;
+        let livePaused = false;
 
         function openModal(title, bodyHtml) {{
           modalTitle.textContent = title;
@@ -2538,6 +2927,9 @@ def render_admin_page(
           if (!STATE.live?.can_view) {{
             return {{ label: "Monitor access required", className: "warn" }};
           }}
+          if (livePaused) {{
+            return {{ label: "Live updates paused", className: "paused" }};
+          }}
           if (liveConnectionState === "online") {{
             return {{ label: "Live updates active", className: "ok" }};
           }}
@@ -2772,7 +3164,10 @@ def render_admin_page(
           if (!wrap || !topActions) return;
 
           topActions.innerHTML = STATE.live?.can_view
-            ? `<a class="btn light" href="${{esc(STATE.live.monitor_url || "/__monitor")}}">Show Log Table</a>`
+            ? `
+              <button class="btn light" type="button" onclick="toggleLivePause()">${{livePaused ? "Resume Live" : "Pause Live"}}</button>
+              <a class="btn light" href="${{esc(STATE.live.monitor_url || "/__monitor")}}">Show Log Table</a>
+            `
             : "";
 
           if (!STATE.live?.can_view) {{
@@ -2818,7 +3213,9 @@ def render_admin_page(
               <div class="live-head">
                 <div>
                   <h3 class="section-title" style="font-size:16px; margin-bottom:4px;">Live Request Feed</h3>
-                  <div class="section-note">This tab refreshes automatically from <span class="mono">/__monitor/logs</span>.</div>
+                  <div class="section-note">${{livePaused
+                    ? 'Updates are paused. Resume when you want the table to move again.'
+                    : 'This tab refreshes automatically from <span class="mono">/__monitor/logs</span>.'}}</div>
                 </div>
                 <span class="live-badge ${{badge.className}}">
                   <span class="live-dot"></span>
@@ -2869,7 +3266,7 @@ def render_admin_page(
         }}
 
         async function refreshLiveLogs() {{
-          if (!STATE.live?.can_view) return;
+          if (!STATE.live?.can_view || livePaused) return;
           try {{
             const response = await fetch(STATE.live.logs_url || "/__monitor/logs", {{
               headers: {{
@@ -2877,21 +3274,45 @@ def render_admin_page(
               }},
               cache: "no-store",
             }});
+            if (livePaused) return;
             if (!response.ok) {{
               throw new Error(`HTTP ${{response.status}}`);
             }}
             const payload = await response.json();
+            if (livePaused) return;
             liveRows = Array.isArray(payload) ? payload : [];
             liveConnectionState = "online";
           }} catch (_error) {{
+            if (livePaused) return;
             liveConnectionState = "error";
           }}
           renderLive();
         }}
 
+        function stopLivePolling() {{
+          if (livePollTimer !== null) {{
+            window.clearInterval(livePollTimer);
+            livePollTimer = null;
+          }}
+        }}
+
+        function toggleLivePause() {{
+          if (!STATE.live?.can_view) return;
+          livePaused = !livePaused;
+          if (livePaused) {{
+            liveConnectionState = "paused";
+            stopLivePolling();
+            renderLive();
+            return;
+          }}
+          liveConnectionState = "connecting";
+          renderLive();
+          startLivePolling();
+        }}
+
         function startLivePolling() {{
           renderLive();
-          if (!STATE.live?.can_view || livePollTimer !== null) return;
+          if (!STATE.live?.can_view || livePaused || livePollTimer !== null) return;
           refreshLiveLogs();
           livePollTimer = window.setInterval(refreshLiveLogs, 3000);
         }}
