@@ -55,6 +55,7 @@ def serialize_services(document: dict[str, Any]) -> list[dict[str, Any]]:
                     "query": endpoint.get("query") or {},
                     "pre_call": serialize_pre_call(endpoint.get("pre_call")),
                     "output_profile": str(endpoint.get("output_profile", "") or ""),
+                    "response_cache": serialize_response_cache(endpoint.get("response_cache")),
                     "response": (
                         {
                             "status_code": int(response.get("status_code", 200) or 200),
@@ -79,6 +80,7 @@ def serialize_services(document: dict[str, Any]) -> list[dict[str, Any]]:
                 "variables": service_data.get("variables") or {},
                 "headers": service_data.get("headers") or {},
                 "pre_call": serialize_pre_call(service_data.get("pre_call")),
+                "response_cache": serialize_response_cache(service_data.get("response_cache")),
                 "auth": {
                     "required": bool((service_data.get("auth") or {}).get("required", False))
                 },
@@ -238,6 +240,12 @@ def serialize_output_profiles(document: dict[str, Any]) -> list[dict[str, Any]]:
                 "jsonp_callback_param": str(profile.get("jsonp_callback_param", "callback") or "callback"),
                 "jsonp_default_callback": str(profile.get("jsonp_default_callback", "callback") or "callback"),
                 "transform_code": str(profile.get("transform_code", "") or ""),
+                "custom_validation": {
+                    "mode": str(((profile.get("custom_validation") or {}).get("mode", "status_code")) or "status_code"),
+                    "source_key": str(((profile.get("custom_validation") or {}).get("source_key", "")) or ""),
+                    "expected_value": (profile.get("custom_validation") or {}).get("expected_value", True),
+                    "error_source_keys": list(((profile.get("custom_validation") or {}).get("error_source_keys")) or []),
+                },
                 "headers": profile.get("headers") or {},
             }
         )

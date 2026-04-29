@@ -188,6 +188,14 @@ class RequestLogStore:
             {
                 **dict(row),
                 "success": int(row["status_code"]) < 400,
+                "response_source": (
+                    "cache"
+                    if str(row["upstream_url"]) == "cache://response"
+                    else "local"
+                    if str(row["upstream_url"]).startswith("local://")
+                    else "upstream"
+                ),
+                "cached": str(row["upstream_url"]) == "cache://response",
             }
             for row in rows
         ]

@@ -828,6 +828,13 @@ class GatewayRuntime:
             return len(self.output_profiles)
 
     def _route_response_cache_config(self, matched: MatchedEndpoint) -> ResponseCacheConfig:
+        for cache_config in (
+            matched.endpoint.response_cache,
+            matched.service.response_cache,
+            matched.route.response_cache,
+        ):
+            if cache_config.enabled and cache_config.ttl_seconds > 0:
+                return cache_config
         if matched.route.legacy_endpoint_config:
             return matched.endpoint.response_cache
         return matched.route.response_cache
@@ -1019,11 +1026,20 @@ class GatewayRuntime:
             return response
 
         if profile.type == "custom":
+            validation = self._custom_validation_state(
+                profile=profile,
+                payload=parsed_body,
+                response=response,
+                detail=detail,
+            )
             transformed = execute_custom_output_code(
                 profile.transform_code or "",
                 payload=parsed_body,
                 status_code=response.status_code,
-                detail=detail,
+                detail=(detail or str(validation.get("error", "")))
+                if not validation.get("ok", True)
+                else detail,
+                validation=validation,
                 empty_value=profile.empty_value,
                 content_type=content_type,
                 headers=response.headers,
@@ -1131,6 +1147,62 @@ class GatewayRuntime:
             except Exception:  # noqa: BLE001
                 return body.decode("utf-8", errors="ignore")
         return body.decode("utf-8", errors="ignore")
+
+    def _custom_validation_state(
+        self,
+        *,
+        profile: OutputProfileConfig,
+        payload: Any,
+        response: OutgoingResponse,
+        detail: str,
+    ) -> dict[str, Any]:
+        config = profile.custom_validation
+        fallback_error = detail or f"HTTP {response.status_code}"
+        error_text = self._first_payload_path_value_or_default(
+            payload,
+            config.error_source_keys,
+            "",
+        )
+        if config.mode == "payload_key":
+            missing = object()
+            actual = self._payload_path_value_or_default(payload, config.source_key or "", missing)
+            ok = actual is not missing and self._validation_value_matches(actual, config.expected_value)
+            if not ok and not error_text:
+                expected_text = self._stringify_output_data_field_value(config.expected_value)
+                actual_text = (
+                    "<missing>"
+                    if actual is missing
+                    else self._stringify_output_data_field_value(actual)
+                )
+                error_text = (
+                    f"Payload key '{config.source_key or ''}' did not match the expected value "
+                    f"({expected_text}). Actual: {actual_text}."
+                )
+            return {
+                "mode": config.mode,
+                "key": config.source_key or "",
+                "expected": config.expected_value,
+                "actual": None if actual is missing else actual,
+                "ok": ok,
+                "error": str(error_text or fallback_error if not ok else ""),
+                "status_code": response.status_code,
+            }
+
+        ok = response.status_code < 400
+        return {
+            "mode": config.mode,
+            "key": "",
+            "expected": "<400",
+            "actual": response.status_code,
+            "ok": ok,
+            "error": str(error_text or fallback_error if not ok else ""),
+            "status_code": response.status_code,
+        }
+
+    def _validation_value_matches(self, actual: Any, expected: Any) -> bool:
+        if isinstance(expected, bool):
+            return self._success_flag(actual) == expected
+        return actual == expected
 
     def _is_existing_output_envelope(
         self,

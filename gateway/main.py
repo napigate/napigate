@@ -499,7 +499,7 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
           endpoint_name: {{ label: "Endpoint", value: (row) => String(row.endpoint_name || "") }},
           upstream: {{
             label: "Upstream",
-            value: (row) => [row.upstream_url, row.upstream_curl].filter(Boolean).join(" "),
+            value: (row) => [row.response_source, row.upstream_url, row.upstream_curl].filter(Boolean).join(" "),
           }},
           status_code: {{ label: "Status", value: (row) => String(row.status_code || "") }},
           response: {{ label: "Response", value: (row) => responseText(row) }},
@@ -520,6 +520,24 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
           if (code >= 400) return "status-4xx";
           if (code >= 200) return "status-2xx";
           return "";
+        }}
+
+        function responseSource(row) {{
+          const explicitSource = String(row.response_source || "").trim().toLowerCase();
+          if (explicitSource) {{
+            return explicitSource;
+          }}
+          if (row.cached === true) {{
+            return "cache";
+          }}
+          const upstreamUrl = String(row.upstream_url || "").trim();
+          if (upstreamUrl === "cache://response") {{
+            return "cache";
+          }}
+          if (upstreamUrl.startsWith("local://")) {{
+            return "local";
+          }}
+          return "upstream";
         }}
 
         function normalized(value) {{
@@ -615,8 +633,26 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
         }}
 
         function renderUpstreamCell(row) {{
+          const source = responseSource(row);
           const upstreamUrl = String(row.upstream_url || "").trim();
           const upstreamCurl = String(row.upstream_curl || "").trim();
+          if (source === "cache") {{
+            return `
+              <div class="upstream-cell">
+                <div><span class="tag warn">Cache</span></div>
+                <div class="muted mono">response cache hit</div>
+                <div class="muted">cURL (cache)</div>
+              </div>
+            `;
+          }}
+          if (source === "local") {{
+            return `
+              <div class="upstream-cell">
+                <div><span class="tag ok">Local</span></div>
+                <div class="muted">cURL unavailable</div>
+              </div>
+            `;
+          }}
           if (!upstreamUrl && !upstreamCurl) {{
             return '<span class="muted">-</span>';
           }}
@@ -1992,10 +2028,10 @@ def render_admin_page(
           route_targets: {{ title: "Route Targets", text: "Select one or more service endpoints that this public route can call.", example: "protected_httpbin / user_by_id" }},
           output_profile: {{ title: "Output Profile", text: "Choose a reusable response-shaping profile for this route. Leave blank to keep the target response untouched.", example: "standard_json" }},
           endpoint_output_profile: {{ title: "Output Profile", text: "Default response-shaping profile for this endpoint. Routes that do not set their own output profile will use this value.", example: "standard_json" }},
-          response_cache_ttl_seconds: {{ title: "Response Cache TTL", text: "Cache successful route responses in memory for this many seconds before calling a target again.", example: "60" }},
-          response_cache_vary_headers: {{ title: "Cache Vary Headers", text: "Header names that should produce separate cache entries for the same path and query.", example: "Accept-Language, X-Tenant" }},
-          response_cache_methods: {{ title: "Cache Methods", text: "HTTP methods eligible for response caching when the TTL is enabled.", example: "GET, HEAD" }},
-          response_cache_vary_by_client: {{ title: "Cache Per Client", text: "Keep a separate cache bucket for each authenticated gateway client so one consumer does not reuse another's response.", example: "Recommended for scoped partner APIs" }},
+          response_cache_ttl_seconds: {{ title: "Response Cache TTL", text: "Cache successful responses at this scope in memory for this many seconds. Runtime checks endpoint cache first, then service, then route.", example: "60" }},
+          response_cache_vary_headers: {{ title: "Cache Vary Headers", text: "Header names that should produce separate cache entries for the same request when this scope's cache is enabled.", example: "Accept-Language, X-Tenant" }},
+          response_cache_methods: {{ title: "Cache Methods", text: "HTTP methods eligible for response caching when this scope's cache TTL is enabled.", example: "GET, HEAD" }},
+          response_cache_vary_by_client: {{ title: "Cache Per Client", text: "Keep a separate cache bucket for each authenticated gateway client when this scope's cache is enabled.", example: "Recommended for scoped partner APIs" }},
           success_hook_url: {{ title: "Success Hook URL", text: "Optional async webhook triggered only after a successful gateway response. Useful for billing or financial systems.", example: "https://billing.example.com/hooks/usage" }},
           success_hook_timeout_seconds: {{ title: "Success Hook Timeout", text: "Maximum wait time for the async success callback worker before it marks the delivery as failed.", example: "5" }},
           success_hook_event_type: {{ title: "Success Hook Event Type", text: "Business label sent to the downstream webhook so it can route or classify the event.", example: "financial" }},
@@ -2054,6 +2090,10 @@ def render_admin_page(
           error_source_keys: {{ title: "Error Source Paths", text: "Comma-separated dot paths checked in order to populate the envelope error field when the response is not successful.", example: "error.detail, meta.error" }},
           data_fields_yaml: {{ title: "Mapped Data Fields", text: "Optional output field mapping where each key becomes part of the envelope data object. Each value can be either a plain source path or a template string with {{{{field}}}} placeholders read from the upstream payload.", example: '{{ "user": "payload.user", "fullname": "{{{{Name}}}} {{{{family}}}}", "request_id": "{{{{meta.request_id}}}}" }}' }},
           empty_value_yaml: {{ title: "Empty Value", text: "Fallback YAML or JSON value used when a mapped source path is missing or null.", example: "null" }},
+          custom_validation_mode: {{ title: "Custom Success Detection", text: "Choose whether custom transform code should treat the upstream input as successful by HTTP status code or by checking a payload key first.", example: "payload_key" }},
+          custom_validation_source_key: {{ title: "Validation Source Path", text: "Dot path read from the upstream payload before custom transform code runs when detection mode is payload_key.", example: "IsSuccessful" }},
+          custom_validation_expected_value_yaml: {{ title: "Expected Success Value", text: "YAML or JSON scalar that the selected payload key must match for validation to pass. Use true for boolean success flags such as IsSuccessful.", example: "true" }},
+          custom_validation_error_source_keys: {{ title: "Validation Error Paths", text: "Comma-separated dot paths checked in order to extract a failure message for custom profiles before the transform code branches on validation.", example: "ErrorDesc, WarningDesc" }},
           transform_code: {{ title: "Custom Transform Code", text: "Safe Python-like code for output shaping. It must assign the final body to result. Only assignments, if/else, literals, indexing, and safe helpers like pick(), pick_first(), exists(), success(), and text() are allowed.", example: 'result = {{ "message": pick("message", detail), "error": pick("error", detail) }}' }},
           jsonp_callback_param: {{ title: "JSONP Callback Param", text: "Query-string parameter name that carries the JavaScript callback function.", example: "callback" }},
           jsonp_default_callback: {{ title: "JSONP Default Callback", text: "Fallback callback name used when the request omits the callback parameter.", example: "callback" }},
@@ -2506,11 +2546,15 @@ def render_admin_page(
             return `callback = query.${{profile.jsonp_callback_param || "callback"}} ?? "${{profile.jsonp_default_callback || "callback"}}"`;
           }}
           if (profile.type === "custom") {{
+            const validation = profile.custom_validation || {{}};
             const firstLine = String(profile.transform_code || "")
               .split(/\\r?\\n/)
               .map((line) => line.trim())
               .find(Boolean);
-            return firstLine || "custom result = ...";
+            const validationLabel = validation.mode === "payload_key"
+              ? `if payload.${{validation.source_key || "<key>"}} == ${{JSON.stringify(validation.expected_value ?? true)}}`
+              : "if status_code < 400";
+            return `${{validationLabel}} -> ${{firstLine || "custom result = ..." }}`;
           }}
           const successKey = profile.success_key || "success";
           const dataKey = profile.data_key || "data";
@@ -2544,6 +2588,10 @@ def render_admin_page(
             emptyValue: valueOf("empty_value_yaml"),
             jsonpParam: valueOf("jsonp_callback_param", "callback") || "callback",
             jsonpDefault: valueOf("jsonp_default_callback", "callback") || "callback",
+            customValidationMode: valueOf("custom_validation_mode", "status_code") || "status_code",
+            customValidationSourceKey: valueOf("custom_validation_source_key"),
+            customValidationExpectedValue: valueOf("custom_validation_expected_value_yaml", "true") || "true",
+            customValidationErrorSourceKeys: splitList(valueOf("custom_validation_error_source_keys")),
             transformCode: valueOf("transform_code"),
           }};
         }}
@@ -2556,11 +2604,19 @@ def render_admin_page(
             return `<code>callback = query["${{esc(config.jsonpParam)}}"] ?? <span class="value">"${{esc(config.jsonpDefault)}}"</span>\n\n<span class="keyword">return</span> callback + "(" + json(response.body) + ");"</code>`;
           }}
           if (config.type === "custom") {{
+            const validationErrorPaths = config.customValidationErrorSourceKeys.length
+              ? config.customValidationErrorSourceKeys.map((item) => `"${{esc(item)}}"`).join(", ")
+              : '"ErrorDesc"';
+            const validationRule = config.customValidationMode === "payload_key"
+              ? `validation = {{\n  "mode": "payload_key",\n  "key": "${{esc(config.customValidationSourceKey || "<path>")}}",\n  "expected": ${{esc(config.customValidationExpectedValue || "true")}},\n  "actual": pick("${{esc(config.customValidationSourceKey || "<path>")}}"),\n  "ok": success(pick("${{esc(config.customValidationSourceKey || "<path>")}}")) == ${{esc(config.customValidationExpectedValue || "true")}},\n  "error": pick_first(${{validationErrorPaths}}, default="")\n}}`
+              : `validation = {{\n  "mode": "status_code",\n  "ok": status_code < 400,\n  "actual": status_code,\n  "expected": "<400",\n  "error": pick_first(${{validationErrorPaths}}, default=detail)\n}}`;
             const customCode = esc(config.transformCode || `result = {{
-  "message": pick("message", detail),
-  "error": pick("error", detail),
+  "success": validation["ok"],
+  "message": "",
+  "data": payload if validation["ok"] else empty_value,
+  "error": "" if validation["ok"] else validation["error"],
 }}`);
-            return `<code># Assign the final shaped body to result.\n# Available names: payload, status_code, detail, headers, query.\n# Safe helpers: pick(), pick_first(), exists(), success(), text().\n\n${{customCode}}</code>`;
+            return `<code># Validation runs before your transform code.\n${{validationRule}}\n\n# Available names: payload, status_code, detail, validation, headers, query.\n# Safe helpers: pick(), pick_first(), exists(), success(), text().\n# Assign the final shaped body to result.\n\n${{customCode}}</code>`;
           }}
           const guardKeys = config.passthroughKeys.length ? config.passthroughKeys : [config.successKey, config.dataKey];
           const successValue = config.sourceSuccessKey
@@ -2595,9 +2651,17 @@ def render_admin_page(
             form.querySelectorAll("[data-output-custom-field]").forEach((field) => {{
               field.hidden = select.value !== "custom";
             }});
+            const customValidationMode = form.querySelector('[name="custom_validation_mode"]');
+            form.querySelectorAll("[data-output-custom-validation-key-field]").forEach((field) => {{
+              field.hidden = select.value !== "custom" || customValidationMode?.value !== "payload_key";
+            }});
             const customCode = form.querySelector('[name="transform_code"]');
             if (customCode) {{
               customCode.required = select.value === "custom";
+            }}
+            const customValidationSourceKey = form.querySelector('[name="custom_validation_source_key"]');
+            if (customValidationSourceKey) {{
+              customValidationSourceKey.required = select.value === "custom" && customValidationMode?.value === "payload_key";
             }}
             if (preview) {{
               preview.innerHTML = outputProfilePseudoCode(outputProfilePreviewConfig(form));
@@ -2617,6 +2681,10 @@ def render_admin_page(
             "empty_value_yaml",
             "jsonp_callback_param",
             "jsonp_default_callback",
+            "custom_validation_mode",
+            "custom_validation_source_key",
+            "custom_validation_expected_value_yaml",
+            "custom_validation_error_source_keys",
             "transform_code",
           ].forEach((name) => {{
             form.querySelector(`[name="${{name}}"]`)?.addEventListener("input", sync);
@@ -2955,9 +3023,45 @@ def render_admin_page(
           }}, 1400);
         }}
 
+        function liveResponseSource(row) {{
+          const explicitSource = String(row.response_source || "").trim().toLowerCase();
+          if (explicitSource) {{
+            return explicitSource;
+          }}
+          if (row.cached === true) {{
+            return "cache";
+          }}
+          const upstreamUrl = String(row.upstream_url || "").trim();
+          if (upstreamUrl === "cache://response") {{
+            return "cache";
+          }}
+          if (upstreamUrl.startsWith("local://")) {{
+            return "local";
+          }}
+          return "upstream";
+        }}
+
         function renderLiveUpstreamCell(row) {{
+          const source = liveResponseSource(row);
           const upstreamUrl = String(row.upstream_url || "").trim();
           const upstreamCurl = String(row.upstream_curl || "").trim();
+          if (source === "cache") {{
+            return `
+              <div style="display:flex; flex-direction:column; gap:8px; min-width:260px;">
+                <div><span class="tag warn">Cache</span></div>
+                <div class="muted mono">response cache hit</div>
+                <div class="muted">cURL (cache)</div>
+              </div>
+            `;
+          }}
+          if (source === "local") {{
+            return `
+              <div style="display:flex; flex-direction:column; gap:8px; min-width:260px;">
+                <div><span class="tag ok">Local</span></div>
+                <div class="muted">cURL unavailable</div>
+              </div>
+            `;
+          }}
           if (!upstreamUrl && !upstreamCurl) {{
             return '<span class="muted">-</span>';
           }}
@@ -3356,6 +3460,7 @@ def render_admin_page(
                         <span class="tag ${{service.trust_env_proxy ? 'warn' : 'ok'}}">Proxy ${{service.trust_env_proxy ? 'Env' : 'Direct'}}</span>
                         <span class="tag ${{service.forward_napigate_headers ? 'ok' : 'warn'}}">NapiGate Headers ${{service.forward_napigate_headers ? 'On' : 'Off'}}</span>
                         ${{service.pre_call?.code ? '<span class="tag warn">pre_call</span>' : ''}}
+                        ${{service.response_cache?.ttl_seconds ? `<span class="tag warn">Cache ${{esc(service.response_cache.ttl_seconds)}}s</span>` : ''}}
                         <span class="tag ${{service.cors?.enabled ? 'ok' : ''}}">CORS ${{service.cors?.enabled ? 'On' : 'Off'}}</span>
                         <span class="tag ${{service.rate_limit?.enabled ? 'warn' : ''}}">Rate Limit ${{service.rate_limit?.enabled ? `${{service.rate_limit.requests}}/${{service.rate_limit.window_seconds}}s` : 'Off'}}</span>
                       </td>
@@ -4003,6 +4108,25 @@ def render_admin_page(
                 <span>Pre-call Code</span>
                 <textarea name="pre_call_code">${{esc(service?.pre_call?.code || "")}}</textarea>
               </label>
+              <label data-help="response_cache_ttl_seconds">
+                <span>Response Cache TTL</span>
+                <input name="response_cache_ttl_seconds" type="number" min="0" value="${{esc(String(service?.response_cache?.ttl_seconds ?? 0))}}">
+              </label>
+              <label class="check-item" data-help="response_cache_vary_by_client">
+                <input type="checkbox" name="response_cache_vary_by_client" ${{service ? (service.response_cache?.vary_by_client ? "checked" : "") : "checked"}}>
+                <div>
+                  <strong>Cache Per Client</strong>
+                  <div class="muted">Separate cached responses by authenticated client identity.</div>
+                </div>
+              </label>
+              <label data-help="response_cache_methods">
+                <span>Cache Methods</span>
+                <input name="response_cache_methods" value="${{esc((service?.response_cache?.methods || ['GET']).join(', '))}}">
+              </label>
+              <label class="full" data-help="response_cache_vary_headers">
+                <span>Cache Vary Headers (CSV)</span>
+                <input name="response_cache_vary_headers" value="${{esc((service?.response_cache?.vary_headers || []).join(', '))}}">
+              </label>
               <label class="check-item" data-help="auth_required">
                 <input type="checkbox" name="auth_required" ${{service?.auth?.required ? "checked" : ""}}>
                 <div>
@@ -4123,7 +4247,16 @@ def render_admin_page(
                                 : '<span class="muted">No route</span>'
                             }}
                           </td>
-                          <td>${{endpoint.pre_call?.code ? '<span class="tag warn">pre_call</span>' : '<span class="muted">None</span>'}}</td>
+                          <td>
+                            ${{endpoint.pre_call?.code ? '<span class="tag warn">pre_call</span>' : '<span class="muted">None</span>'}}
+                            ${{
+                              endpoint.response_cache?.ttl_seconds
+                                ? `<span class="tag warn">Endpoint Cache ${{esc(endpoint.response_cache.ttl_seconds)}}s</span>`
+                                : service.response_cache?.ttl_seconds
+                                  ? `<span class="tag">Service Cache ${{esc(service.response_cache.ttl_seconds)}}s</span>`
+                                  : ''
+                            }}
+                          </td>
                           <td>
                             <div class="actions">
                               <button class="btn light" type="button" onclick="showEndpointView(decodeURIComponent('${{arg(service.name)}}'), decodeURIComponent('${{arg(endpoint.name)}}'))">View</button>
@@ -4234,6 +4367,25 @@ def render_admin_page(
               <label class="full" data-help="pre_call_code">
                 <span>Pre-call Code</span>
                 <textarea name="pre_call_code">${{esc(endpoint?.pre_call?.code || "")}}</textarea>
+              </label>
+              <label data-help="response_cache_ttl_seconds">
+                <span>Response Cache TTL</span>
+                <input name="response_cache_ttl_seconds" type="number" min="0" value="${{esc(String(endpoint?.response_cache?.ttl_seconds ?? 0))}}">
+              </label>
+              <label class="check-item" data-help="response_cache_vary_by_client">
+                <input type="checkbox" name="response_cache_vary_by_client" ${{endpoint ? (endpoint.response_cache?.vary_by_client ? "checked" : "") : "checked"}}>
+                <div>
+                  <strong>Cache Per Client</strong>
+                  <div class="muted">Separate cached responses by authenticated client identity.</div>
+                </div>
+              </label>
+              <label data-help="response_cache_methods">
+                <span>Cache Methods</span>
+                <input name="response_cache_methods" value="${{esc((endpoint?.response_cache?.methods || ['GET']).join(', '))}}">
+              </label>
+              <label class="full" data-help="response_cache_vary_headers">
+                <span>Cache Vary Headers (CSV)</span>
+                <input name="response_cache_vary_headers" value="${{esc((endpoint?.response_cache?.vary_headers || []).join(', '))}}">
               </label>
               <div class="actions full">
                 <button type="submit">Save Endpoint</button>
@@ -4828,6 +4980,15 @@ parallel_race: call all targets concurrently and return first healthy response</
           const jsonpDefault = profile?.jsonp_default_callback || "callback";
           const passthroughKeys = outputProfileListText(profile?.passthrough_keys || []);
           const transformCode = profile?.transform_code || "";
+          const customValidation = profile?.custom_validation || {{}};
+          const customValidationMode = customValidation.mode || "status_code";
+          const customValidationSourceKey = customValidation.source_key || "";
+          const customValidationExpectedValue = configValueText(
+            Object.prototype.hasOwnProperty.call(customValidation, "expected_value")
+              ? customValidation.expected_value
+              : true
+          );
+          const customValidationErrorSourceKeys = outputProfileListText(customValidation.error_source_keys || []);
           openModal(profile ? "Edit Output Profile" : "Add Output Profile", `
             <form method="post" action="/__admin/output-profile/save" class="form-grid" data-output-profile-form>
               <input type="hidden" name="original_slug" value="${{esc(profile?.slug || "")}}">
@@ -4887,8 +5048,10 @@ parallel_race: call all targets concurrently and return first healthy response</
                 </div>
                 <div class="output-rule" data-output-rule="custom">
                   <div class="output-mode-note">
+                    <div><strong>Validation</strong> Detect success first by status code or a payload key such as <span class="mono">IsSuccessful</span>.</div>
+                    <div><strong>Available state</strong> The transform code receives <span class="mono">validation</span> with <span class="mono">ok</span>, <span class="mono">error</span>, <span class="mono">actual</span>, and <span class="mono">expected</span>.</div>
                     <div><strong>Allowed code</strong> Assignments, if/else blocks, literals, indexing, and safe helper calls only.</div>
-                    <div><strong>Available inputs</strong> payload, status_code, detail, headers, query, and helper functions like pick() and text().</div>
+                    <div><strong>Available inputs</strong> payload, status_code, detail, validation, headers, query, and helper functions like pick() and text().</div>
                     <div><strong>Required output</strong> Your code must assign the final shaped body to <span class="mono">result</span>.</div>
                   </div>
                 </div>
@@ -4948,6 +5111,25 @@ parallel_race: call all targets concurrently and return first healthy response</
               <label data-help="jsonp_default_callback" data-output-jsonp-field>
                 <span>JSONP Default Callback</span>
                 <input name="jsonp_default_callback" value="${{esc(jsonpDefault)}}">
+              </label>
+              <label data-help="custom_validation_mode" data-output-custom-field>
+                <span>Custom Success Detection</span>
+                <select name="custom_validation_mode">
+                  <option value="status_code" ${{customValidationMode === "status_code" ? "selected" : ""}}>status_code</option>
+                  <option value="payload_key" ${{customValidationMode === "payload_key" ? "selected" : ""}}>payload_key</option>
+                </select>
+              </label>
+              <label data-help="custom_validation_source_key" data-output-custom-field data-output-custom-validation-key-field>
+                <span>Validation Source Path</span>
+                <input name="custom_validation_source_key" value="${{esc(customValidationSourceKey)}}">
+              </label>
+              <label class="full" data-help="custom_validation_expected_value_yaml" data-output-custom-field data-output-custom-validation-key-field>
+                <span>Expected Success Value (JSON/YAML)</span>
+                <textarea name="custom_validation_expected_value_yaml">${{esc(customValidationExpectedValue)}}</textarea>
+              </label>
+              <label class="full" data-help="custom_validation_error_source_keys" data-output-custom-field>
+                <span>Validation Error Paths (CSV)</span>
+                <input name="custom_validation_error_source_keys" value="${{esc(customValidationErrorSourceKeys)}}">
               </label>
               <label class="full" data-help="transform_code" data-output-custom-field>
                 <span>Custom Transform Code</span>
@@ -5801,6 +5983,14 @@ class GatewayHandler(BaseHTTPRequestHandler):
             pre_call_code = str(form.get("pre_call_code", "")).rstrip()
             pre_call_cache_ttl = int(str(form.get("pre_call_cache_ttl_seconds", "0")).strip() or "0")
             pre_call_cache_key = str(form.get("pre_call_cache_key", "")).strip()
+            response_cache_ttl = int(str(form.get("response_cache_ttl_seconds", "0")).strip() or "0")
+            response_cache_vary_by_client = "response_cache_vary_by_client" in form
+            response_cache_vary_headers = self._parse_name_list(
+                str(form.get("response_cache_vary_headers", ""))
+            )
+            response_cache_methods = self._parse_methods(
+                str(form.get("response_cache_methods", "GET"))
+            ) if response_cache_ttl > 0 else []
             cors_allow_origins = self._parse_name_list(str(form.get("cors_allow_origins", "")))
             cors_allow_methods = [
                 item.upper() for item in self._parse_name_list(str(form.get("cors_allow_methods", "")))
@@ -5824,6 +6014,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 raise ValueError("Timeout seconds must be zero or positive.")
             if pre_call_cache_ttl < 0:
                 raise ValueError("Pre-call cache TTL must be zero or positive.")
+            if response_cache_ttl < 0:
+                raise ValueError("Response cache TTL must be zero or positive.")
             if cors_max_age_seconds < 0:
                 raise ValueError("CORS max age must be zero or positive.")
             if "rate_limit_enabled" in form:
@@ -5848,6 +6040,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 pre_call_code=pre_call_code,
                 pre_call_cache_ttl=pre_call_cache_ttl,
                 pre_call_cache_key=pre_call_cache_key,
+                response_cache_ttl=response_cache_ttl,
+                response_cache_vary_by_client=response_cache_vary_by_client,
+                response_cache_vary_headers=response_cache_vary_headers,
+                response_cache_methods=response_cache_methods,
                 auth_required="auth_required" in form,
                 cors_enabled="cors_enabled" in form,
                 cors_allow_origins=cors_allow_origins,
@@ -5940,6 +6136,14 @@ class GatewayHandler(BaseHTTPRequestHandler):
             pre_call_cache_ttl = int(str(form.get("pre_call_cache_ttl_seconds", "0")).strip() or "0")
             pre_call_cache_key = str(form.get("pre_call_cache_key", "")).strip()
             output_profile = str(form.get("output_profile", "")).strip().lower()
+            response_cache_ttl = int(str(form.get("response_cache_ttl_seconds", "0")).strip() or "0")
+            response_cache_vary_by_client = "response_cache_vary_by_client" in form
+            response_cache_vary_headers = self._parse_name_list(
+                str(form.get("response_cache_vary_headers", ""))
+            )
+            response_cache_methods = self._parse_methods(
+                str(form.get("response_cache_methods", "GET"))
+            ) if response_cache_ttl > 0 else []
 
             if not service_name:
                 raise ValueError("Service name is required.")
@@ -5949,6 +6153,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 raise ValueError("Endpoint slug is required.")
             if pre_call_cache_ttl < 0:
                 raise ValueError("Pre-call cache TTL must be zero or positive.")
+            if response_cache_ttl < 0:
+                raise ValueError("Response cache TTL must be zero or positive.")
 
             message = save_endpoint(
                 runtime.config_path,
@@ -5964,6 +6170,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 pre_call_cache_ttl=pre_call_cache_ttl,
                 pre_call_cache_key=pre_call_cache_key,
                 output_profile=output_profile,
+                response_cache_ttl=response_cache_ttl,
+                response_cache_vary_by_client=response_cache_vary_by_client,
+                response_cache_vary_headers=response_cache_vary_headers,
+                response_cache_methods=response_cache_methods,
             )
             runtime.load()
             self._send_admin_mutation_success(message)
@@ -6117,6 +6327,19 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 "Empty value",
                 default="",
             )
+            custom_validation_mode = (
+                str(form.get("custom_validation_mode", "status_code")).strip().lower()
+                or "status_code"
+            )
+            custom_validation_source_key = str(form.get("custom_validation_source_key", "")).strip()
+            custom_validation_expected_value = self._parse_yaml_value(
+                str(form.get("custom_validation_expected_value_yaml", "")),
+                "Custom validation expected value",
+                default=True,
+            )
+            custom_validation_error_source_keys = self._parse_name_list(
+                str(form.get("custom_validation_error_source_keys", ""))
+            )
             transform_code = str(form.get("transform_code", "")).rstrip()
             jsonp_callback_param = self._validate_jsonp_callback_param(
                 str(form.get("jsonp_callback_param", "callback"))
@@ -6132,7 +6355,11 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 raise ValueError("Output profile title is required.")
             if profile_type not in {"passthrough", "json_envelope", "jsonp", "custom"}:
                 raise ValueError("Output profile type must be passthrough, json_envelope, jsonp, or custom.")
+            if custom_validation_mode not in {"status_code", "payload_key"}:
+                raise ValueError("Custom success detection must be status_code or payload_key.")
             if profile_type == "custom":
+                if custom_validation_mode == "payload_key" and not custom_validation_source_key:
+                    raise ValueError("Validation source path is required when custom success detection uses payload_key.")
                 validate_custom_output_code(transform_code)
 
             message = save_output_profile(
@@ -6155,6 +6382,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 jsonp_callback_param=jsonp_callback_param,
                 jsonp_default_callback=jsonp_default_callback,
                 transform_code=transform_code,
+                custom_validation_mode=custom_validation_mode,
+                custom_validation_source_key=custom_validation_source_key,
+                custom_validation_expected_value=custom_validation_expected_value,
+                custom_validation_error_source_keys=custom_validation_error_source_keys,
                 headers=headers,
             )
             runtime.load()
@@ -6362,6 +6593,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             error_source_keys = payload.get("error_source_keys") or []
             data_fields = payload.get("data_fields") or {}
             empty_value = payload.get("empty_value", "")
+            custom_validation = payload.get("custom_validation") or {}
             transform_code = str(payload.get("transform_code", "") or "").rstrip()
 
             if not isinstance(headers, dict):
@@ -6374,9 +6606,23 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 raise ValueError("Output profile error_source_keys must be a list.")
             if not isinstance(data_fields, dict):
                 raise ValueError("Output profile data_fields must be a mapping.")
+            if custom_validation and not isinstance(custom_validation, dict):
+                raise ValueError("Output profile custom_validation must be a mapping.")
             if profile_type not in {"passthrough", "json_envelope", "jsonp", "custom"}:
                 raise ValueError("Output profile type must be passthrough, json_envelope, jsonp, or custom.")
+            custom_validation_mode = (
+                str(custom_validation.get("mode", "status_code")).strip().lower()
+                or "status_code"
+            )
+            custom_validation_source_key = str(custom_validation.get("source_key", "")).strip()
+            custom_validation_error_source_keys = custom_validation.get("error_source_keys") or []
+            if not isinstance(custom_validation_error_source_keys, list):
+                raise ValueError("Output profile custom_validation.error_source_keys must be a list.")
             if profile_type == "custom":
+                if custom_validation_mode not in {"status_code", "payload_key"}:
+                    raise ValueError("Output profile custom_validation.mode must be status_code or payload_key.")
+                if custom_validation_mode == "payload_key" and not custom_validation_source_key:
+                    raise ValueError("Output profile custom_validation.source_key is required when mode is payload_key.")
                 validate_custom_output_code(transform_code)
 
             message = save_output_profile(
@@ -6411,6 +6657,14 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     str(payload.get("jsonp_default_callback", "callback"))
                 ),
                 transform_code=transform_code,
+                custom_validation_mode=custom_validation_mode,
+                custom_validation_source_key=custom_validation_source_key,
+                custom_validation_expected_value=custom_validation.get("expected_value", True),
+                custom_validation_error_source_keys=[
+                    str(item).strip()
+                    for item in custom_validation_error_source_keys
+                    if str(item).strip()
+                ],
                 headers=headers,
             )
             runtime.load()

@@ -59,6 +59,14 @@ class ResponseCacheConfig:
 
 
 @dataclass(slots=True)
+class CustomValidationConfig:
+    mode: str = "status_code"
+    source_key: str | None = None
+    expected_value: Any = True
+    error_source_keys: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class OutputProfileConfig:
     slug: str
     title: str
@@ -77,6 +85,7 @@ class OutputProfileConfig:
     jsonp_callback_param: str = "callback"
     jsonp_default_callback: str = "callback"
     transform_code: str | None = None
+    custom_validation: CustomValidationConfig = field(default_factory=CustomValidationConfig)
     headers: dict[str, Any] = field(default_factory=dict)
 
 
@@ -217,6 +226,7 @@ class ServiceConfig:
     variables: dict[str, Any] = field(default_factory=dict)
     headers: dict[str, Any] = field(default_factory=dict)
     pre_call: PreCallConfig | None = None
+    response_cache: ResponseCacheConfig = field(default_factory=ResponseCacheConfig)
     auth: RouteAuthConfig = field(default_factory=RouteAuthConfig)
     cors: CorsConfig = field(default_factory=CorsConfig)
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
@@ -470,6 +480,31 @@ def _load_output_profile(
         if str(field_name).strip() and str(source_path).strip()
     }
     transform_code = str(value.get("transform_code", "") or "").strip() or None
+    custom_validation_raw = value.get("custom_validation") or {}
+    if custom_validation_raw and not isinstance(custom_validation_raw, dict):
+        raise ValueError(f"{label}.custom_validation must be a mapping.")
+    custom_validation_mode = (
+        str(custom_validation_raw.get("mode", "status_code")).strip().lower() or "status_code"
+    )
+    if custom_validation_mode not in {"status_code", "payload_key"}:
+        raise ValueError(f"{label}.custom_validation.mode must be status_code or payload_key.")
+    custom_validation_source_key = (
+        str(custom_validation_raw.get("source_key", "")).strip() or None
+    )
+    if profile_type == "custom" and custom_validation_mode == "payload_key" and not custom_validation_source_key:
+        raise ValueError(
+            f"{label}.custom_validation.source_key is required when mode is payload_key."
+        )
+    custom_validation_error_source_keys = _normalize_string_list(
+        custom_validation_raw.get("error_source_keys", []),
+        label=f"{label}.custom_validation.error_source_keys",
+    )
+    custom_validation = CustomValidationConfig(
+        mode=custom_validation_mode,
+        source_key=custom_validation_source_key,
+        expected_value=custom_validation_raw.get("expected_value", True),
+        error_source_keys=custom_validation_error_source_keys,
+    )
     if profile_type == "custom":
         if not transform_code:
             raise ValueError(f"{label}.transform_code is required when type is custom.")
@@ -497,6 +532,7 @@ def _load_output_profile(
         jsonp_default_callback=str(value.get("jsonp_default_callback", "callback")).strip()
         or "callback",
         transform_code=transform_code,
+        custom_validation=custom_validation,
         headers=dict(headers),
     )
 
@@ -947,6 +983,10 @@ def _load_services_block(
             pre_call=_load_pre_call_config(
                 service_data.get("pre_call"),
                 label=f"pre_call for service '{service_name}'",
+            ),
+            response_cache=_load_response_cache_config(
+                service_data.get("response_cache"),
+                label=f"response_cache for service '{service_name}'",
             ),
             auth=_load_route_auth(
                 service_data.get("auth"),

@@ -39,7 +39,7 @@ This file stores the working knowledge for the `NapiGate` project so future sess
   - `routes[].strategy`
   - `routes[].targets[]`
 - Endpoints are target definitions only: upstream path, headers, query, `pre_call`, or local `response`.
-- Legacy endpoint-local `gateway_path`, `output_profile`, `response_cache`, and `success_hook` are still loaded as single-target routes for migration, but new config and admin saves should write these fields under `routes[]`.
+- Legacy endpoint-local `gateway_path` and `success_hook` are still loaded as single-target routes for migration, but new config should use `routes[]` for those public route fields.
 - Client auth is now top-level and cleanly separated:
   - `client`
   - `client.access`
@@ -227,6 +227,7 @@ Common:
 - `variables`
 - `headers`
 - `pre_call`
+- `response_cache`
 - `auth.required`
 - `cors`
 - `rate_limit`
@@ -242,8 +243,10 @@ Common:
 - `query`
 - `pre_call`
 - `output_profile`
+- `response_cache`
 
 - `output_profile` at endpoint level runs first; if the route also has an `output_profile`, the route profile runs on the endpoint-shaped result.
+- `response_cache` resolution order is endpoint first, then service, then route.
 - `headers` can also blank out inherited incoming headers for an upstream target by setting a header value to an empty string.
 
 ### Route Fields
@@ -302,6 +305,10 @@ Common:
 - `jsonp_callback_param`
 - `jsonp_default_callback`
 - `transform_code`
+- `custom_validation.mode`
+- `custom_validation.source_key`
+- `custom_validation.expected_value`
+- `custom_validation.error_source_keys[]`
 - `headers`
 
 ### Response Cache Fields
@@ -423,17 +430,20 @@ Common:
 - When `json_envelope` builds an envelope, it uses existing response values such as `success`, `data`, `message`, and `error` when present, and falls back to HTTP status, the raw body, inferred messages, or generated errors when they are missing.
 - `json_envelope` can also map upstream keys into the standard envelope through `source_success_key`, `message_source_keys`, `error_source_keys`, and `data_fields`; `data_fields` values can be plain source paths or `{{field}}` templates such as `{{Name}} {{family}}`, and missing or null mapped values become `empty_value`.
 - `custom` uses syntax-checked, sandboxed Python-like code that must assign the final shaped body to `result`.
-- `custom` code can read `payload`, `status_code`, `detail`, `headers`, and `query`, and can call only safe helpers such as `pick()`, `pick_first()`, `exists()`, `success()`, and `text()`.
+- `custom_validation` can check success by `status_code` or by a payload path such as `IsSuccessful`, compare it against an expected value such as `true`, and pre-extract a failure message from payload keys such as `ErrorDesc`.
+- `custom` code can read `payload`, `status_code`, `detail`, `validation`, `headers`, and `query`; `validation` contains `mode`, `key`, `expected`, `actual`, `ok`, `error`, and `status_code`.
+- `custom` code can call only safe helpers such as `pick()`, `pick_first()`, `exists()`, `success()`, and `text()`.
 - Image and opaque binary responses should usually stay on `passthrough`.
 - Deleting a referenced output profile clears dependent route or legacy endpoint `output_profile` values instead of blocking the delete.
 
 ## 6.9) Response Cache Behavior
 
-- `response_cache` is configured at the route level.
+- `response_cache` can be configured on endpoints, services, or routes.
+- Runtime checks endpoint cache first, then service cache, then route cache.
 - It uses a TTL cache — in-memory by default, Redis (`SETEX`/`GET` with pickle) when `NAPIGATE_REDIS_URL` is set.
 - Only successful responses are cached.
 - Cache keys include method, path, query, configured vary headers, and optionally the authenticated client slug.
-- When response caching is enabled for a route, streaming is disabled for that route and the full body is buffered.
+- When response caching is enabled for the matched scope, streaming is disabled for that request and the full body is buffered.
 
 ## 6.10) Success Hook Behavior
 
@@ -645,6 +655,7 @@ Common:
   - `data_fields`
   - `data_fields` accepts plain source paths or `{{field}}` templates
   - `transform_code` for safe custom response shaping
+  - `custom_validation` for pre-checking success by status code or payload key before custom transform code branches on `validation`
   - `empty_value`
   - live pseudo-code preview updates while editing
   - `passthrough` remains the raw unmodified-output mode

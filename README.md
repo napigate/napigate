@@ -363,6 +363,7 @@ Services remain fully config-driven:
 - `auth.required`
 - `cors`
 - `rate_limit`
+- `response_cache`
 - `endpoints[]`
 
 Endpoint fields:
@@ -375,6 +376,7 @@ Endpoint fields:
 - `query`
 - `pre_call`
 - `output_profile`
+- `response_cache`
 
 Route fields:
 
@@ -436,9 +438,9 @@ Important contract notes:
 - `auth.required` is service-level only.
 - If `response` is defined, NapiGate returns it before any upstream proxy call.
 - `output_profile` can be set at route level or endpoint level. Endpoint output is shaped first, then the route output profile runs on that result when a route profile is set.
-- `response_cache` is route-level and only stores successful responses for configured methods.
+- `response_cache` can be configured at endpoint, service, or route level. Runtime checks endpoint first, then service, then route, and only stores successful responses for configured methods.
 - `success_hook` is route-level, async, and fires only after successful responses.
-- Legacy endpoint-local `gateway_path`, `output_profile`, `response_cache`, and `success_hook` still load as single-target routes for migration, but new config should use `routes[]`.
+- Legacy endpoint-local `gateway_path` and `success_hook` still load as single-target routes for migration, but new config should use `routes[]`.
 - Old service-local clients are rejected during validation.
 - Old endpoint-level auth is rejected during validation.
 - Protected endpoints must be reachable by at least one enabled client scope.
@@ -472,6 +474,10 @@ Common output profile fields:
 - `jsonp_callback_param`
 - `jsonp_default_callback`
 - `transform_code`
+- `custom_validation.mode`
+- `custom_validation.source_key`
+- `custom_validation.expected_value`
+- `custom_validation.error_source_keys[]`
 - `headers`
 
 `json_envelope` behavior:
@@ -486,7 +492,9 @@ Common output profile fields:
 `custom` behavior:
 
 - `transform_code` is a safe Python-like snippet that must assign the final response body to `result`.
-- Available input names are `payload`, `status_code`, `detail`, `empty_value`, `content_type`, `headers`, and `query`.
+- `custom_validation` can declare whether success is detected from `status_code` or from a payload key such as `IsSuccessful`, what value should count as success, and which payload keys should be checked for an error message such as `ErrorDesc`.
+- Available input names are `payload`, `status_code`, `detail`, `validation`, `empty_value`, `content_type`, `headers`, and `query`.
+- `validation` is a mapping with `mode`, `key`, `expected`, `actual`, `ok`, `error`, and `status_code`, computed before your custom code runs.
 - Safe helpers include `pick()`, `pick_first()`, `exists()`, `success()`, `text()`, `len()`, `bool()`, `int()`, `float()`, and `str()`.
 - Allowed syntax is intentionally narrow: assignments, `if/else`, literals, indexing, boolean/comparison expressions, and safe helper calls.
 - Imports, arbitrary builtins, attribute access, and unsafe calls are rejected during validation.
@@ -499,17 +507,30 @@ output_profiles:
     title: Custom Safe Transform
     enabled: true
     type: custom
+    custom_validation:
+      mode: payload_key
+      source_key: IsSuccessful
+      expected_value: true
+      error_source_keys:
+        - ErrorDesc
+        - WarningDesc
     transform_code: |
-      full_name = text(pick("Name")) + " " + text(pick("family"))
-      result = {
-        "ok": success(pick("IsSuccessful", status_code < 400)),
-        "message": pick_first("SuccessfulDesc", "WarningDesc", "ErrorDesc", default=detail),
-        "error": pick("ErrorDesc", detail),
-        "data": {
-          "fullname": full_name,
-          "payload": payload,
-        },
-      }
+      if not validation["ok"]:
+          result = {
+              "success": False,
+              "message": "",
+              "data": empty_value,
+              "error": validation["error"],
+          }
+      else:
+          result = {
+              "success": True,
+              "message": "",
+              "data": {
+                  "name": text(pick("Name")) + " " + text(pick("LastName")),
+              },
+              "error": "",
+          }
 ```
 
 Admin workflow:
@@ -559,7 +580,7 @@ Recommended admin flow:
 
 ### Response Caching
 
-Route-level response caching uses a TTL store — in-memory by default, Redis when `NAPIGATE_REDIS_URL` is set. The Redis backend uses `SETEX` with pickle serialization and the key prefix `napigate:cache:`. Rate-limit state uses `napigate:rl:`. Both namespaces are isolated from any other keys in the same Redis instance.
+Response caching can be configured on an endpoint, a service, or a route. Runtime resolves it in that order: endpoint, then service, then route. The cache uses a TTL store — in-memory by default, Redis when `NAPIGATE_REDIS_URL` is set. The Redis backend uses `SETEX` with pickle serialization and the key prefix `napigate:cache:`. Rate-limit state uses `napigate:rl:`. Both namespaces are isolated from any other keys in the same Redis instance.
 
 ```yaml
 response_cache:

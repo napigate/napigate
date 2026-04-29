@@ -41,6 +41,27 @@ def _build_pre_call_payload(
     return payload
 
 
+def _build_response_cache_payload(
+    *,
+    ttl_seconds: int,
+    vary_by_client: bool,
+    vary_headers: list[str],
+    methods: list[str],
+) -> dict[str, Any] | None:
+    if ttl_seconds <= 0:
+        return None
+    payload: dict[str, Any] = {
+        "enabled": True,
+        "ttl_seconds": ttl_seconds,
+        "vary_by_client": vary_by_client,
+    }
+    if vary_headers:
+        payload["vary_headers"] = vary_headers
+    if methods:
+        payload["methods"] = methods
+    return payload
+
+
 def _existing_routes_block(document: dict[str, Any]) -> list[dict[str, Any]] | None:
     routes = document.get("routes")
     if routes is None:
@@ -241,6 +262,10 @@ def save_service(
     pre_call_code: str,
     pre_call_cache_ttl: int,
     pre_call_cache_key: str,
+    response_cache_ttl: int,
+    response_cache_vary_by_client: bool,
+    response_cache_vary_headers: list[str],
+    response_cache_methods: list[str],
     auth_required: bool,
     cors_enabled: bool,
     cors_allow_origins: list[str],
@@ -287,6 +312,14 @@ def save_service(
     )
     if pre_call_payload:
         payload["pre_call"] = pre_call_payload
+    response_cache_payload = _build_response_cache_payload(
+        ttl_seconds=response_cache_ttl,
+        vary_by_client=response_cache_vary_by_client,
+        vary_headers=response_cache_vary_headers,
+        methods=response_cache_methods,
+    )
+    if response_cache_payload:
+        payload["response_cache"] = response_cache_payload
     if cors_enabled:
         payload["cors"] = {
             "enabled": True,
@@ -444,7 +477,6 @@ def _strip_endpoint_route_fields(document: dict[str, Any]) -> None:
                 continue
             endpoint.pop("methods", None)
             endpoint.pop("gateway_path", None)
-            endpoint.pop("response_cache", None)
             endpoint.pop("success_hook", None)
 
 
@@ -463,6 +495,10 @@ def save_endpoint(
     pre_call_cache_ttl: int,
     pre_call_cache_key: str,
     output_profile: str,
+    response_cache_ttl: int,
+    response_cache_vary_by_client: bool,
+    response_cache_vary_headers: list[str],
+    response_cache_methods: list[str],
 ) -> str:
     document = load_config_document(config_path)
     services = document.setdefault("services", {})
@@ -531,7 +567,16 @@ def save_endpoint(
         payload["output_profile"] = output_profile
     else:
         payload.pop("output_profile", None)
-    payload.pop("response_cache", None)
+    response_cache_payload = _build_response_cache_payload(
+        ttl_seconds=response_cache_ttl,
+        vary_by_client=response_cache_vary_by_client,
+        vary_headers=response_cache_vary_headers,
+        methods=response_cache_methods,
+    )
+    if response_cache_payload:
+        payload["response_cache"] = response_cache_payload
+    else:
+        payload.pop("response_cache", None)
     payload.pop("success_hook", None)
 
     for index, item in enumerate(endpoints):
@@ -597,15 +642,12 @@ def save_route(
     if pre_call_payload:
         payload["pre_call"] = pre_call_payload
     if response_cache_ttl > 0:
-        payload["response_cache"] = {
-            "enabled": True,
-            "ttl_seconds": response_cache_ttl,
-            "vary_by_client": response_cache_vary_by_client,
-        }
-        if response_cache_vary_headers:
-            payload["response_cache"]["vary_headers"] = response_cache_vary_headers
-        if response_cache_methods:
-            payload["response_cache"]["methods"] = response_cache_methods
+        payload["response_cache"] = _build_response_cache_payload(
+            ttl_seconds=response_cache_ttl,
+            vary_by_client=response_cache_vary_by_client,
+            vary_headers=response_cache_vary_headers,
+            methods=response_cache_methods,
+        )
     if success_hook_url:
         payload["success_hook"] = {
             "enabled": True,
@@ -719,6 +761,10 @@ def save_output_profile(
     jsonp_callback_param: str,
     jsonp_default_callback: str,
     transform_code: str,
+    custom_validation_mode: str,
+    custom_validation_source_key: str,
+    custom_validation_expected_value: Any,
+    custom_validation_error_source_keys: list[str],
     headers: dict[str, Any],
 ) -> str:
     document = load_config_document(config_path)
@@ -756,6 +802,17 @@ def save_output_profile(
         payload["transform_code"] = transform_code
     else:
         payload.pop("transform_code", None)
+    if profile_type == "custom":
+        payload["custom_validation"] = {
+            "mode": custom_validation_mode,
+            "expected_value": custom_validation_expected_value,
+        }
+        if custom_validation_mode == "payload_key" and custom_validation_source_key:
+            payload["custom_validation"]["source_key"] = custom_validation_source_key
+        if custom_validation_error_source_keys:
+            payload["custom_validation"]["error_source_keys"] = custom_validation_error_source_keys
+    else:
+        payload.pop("custom_validation", None)
     if passthrough_keys:
         payload["passthrough_keys"] = passthrough_keys
     else:
