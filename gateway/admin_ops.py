@@ -444,7 +444,6 @@ def _strip_endpoint_route_fields(document: dict[str, Any]) -> None:
                 continue
             endpoint.pop("methods", None)
             endpoint.pop("gateway_path", None)
-            endpoint.pop("output_profile", None)
             endpoint.pop("response_cache", None)
             endpoint.pop("success_hook", None)
 
