@@ -10,7 +10,7 @@ This file stores the working knowledge for the `NapiGate` project so future sess
   - route incoming gateway paths to one or more configured endpoint targets
   - keep gateway routes separate from upstream endpoint definitions
   - support route strategies for `single`, `round_robin`, `failover`, and `parallel_race`
-  - authenticate incoming gateway clients against protected services
+  - authenticate incoming gateway clients against protected routes
   - support multiple auth methods per client
   - scope each client to all services, selected services, or selected endpoints
   - support service-level CORS for browser clients
@@ -234,7 +234,6 @@ Common:
 - `headers`
 - `pre_call`
 - `response_cache`
-- `auth.required`
 - `cors`
 - `rate_limit`
 - `endpoints[]`
@@ -263,6 +262,7 @@ Common:
 - `gateway_path`
 - `strategy`
 - `targets[]`
+- `auth.required`
 - `pre_call`
 - `output_profile`
 - `response_cache`
@@ -494,8 +494,8 @@ Common:
 
 ## 7) Incoming Client Auth Behavior
 
-- Service auth is now only `required: true|false`.
-- A protected service accepts any enabled client whose scope matches the current endpoint.
+- Route auth is now only `required: true|false`.
+- A protected route accepts any enabled client whose scope matches one of that route's targets.
 - A client can expose multiple enabled auth methods.
 - Supported auth types:
   - `api_key`

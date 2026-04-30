@@ -1565,7 +1565,7 @@ class GatewayRuntime:
                 ),
             },
             "auth": {
-                "required": matched.service.auth.required,
+                "required": matched.route.auth.required,
                 "client_slug": authenticated_client.client_slug if authenticated_client else None,
                 "client_code": authenticated_client.client_code if authenticated_client else None,
                 "client_title": authenticated_client.client_title if authenticated_client else None,
@@ -2257,14 +2257,11 @@ class GatewayRuntime:
         matched: MatchedEndpoint,
         request: IncomingRequest,
     ) -> AuthenticatedClient | None:
-        protected_matches = [
-            target for target in self._target_matches_for_route(matched) if target.service.auth.required
-        ]
-        if not protected_matches:
+        if not matched.route.auth.required:
             return None
 
         return self._match_scoped_client_credentials(
-            targets=protected_matches,
+            targets=self._target_matches_for_route(matched),
             request=request,
             require_success=True,
             enforce_ip_allowlist=True,

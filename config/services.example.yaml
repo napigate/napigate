@@ -245,6 +245,8 @@ routes:
       - GET
     gateway_path: /demo/headers
     strategy: single
+    auth:
+      required: true
     targets:
       - service: protected_httpbin
         endpoint: protected_headers
@@ -270,6 +272,8 @@ routes:
       - GET
     gateway_path: /demo/users/{id}
     strategy: single
+    auth:
+      required: true
     targets:
       - service: protected_httpbin
         endpoint: user_by_id
@@ -284,8 +288,6 @@ services:
     forward_napigate_headers: true
     headers:
       X-Gateway-Service: status
-    auth:
-      required: false
     endpoints:
       - name: status_ok
         slug: status-ok
@@ -314,8 +316,6 @@ services:
       expose_headers:
         - X-Request-ID
       max_age_seconds: 600
-    auth:
-      required: false
     endpoints:
       - name: public_ip
         slug: public-ip
@@ -340,8 +340,6 @@ services:
       requests: 120
       window_seconds: 60
       scope: client_or_ip
-    auth:
-      required: true
     endpoints:
       - name: protected_headers
         slug: protected-headers

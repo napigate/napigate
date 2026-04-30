@@ -268,7 +268,6 @@ def save_service(
     response_cache_vary_by_client: bool,
     response_cache_vary_headers: list[str],
     response_cache_methods: list[str],
-    auth_required: bool,
     cors_enabled: bool,
     cors_allow_origins: list[str],
     cors_allow_methods: list[str],
@@ -299,9 +298,6 @@ def save_service(
         "trust_env_proxy": trust_env_proxy,
         "forward_napigate_headers": forward_napigate_headers,
         "endpoints": list(existing.get("endpoints") or []),
-        "auth": {
-            "required": auth_required,
-        },
     }
     if variables:
         payload["variables"] = variables
@@ -608,6 +604,7 @@ def save_route(
     gateway_path: str,
     strategy: str,
     targets: list[dict[str, Any]],
+    auth_required: bool,
     pre_call_code: str,
     pre_call_cache_ttl: int,
     pre_call_cache_key: str,
@@ -633,6 +630,9 @@ def save_route(
         "gateway_path": gateway_path,
         "strategy": strategy,
         "targets": targets,
+        "auth": {
+            "required": auth_required,
+        },
     }
     if output_profile:
         payload["output_profile"] = output_profile

@@ -82,9 +82,6 @@ def serialize_services(document: dict[str, Any]) -> list[dict[str, Any]]:
                 "headers": service_data.get("headers") or {},
                 "pre_call": serialize_pre_call(service_data.get("pre_call")),
                 "response_cache": serialize_response_cache(service_data.get("response_cache")),
-                "auth": {
-                    "required": bool((service_data.get("auth") or {}).get("required", False))
-                },
                 "cors": {
                     "enabled": bool((service_data.get("cors") or {}).get("enabled", False)),
                     "allow_origins": list((service_data.get("cors") or {}).get("allow_origins") or []),
@@ -110,10 +107,30 @@ def serialize_services(document: dict[str, Any]) -> list[dict[str, Any]]:
 def serialize_routes(document: dict[str, Any]) -> list[dict[str, Any]]:
     routes_block = document.get("routes") or []
     routes_state: list[dict[str, Any]] = []
+    services_block = document.get("services") or {}
+
+    def route_auth_required(route_data: dict[str, Any], *, targets: list[dict[str, Any]]) -> bool:
+        auth_block = route_data.get("auth")
+        if isinstance(auth_block, dict):
+            return bool(auth_block.get("required", False))
+        return any(
+            bool(((services_block.get(target.get("service", "")) or {}).get("auth") or {}).get("required", False))
+            for target in targets
+            if isinstance(target, dict)
+        )
+
     if isinstance(routes_block, list) and routes_block:
         for route in routes_block:
             if not isinstance(route, dict):
                 continue
+            targets = [
+                {
+                    "service": str(target.get("service", "")),
+                    "endpoint": str(target.get("endpoint", "")),
+                }
+                for target in (route.get("targets") or [])
+                if isinstance(target, dict)
+            ]
             routes_state.append(
                 {
                     "name": str(route.get("name", "")),
@@ -121,14 +138,8 @@ def serialize_routes(document: dict[str, Any]) -> list[dict[str, Any]]:
                     "methods": list(route.get("methods") or ["GET"]),
                     "gateway_path": str(route.get("gateway_path", "")),
                     "strategy": str(route.get("strategy", "single") or "single"),
-                    "targets": [
-                        {
-                            "service": str(target.get("service", "")),
-                            "endpoint": str(target.get("endpoint", "")),
-                        }
-                        for target in (route.get("targets") or [])
-                        if isinstance(target, dict)
-                    ],
+                    "targets": targets,
+                    "auth": {"required": route_auth_required(route, targets=targets)},
                     "output_profile": str(route.get("output_profile", "") or ""),
                     "pre_call": serialize_pre_call(route.get("pre_call")),
                     "response_cache": serialize_response_cache(route.get("response_cache")),
@@ -150,6 +161,7 @@ def serialize_routes(document: dict[str, Any]) -> list[dict[str, Any]]:
                     "gateway_path": str(endpoint.get("gateway_path", "")),
                     "strategy": "single",
                     "targets": [{"service": str(service_name), "endpoint": name}],
+                    "auth": {"required": bool((service_data.get("auth") or {}).get("required", False))},
                     "output_profile": str(endpoint.get("output_profile", "") or ""),
                     "pre_call": serialize_pre_call(endpoint.get("pre_call")),
                     "response_cache": serialize_response_cache(endpoint.get("response_cache")),

@@ -1760,6 +1760,34 @@ def render_admin_page(
           width: auto;
           margin-top: 2px;
         }}
+        .route-target-grid {{
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+          gap: 6px;
+        }}
+        .mini-check.compact-target {{
+          align-items: center;
+          padding: 6px 8px;
+          border-radius: 10px;
+          line-height: 1.25;
+        }}
+        .mini-check.compact-target .target-line {{
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          min-width: 0;
+          font-size: 12px;
+        }}
+        .mini-check.compact-target .target-service {{
+          color: var(--muted);
+          white-space: nowrap;
+        }}
+        .mini-check.compact-target .target-endpoint {{
+          font-weight: 700;
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }}
         @media (max-width: 1100px) {{
           .hero {{
             flex-direction: column;
@@ -2074,7 +2102,7 @@ def render_admin_page(
           forward_napigate_headers: {{ title: "Forward NapiGate Headers", text: "Send internal X-NapiGate route and client metadata headers to the upstream service when enabled.", example: "Turn off when the upstream should only receive business headers like Token or Cookie" }},
           variables_yaml: {{ title: "Variables", text: "Reusable values injected into templates and pre_call code for this service.", example: '{{ "client_id": "demo-client" }}' }},
           headers_yaml: {{ title: "Headers", text: "Static or templated headers added to every upstream request in this service.", example: '{{ "X-Tenant": "{{ vars.tenant }}" }}' }},
-          auth_required: {{ title: "Protect This Service", text: "Require a matching enabled client auth method before this service can be called.", example: "Turn on for partner or internal APIs" }},
+          auth_required: {{ title: "Protect This Route", text: "Require a matching enabled client auth method before this public route can be called.", example: "Turn on for partner or internal APIs" }},
           cors_enabled: {{ title: "Enable CORS", text: "Serve browser-friendly cross-origin headers and automatic OPTIONS preflight responses.", example: "Enable for frontend apps calling the gateway from another domain" }},
           cors_allow_origins: {{ title: "Allowed Origins", text: "Origins allowed to call this service from browsers. Use * only for public, non-credentialed access.", example: "https://app.example.com" }},
           cors_allow_methods: {{ title: "Allowed Methods", text: "Methods exposed to browsers during preflight. Leave blank to use the endpoint methods automatically.", example: "GET, POST, PATCH" }},
@@ -3640,7 +3668,7 @@ def render_admin_page(
                   <th>Base URL</th>
                   <th>Timeout</th>
                   <th>Endpoints</th>
-                  <th>Access</th>
+                  <th>Features</th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -3653,7 +3681,6 @@ def render_admin_page(
                       <td>${{service.timeout_seconds}}</td>
                       <td>${{service.endpoints.length}}</td>
                       <td>
-                        <span class="tag ${{service.auth?.required ? 'warn' : 'ok'}}">${{service.auth?.required ? 'Protected' : 'Public'}}</span>
                         <span class="tag">${{scopedClientsCount(service.name)}} scoped client(s)</span>
                         <span class="tag ${{service.verify_ssl ? 'ok' : 'warn'}}">SSL ${{service.verify_ssl ? 'On' : 'Off'}}</span>
                         <span class="tag ${{service.trust_env_proxy ? 'warn' : 'ok'}}">Proxy ${{service.trust_env_proxy ? 'Env' : 'Direct'}}</span>
@@ -3712,7 +3739,7 @@ def render_admin_page(
         }}
 
         function routeProtectedTargets(route) {{
-          return routeTargetsForCurl(route).filter((target) => target.service.auth?.required);
+          return route?.auth?.required ? routeTargetsForCurl(route) : [];
         }}
 
         function routeEligibleClients(route) {{
@@ -3826,7 +3853,7 @@ def render_admin_page(
           if (!shouldShowAuth) {{
             note.textContent = authRequired
               ? "Command is generated without incoming client credentials."
-              : "Current route targets do not require incoming client authentication.";
+              : "This route does not require incoming client authentication.";
             output.textContent = buildRouteCurl(route.slug, methodName);
             return;
           }}
@@ -3854,7 +3881,7 @@ def render_admin_page(
 
           if (!eligibleClients.length) {{
             note.textContent = authRequired
-              ? "No enabled client matches the protected targets on this route."
+              ? "No enabled client matches the protected route targets."
               : "No enabled client is scoped to this route.";
             output.textContent = buildRouteCurl(route.slug, methodName);
             return;
@@ -3872,7 +3899,7 @@ def render_admin_page(
           const selectedMethod = methods.find((method) => method.code === methodSelect.value) || methods[0];
           note.textContent = authRequired
             ? `Using ${{selectedClient?.title || selectedClient?.code || "client"}} via ${{selectedMethod.title || selectedMethod.code}} (${{selectedMethod.type}}).`
-            : `Using ${{selectedClient?.title || selectedClient?.code || "client"}} via ${{selectedMethod.title || selectedMethod.code}} (${{selectedMethod.type}}), even though current route targets do not require incoming client authentication.`;
+            : `Using ${{selectedClient?.title || selectedClient?.code || "client"}} via ${{selectedMethod.title || selectedMethod.code}} (${{selectedMethod.type}}), even though this route does not require incoming client authentication.`;
           output.textContent = buildRouteCurl(route.slug, methodName, authSampleForMethod(selectedMethod));
         }}
 
@@ -3964,6 +3991,7 @@ def render_admin_page(
                       <td><span class="tag ${{route.strategy === 'failover' ? 'warn' : route.strategy === 'parallel_race' ? 'ok' : ''}}">${{esc(route.strategy)}}</span></td>
                       <td class="mono">${{esc(routeTargetsText(route))}}</td>
                       <td>
+                        <span class="tag ${{route.auth?.required ? 'warn' : 'ok'}}">${{route.auth?.required ? 'Protected' : 'Public'}}</span>
                         ${{
                           route.output_profile
                             ? `<span class="tag ok">${{esc(route.output_profile)}}</span>`
@@ -4327,13 +4355,6 @@ def render_admin_page(
                 <span>Cache Vary Headers (CSV)</span>
                 <input name="response_cache_vary_headers" value="${{esc((service?.response_cache?.vary_headers || []).join(', '))}}">
               </label>
-              <label class="check-item" data-help="auth_required">
-                <input type="checkbox" name="auth_required" ${{service?.auth?.required ? "checked" : ""}}>
-                <div>
-                  <strong>Protect This Service</strong>
-                  <div class="muted">When enabled, only clients whose access scope matches this service or one of its endpoints can call it.</div>
-                </div>
-              </label>
               <label class="check-item" data-help="cors_enabled">
                 <input type="checkbox" name="cors_enabled" ${{service?.cors?.enabled ? "checked" : ""}}>
                 <div>
@@ -4614,11 +4635,12 @@ def render_admin_page(
           const selectedTargets = new Set((route?.targets || []).map((target) => `${{target.service}}::${{target.endpoint}}`));
           const targetOptions = endpointOptions()
             .map((item) => `
-              <label class="mini-check">
+              <label class="mini-check compact-target">
                 <input type="checkbox" name="targets" data-route-target value="${{esc(item.ref)}}" ${{selectedTargets.has(item.ref) || selectedTargets.has(`${{item.service}}::${{item.slug}}`) ? "checked" : ""}}>
-                <div>
-                  <strong>${{esc(item.endpoint)}}</strong>
-                  <div class="muted mono">${{esc(item.service)}}</div>
+                <div class="target-line">
+                  <span class="target-service mono">${{esc(item.service)}}</span>
+                  <span class="muted">/</span>
+                  <span class="target-endpoint">${{esc(item.endpoint)}}</span>
                 </div>
               </label>
             `)
@@ -4652,6 +4674,13 @@ def render_admin_page(
                   <option value="parallel_race" ${{route?.strategy === "parallel_race" ? "selected" : ""}}>parallel_race</option>
                 </select>
               </label>
+              <label class="check-item" data-help="auth_required">
+                <input type="checkbox" name="auth_required" ${{route?.auth?.required ? "checked" : ""}}>
+                <div>
+                  <strong>Protect This Route</strong>
+                  <div class="muted">Require a scoped client auth method before this public route can be called.</div>
+                </div>
+              </label>
               <label data-help="output_profile">
                 <span>Output Profile</span>
                 <select name="output_profile">
@@ -4665,7 +4694,7 @@ def render_admin_page(
               </label>
               <div class="full" data-help="route_targets">
                 <span style="display:block; font-weight:700; margin-bottom:8px;">Targets</span>
-                ${{targetOptions ? `<div class="scope-grid">${{targetOptions}}</div>` : '<div class="empty">Create a service endpoint first.</div>'}}
+                ${{targetOptions ? `<div class="scope-grid route-target-grid">${{targetOptions}}</div>` : '<div class="empty">Create a service endpoint first.</div>'}}
               </div>
               <label data-help="pre_call_cache_ttl_seconds">
                 <span>Pre-call Cache TTL</span>
@@ -6472,7 +6501,6 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 response_cache_vary_by_client=response_cache_vary_by_client,
                 response_cache_vary_headers=response_cache_vary_headers,
                 response_cache_methods=response_cache_methods,
-                auth_required="auth_required" in form,
                 cors_enabled="cors_enabled" in form,
                 cors_allow_origins=cors_allow_origins,
                 cors_allow_methods=cors_allow_methods,
@@ -6682,6 +6710,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                         targets.append(target)
 
             output_profile = str(form.get("output_profile", "")).strip().lower()
+            auth_required = "auth_required" in form
             pre_call_code = str(form.get("pre_call_code", "")).rstrip()
             pre_call_cache_ttl = int(str(form.get("pre_call_cache_ttl_seconds", "0")).strip() or "0")
             pre_call_cache_key = str(form.get("pre_call_cache_key", "")).strip()
@@ -6731,6 +6760,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 gateway_path=gateway_path,
                 strategy=strategy,
                 targets=targets,
+                auth_required=auth_required,
                 pre_call_code=pre_call_code,
                 pre_call_cache_ttl=pre_call_cache_ttl,
                 pre_call_cache_key=pre_call_cache_key,

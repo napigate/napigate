@@ -425,7 +425,6 @@ Services remain fully config-driven:
 - `variables`
 - `headers`
 - `pre_call`
-- `auth.required`
 - `cors`
 - `rate_limit`
 - `response_cache`
@@ -451,6 +450,7 @@ Route fields:
 - `gateway_path`
 - `strategy`
 - `targets[]`
+- `auth.required`
 - `pre_call`
 - `output_profile`
 - `response_cache`
@@ -481,8 +481,6 @@ routes:
 services:
   status:
     base_url: https://example.invalid
-    auth:
-      required: false
     endpoints:
       - name: status_ok
         response:
@@ -500,7 +498,7 @@ services:
 
 Important contract notes:
 
-- `auth.required` is service-level only.
+- `auth.required` is route-level.
 - If `response` is defined, NapiGate returns it before any upstream proxy call.
 - `output_profile` can be set at route level or endpoint level. Endpoint output is shaped first, then the route output profile runs on that result when a route profile is set.
 - `response_cache` can be configured at endpoint, service, or route level. Runtime checks endpoint first, then service, then route, and only stores successful responses for configured methods.
@@ -508,7 +506,8 @@ Important contract notes:
 - Legacy endpoint-local `gateway_path` and `success_hook` still load as single-target routes for migration, but new config should use `routes[]`.
 - Old service-local clients are rejected during validation.
 - Old endpoint-level auth is rejected during validation.
-- Protected endpoints must be reachable by at least one enabled client scope.
+- Existing service-level auth flags still act as a fallback for older route definitions until those routes are resaved with explicit route auth.
+- Protected routes must be reachable by at least one enabled client scope.
 
 ### Output Profiles
 

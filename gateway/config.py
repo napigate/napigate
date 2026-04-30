@@ -220,6 +220,7 @@ class RouteConfig:
     gateway_path: str
     strategy: str = "single"
     targets: list[RouteTargetConfig] = field(default_factory=list)
+    auth: RouteAuthConfig = field(default_factory=RouteAuthConfig)
     pre_call: PreCallConfig | None = None
     output_profile: str | None = None
     response_cache: ResponseCacheConfig = field(default_factory=ResponseCacheConfig)
@@ -1217,6 +1218,7 @@ def _load_routes_block(
     output_profiles: dict[str, OutputProfileConfig],
 ) -> list[RouteConfig]:
     endpoint_lookup = _endpoint_lookup(services)
+    service_lookup = {service.name: service for service in services}
     routes: list[RouteConfig] = []
     route_slugs: set[str] = set()
     route_paths: set[tuple[str, str]] = set()
@@ -1233,6 +1235,7 @@ def _load_routes_block(
                     gateway_path=endpoint.gateway_path,
                     strategy="single",
                     targets=[RouteTargetConfig(service=service.name, endpoint=endpoint.name)],
+                    auth=RouteAuthConfig(required=bool(service.auth.required)),
                     pre_call=None,
                     output_profile=endpoint.output_profile,
                     response_cache=endpoint.response_cache,
@@ -1275,6 +1278,11 @@ def _load_routes_block(
             for target in targets
             if (target.service, target.endpoint) in endpoint_lookup
         ]
+        fallback_auth_required = any(
+            service_lookup.get(target.service) is not None
+            and bool(service_lookup[target.service].auth.required)
+            for target in targets
+        )
 
         for method in methods:
             path_key = (method, gateway_path)
@@ -1289,6 +1297,11 @@ def _load_routes_block(
         pre_call = _load_pre_call_config(
             route_data.get("pre_call"),
             label=f"pre_call for route '{name}'",
+        )
+        route_auth = (
+            _load_route_auth(route_data.get("auth"), label=f"Route '{name}' auth")
+            if "auth" in route_data
+            else RouteAuthConfig(required=fallback_auth_required)
         )
 
         response_cache = _load_response_cache_config(
@@ -1310,6 +1323,7 @@ def _load_routes_block(
                 gateway_path=gateway_path,
                 strategy=strategy,
                 targets=targets,
+                auth=route_auth,
                 pre_call=pre_call,
                 output_profile=output_profile,
                 response_cache=response_cache,
