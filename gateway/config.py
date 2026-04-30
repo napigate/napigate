@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 import ipaddress
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 from gateway.output_sandbox import validate_custom_output_code
@@ -13,6 +13,12 @@ from gateway.output_sandbox import validate_custom_output_code
 CONFIG_PATH = Path("config/services.yaml")
 PATH_TOKEN_PATTERN = re.compile(r"{([a-zA-Z_][a-zA-Z0-9_]*)(:path)?}")
 SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+ConfigDocumentLoader = Callable[[Path], dict[str, Any]]
+ConfigDocumentSaver = Callable[[Path, dict[str, Any]], None]
+ConfigRevisionProvider = Callable[[Path], Any]
+ConfigSourceLabelProvider = Callable[[Path], str]
 
 
 @dataclass(slots=True)
@@ -893,12 +899,12 @@ def _load_clients_block(clients_block: Any) -> dict[str, ClientConfig]:
     return clients
 
 
-def load_config_document(config_path: Path | str = CONFIG_PATH) -> dict[str, Any]:
-    config_path = Path(config_path)
-    if not config_path.exists():
-        return {"clients": [], "services": {}}
-
-    raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+def normalize_config_document(raw: Any) -> dict[str, Any]:
+    if raw in (None, ""):
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError("Config document must be a top-level mapping.")
+    raw = dict(raw)
 
     clients_block = raw.get("clients")
     if clients_block is None:
@@ -933,18 +939,77 @@ def load_config_document(config_path: Path | str = CONFIG_PATH) -> dict[str, Any
     return raw
 
 
-def save_config_document(config_path: Path | str, document: dict[str, Any]) -> None:
-    config_path = Path(config_path)
+def _load_config_document_from_file(config_path: Path) -> dict[str, Any]:
+    if not config_path.exists():
+        return normalize_config_document({"clients": [], "services": {}})
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    return normalize_config_document(raw)
+
+
+def _save_config_document_to_file(config_path: Path, document: dict[str, Any]) -> None:
+    normalized = normalize_config_document(document)
+    load_gateway_config_document(normalized)
     serialized = yaml.safe_dump(
-        document,
+        normalized,
         sort_keys=False,
         allow_unicode=False,
     )
     config_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = config_path.with_name(f"{config_path.name}.tmp")
     temp_path.write_text(serialized, encoding="utf-8")
-    load_gateway_config(temp_path)
     temp_path.replace(config_path)
+
+
+def _config_file_revision(config_path: Path) -> tuple[int, int] | None:
+    try:
+        stat = config_path.stat()
+    except FileNotFoundError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
+
+
+def _config_file_source_label(config_path: Path) -> str:
+    return str(config_path)
+
+
+_CONFIG_DOCUMENT_LOADER: ConfigDocumentLoader = _load_config_document_from_file
+_CONFIG_DOCUMENT_SAVER: ConfigDocumentSaver = _save_config_document_to_file
+_CONFIG_REVISION_PROVIDER: ConfigRevisionProvider = _config_file_revision
+_CONFIG_SOURCE_LABEL_PROVIDER: ConfigSourceLabelProvider = _config_file_source_label
+
+
+def configure_config_document_io(
+    *,
+    loader: ConfigDocumentLoader | None = None,
+    saver: ConfigDocumentSaver | None = None,
+    revision_provider: ConfigRevisionProvider | None = None,
+    source_label_provider: ConfigSourceLabelProvider | None = None,
+) -> None:
+    global _CONFIG_DOCUMENT_LOADER
+    global _CONFIG_DOCUMENT_SAVER
+    global _CONFIG_REVISION_PROVIDER
+    global _CONFIG_SOURCE_LABEL_PROVIDER
+
+    _CONFIG_DOCUMENT_LOADER = loader or _load_config_document_from_file
+    _CONFIG_DOCUMENT_SAVER = saver or _save_config_document_to_file
+    _CONFIG_REVISION_PROVIDER = revision_provider or _config_file_revision
+    _CONFIG_SOURCE_LABEL_PROVIDER = source_label_provider or _config_file_source_label
+
+
+def load_config_document(config_path: Path | str = CONFIG_PATH) -> dict[str, Any]:
+    return _CONFIG_DOCUMENT_LOADER(Path(config_path))
+
+
+def save_config_document(config_path: Path | str, document: dict[str, Any]) -> None:
+    _CONFIG_DOCUMENT_SAVER(Path(config_path), document)
+
+
+def get_config_revision(config_path: Path | str = CONFIG_PATH) -> Any:
+    return _CONFIG_REVISION_PROVIDER(Path(config_path))
+
+
+def get_config_source_label(config_path: Path | str = CONFIG_PATH) -> str:
+    return _CONFIG_SOURCE_LABEL_PROVIDER(Path(config_path))
 
 
 def _load_services_block(
@@ -1226,9 +1291,8 @@ def _load_routes_block(
     return routes
 
 
-def load_gateway_config(config_path: Path | str = CONFIG_PATH) -> GatewayConfig:
-    config_path = Path(config_path)
-    raw = load_config_document(config_path)
+def load_gateway_config_document(document: dict[str, Any]) -> GatewayConfig:
+    raw = normalize_config_document(document)
     clients = _load_clients_block(raw.get("clients"))
     output_profiles = _load_output_profiles_block(raw.get("output_profiles"))
     gateway_responses = _load_gateway_response_config(
@@ -1256,6 +1320,10 @@ def load_gateway_config(config_path: Path | str = CONFIG_PATH) -> GatewayConfig:
         log_aggregators=log_aggregators,
         log_retention_hours=log_retention_hours,
     )
+
+
+def load_gateway_config(config_path: Path | str = CONFIG_PATH) -> GatewayConfig:
+    return load_gateway_config_document(load_config_document(config_path))
 
 
 def load_clients(config_path: Path | str = CONFIG_PATH) -> dict[str, ClientConfig]:

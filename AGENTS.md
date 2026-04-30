@@ -27,9 +27,11 @@ This file stores the working knowledge for the `NapiGate` project so future sess
 
 ## 2) Architecture Decisions
 
-- This project intentionally stays on `stdlib + requests + PyYAML`; Redis support is an optional install extra.
+- This project intentionally stays on `stdlib + requests + PyYAML`; Redis and PostgreSQL support are optional install extras.
 - The HTTP server runs on `PooledHTTPServer`, a subclass of `ThreadingHTTPServer` that dispatches into a `ThreadPoolExecutor` bounded by `NAPIGATE_MAX_WORKERS` (default 256) instead of spawning unbounded threads.
 - Cache and rate-limit state lives in pluggable backends (`gateway/cache.py`): in-memory by default, Redis when `NAPIGATE_REDIS_URL` is set. If Redis is unreachable at startup, both backends fall back to in-memory automatically and log a warning.
+- Config and security state can stay file-backed or move to PostgreSQL through `gateway/state_store.py`; in PostgreSQL mode the source of truth is table-backed by entity (`services`, `service_endpoints`, `routes`, `clients`, `output_profiles`, `users`, `roles`) while runtime still serves a RAM snapshot and only refreshes when the underlying revision changes.
+- NapiGate now runs two listeners by default: a public listener for gateway traffic and OAuth token issuance, and a separate admin listener for `/__admin`, `/__monitor`, and `/__logout`.
 - Rate-limiter state is NOT cleared on config reload; only response/pre-call/auth caches are cleared.
 - Upstream responses stream through to the client without buffering when no transforming output profile is applied and response caching is off. Otherwise the body is buffered to allow envelope transforms or cache storage.
 - Services and endpoints remain config-driven.
@@ -94,7 +96,11 @@ This file stores the working knowledge for the `NapiGate` project so future sess
   - rejects deprecated config shapes
   - validates client scopes against real services/endpoints
 - `gateway/security.py`
-  - file-backed users and roles
+  - validated users and roles loaded through the configured state store
+- `gateway/state_store.py`
+  - file or PostgreSQL-backed config/security persistence
+  - revision tracking for RAM snapshot refresh
+  - admin audit log persistence
 - `gateway/settings.py`
   - `.env` loading
 - `gateway/monitoring.py`
@@ -571,6 +577,7 @@ Common:
   - `GET /__monitor/logs`
 - Live stream:
   - `GET /__monitor/stream`
+  - these monitor endpoints are served only from the admin listener, not the public listener
   - when proxied through Nginx or similar reverse proxies, SSE buffering must stay disabled so the live monitor does not remain stuck in a connecting state
 - OAuth token endpoint:
   - `POST /__oauth/token`
@@ -623,10 +630,12 @@ Common:
 - Live is the first tab.
 - Desktop admin navigation stays in a top tab row; on mobile it becomes a slide-out drawer from the left with a backdrop toggle.
 - Admin tabs update the URL hash, for example `/__admin#output`, without reloading the page.
+- Admin tabs now also include `Audit` for recent admin-side mutations.
 - Admin modal save/delete actions use AJAX when JavaScript is available, refresh the in-page admin state, and preserve the active tab instead of returning to Live.
 - Active tabs are dark with white text by design.
 - Monitor and admin Live tables now show `Status` plus a `Response` column for each request row.
 - Monitor and admin Live views now expose the final upstream URL plus a copyable rendered `cURL` for proxied requests.
+- The Config tab now shows the current public/admin listener URLs plus the active state-store mode.
 - Client forms support:
   - slug, title, and code
   - title and code
@@ -677,7 +686,7 @@ Main command:
 ```bash
 cp config/services.example.yaml config/services.yaml
 cp config/security.example.yaml config/security.yaml
-python3 -m gateway.main --host 0.0.0.0 --port 8000 --config config/services.yaml
+python3 -m gateway.main --host 0.0.0.0 --port 8000 --admin-port 8001 --config config/services.yaml --security-config config/security.yaml
 ```
 
 Docker:
@@ -690,7 +699,14 @@ docker compose pull
 docker compose up -d
 ```
 
+- Optional PostgreSQL profile:
+
+```bash
+docker compose --profile postgres up -d
+```
+
 - `docker-compose.yml` runs `NAPIGATE_IMAGE` and does not build during normal startup.
+- `docker-compose.yml` publishes both the public listener (`APP_PORT`) and the admin listener (`ADMIN_PORT`).
 - `docker-compose.build.yml` is the explicit local build/publish override.
 - Manual Docker Hub publish:
   - `docker login`
@@ -720,6 +736,10 @@ pip install requests pyyaml
 - `forward_napigate_headers` defaults to `true`.
 - `gateway_responses.mode` defaults to `default`, which keeps the `{"detail": ...}` runtime error shape until a profile or inline envelope is selected.
 - `NAPIGATE_REDIS_URL` enables Redis-backed rate limiting and response caching when set (e.g. `redis://localhost:6379/0`). Falls back to in-memory on connection failure. Requires the `redis` optional dependency (`pip install ".[redis]"`).
+- `NAPIGATE_STATE_STORE=file|postgres` selects whether config/security persist locally or in PostgreSQL.
+- `NAPIGATE_POSTGRES_DSN` is required when `NAPIGATE_STATE_STORE=postgres`. PostgreSQL support requires `pip install ".[postgres]"`.
+- `NAPIGATE_STATE_SYNC_INTERVAL_SECONDS` controls how often each instance polls PostgreSQL for updated config/security revisions.
+- `APP_PORT` is the public listener port; `ADMIN_PORT` is the separate admin/monitor listener port.
 - `NAPIGATE_MAX_WORKERS` caps the request handler thread pool (default `256`). Long-lived SSE connections at `/__monitor/stream` each occupy one worker for their duration.
 - Response bodies stream through to the client (chunked transfer encoding) when no transforming output profile is active and response caching is off. To pass streaming responses through a reverse proxy without re-buffering, set `proxy_buffering off` on the upstream location.
 - Rate-limiter sliding-window state is NOT cleared on config hot-reload.
@@ -737,6 +757,7 @@ pip install requests pyyaml
   - `NAPIGATE_IMAGE_GROUP`
 - `NAPIGATE_ADMIN_USERNAME` and `NAPIGATE_ADMIN_PASSWORD` protect both monitor and admin pages.
 - `NAPIGATE_ADMIN_ACCESS_WHITELIST_IPS` restricts `/__admin` UI and admin API requests to comma-separated IP/CIDR ranges when set.
+- `/__admin`, `/__monitor`, and `/__logout` do not exist on the public listener by design.
 - `NAPIGATE_SECURITY_CONFIG` can override the default security file path.
 - Default mirrors:
   - `DEBIAN_MIRROR_URL=https://deb.debian.org/debian`
@@ -822,6 +843,10 @@ pip install requests pyyaml
 - 2026-04-29: server concurrency model changed from unbounded per-connection threads to a bounded `ThreadPoolExecutor`:
   - `PooledHTTPServer` replaces `ThreadingHTTPServer` in `main.py`
   - pool size controlled by `NAPIGATE_MAX_WORKERS` (default 256)
+- 2026-04-30: state persistence and control-plane split were extended:
+  - optional PostgreSQL-backed config/security state with in-memory runtime snapshots and revision polling via `gateway/state_store.py`
+  - admin mutations now write an audit log visible from the new `Audit` tab
+  - admin and monitor endpoints moved onto a separate listener/port; the public listener no longer serves `/__admin` or `/__monitor`
 - 2026-04-29: streaming proxy support added:
   - upstream responses stream through via chunked transfer encoding when no transforming output profile is active and response caching is off
   - passthrough profiles are compatible with streaming (they only add headers)

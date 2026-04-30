@@ -42,11 +42,27 @@ WORKDIR /code
 COPY pyproject.toml README.md ./
 COPY gateway ./gateway
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir ".[redis,postgres]"
 
 RUN mkdir -p /code/config /code/data /code/logs && \
     chown -R "${CURRENT_USER}:${CURRENT_GROUP}" /code
 
 USER ${CURRENT_USER}
 
-CMD ["python3", "-m", "gateway.main", "--host", "0.0.0.0", "--port", "8000", "--config", "config/services.yaml"]
+CMD [
+    "python3",
+    "-m",
+    "gateway.main",
+    "--host",
+    "0.0.0.0",
+    "--port",
+    "8000",
+    "--admin-host",
+    "0.0.0.0",
+    "--admin-port",
+    "8001",
+    "--config",
+    "config/services.yaml",
+    "--security-config",
+    "config/security.yaml"
+]

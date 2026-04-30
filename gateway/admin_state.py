@@ -300,6 +300,9 @@ def build_admin_page_state(
     services_config_path: str,
     security_config_path: str,
     live_state: dict[str, Any] | None = None,
+    audit_logs: list[dict[str, Any]] | None = None,
+    network_state: dict[str, Any] | None = None,
+    store_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "services": serialize_services(document),
@@ -307,6 +310,7 @@ def build_admin_page_state(
         "clients": serialize_clients(document),
         "output_profiles": serialize_output_profiles(document),
         "settings": serialize_gateway_settings(document),
+        "audit_logs": audit_logs or [],
         "security": security_state,
         "principal": {
             "username": principal.username,
@@ -321,5 +325,7 @@ def build_admin_page_state(
         "oauth": {
             "token_url": "/__oauth/token",
         },
+        "network": network_state or {},
+        "store": store_state or {},
         "live": live_state or {},
     }

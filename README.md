@@ -15,12 +15,12 @@ NapiGate is a lightweight, config-driven Python API gateway built for small and 
 - route response caching and async success hooks
 - optional structured request-log forwarding to HTTP JSON sinks or Loki
 - Built-in monitor UI, JSON logs endpoint, and live stream
-- File-backed users and roles for admin access
+- file-backed or Postgres-backed config and security state with in-memory runtime snapshots
 - Daily rotating file logs with optional hourly retention cleanup
 - Bounded thread pool (`NAPIGATE_MAX_WORKERS`) instead of unbounded per-connection threads
 - Streaming proxy for responses that need no body transformation — memory footprint stays flat for large payloads
 - Optional Redis backend for distributed rate limiting and response caching; falls back to in-memory automatically
-- Minimal dependency footprint: `stdlib + requests + PyYAML` (Redis support is an optional extra)
+- Minimal dependency footprint: `stdlib + requests + PyYAML` with optional extras for Redis and PostgreSQL
 
 ## Why This Project
 
@@ -39,11 +39,14 @@ The codebase is split into a few focused modules:
 - [`gateway/runtime.py`](gateway/runtime.py): request matching, client auth, rate limiting, CORS handling, token issuance, output transforms, response caching, async success hooks, config hot-reload, and upstream proxying
 - [`gateway/cache.py`](gateway/cache.py): pluggable cache and rate-limit backends — in-memory (default) or Redis
 - [`gateway/admin_ops.py`](gateway/admin_ops.py): config and security mutations used by the admin UI
+- [`gateway/state_store.py`](gateway/state_store.py): file or Postgres-backed config/security persistence plus admin audit logs
 - [`gateway/security.py`](gateway/security.py): users, roles, password hashing, and authorization checks
 - [`gateway/monitoring.py`](gateway/monitoring.py): SQLite-backed request log storage and retention cleanup
 - [`gateway/logging_utils.py`](gateway/logging_utils.py): daily rotating file logging and retention cleanup
 - [`gateway/settings.py`](gateway/settings.py): `.env` loading and runtime settings
 - [`gateway/main.py`](gateway/main.py): HTTP server, admin/monitor endpoints, and CLI entrypoint
+
+Runtime and security state are always served from memory. In file mode the process watches local YAML revisions. In Postgres mode the process loads config and security documents into RAM, persists admin mutations transactionally into dedicated tables for services, endpoints, routes, clients, output profiles, users, and roles, and refreshes only when the stored revision changes. Request handling never reads config from the database on the hot path.
 
 The runtime uses a bounded thread pool (`PooledHTTPServer`) and keeps the gateway model intentionally simple:
 
@@ -72,6 +75,7 @@ The runtime uses a bounded thread pool (`PooledHTTPServer`) and keeps the gatewa
 │   ├── monitoring.py
 │   ├── runtime.py
 │   ├── security.py
+│   ├── state_store.py
 │   └── settings.py
 ├── Dockerfile
 ├── docker-compose.build.yml
@@ -98,18 +102,26 @@ To enable Redis-backed rate limiting and caching, install the optional extra:
 pip install ".[redis]"
 ```
 
+To enable the optional Postgres-backed state store:
+
+```bash
+pip install ".[postgres]"
+```
+
 Or install dependencies without packaging:
 
 ```bash
 pip install requests pyyaml
 # optional Redis support:
 pip install "redis[hiredis]"
+# optional Postgres state store:
+pip install "psycopg[binary]"
 ```
 
 The package also exposes a console entrypoint after installation:
 
 ```bash
-napigate --host 0.0.0.0 --port 8000 --config config/services.yaml
+napigate --host 0.0.0.0 --port 8000 --admin-port 8001 --config config/services.yaml --security-config config/security.yaml
 ```
 
 ## Quick Start
@@ -124,21 +136,29 @@ cp config/security.example.yaml config/security.yaml
 2. Run the gateway:
 
 ```bash
-python3 -m gateway.main --host 0.0.0.0 --port 8000 --config config/services.yaml
+python3 -m gateway.main \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --admin-host 0.0.0.0 \
+  --admin-port 8001 \
+  --config config/services.yaml \
+  --security-config config/security.yaml
 ```
 
 3. Open the built-in surfaces:
 
-- Monitor HTML: `http://127.0.0.1:8000/__monitor`
-- Monitor JSON: `http://127.0.0.1:8000/__monitor/logs`
-- Live stream: `http://127.0.0.1:8000/__monitor/stream`
-- Admin UI: `http://127.0.0.1:8000/__admin`
-- Health: `http://127.0.0.1:8000/__health`
-- OAuth token endpoint: `POST /__oauth/token`
+- Public health: `http://127.0.0.1:8000/__health`
+- Public OAuth token endpoint: `http://127.0.0.1:8000/__oauth/token`
+- Admin UI: `http://127.0.0.1:8001/__admin`
+- Monitor HTML: `http://127.0.0.1:8001/__monitor`
+- Monitor JSON: `http://127.0.0.1:8001/__monitor/logs`
+- Live stream: `http://127.0.0.1:8001/__monitor/stream`
+
+`/__admin`, `__monitor`, and `__logout` are intentionally unavailable on the public listener so they can be isolated with firewall rules or a separate reverse-proxy policy.
 
 ### Nginx Reverse Proxy
 
-If you proxy NapiGate through Nginx, keep SSE buffering disabled for `__monitor/stream`, otherwise the live monitor can appear stuck in a connecting state even though direct access works.
+If you proxy NapiGate through Nginx, keep SSE buffering disabled for `__monitor/stream`, otherwise the live monitor can appear stuck in a connecting state even though direct access works. With the default listener split, public traffic points at port `8000` and admin/monitor traffic points at port `8001`.
 
 Example:
 
@@ -148,7 +168,7 @@ server {
     server_name gateway.example.com;
 
     location /__monitor/stream {
-        proxy_pass http://127.0.0.1:8000/__monitor/stream;
+        proxy_pass http://127.0.0.1:8001/__monitor/stream;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -159,6 +179,28 @@ server {
         proxy_cache off;
         proxy_read_timeout 1h;
         chunked_transfer_encoding off;
+    }
+
+    location /__monitor/ {
+        proxy_pass http://127.0.0.1:8001;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_read_timeout 300s;
+    }
+
+    location /__admin {
+        proxy_pass http://127.0.0.1:8001;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_read_timeout 300s;
     }
 
     location / {
@@ -191,10 +233,24 @@ docker compose pull
 docker compose up -d
 ```
 
-The default container port is controlled by `APP_PORT` in `.env`.
+The default listener ports are controlled by `APP_PORT` and `ADMIN_PORT` in `.env`.
 `docker-compose.yml` runs the published image from `NAPIGATE_IMAGE` and does not build from the local Dockerfile during normal startup.
+The public listener uses `APP_PORT` and the separate admin/monitor listener uses `ADMIN_PORT`.
 
 Compose mounts `config/`, `data/`, and `logs/` into the container. Changes to `config/services.yaml` and `config/security.yaml` are detected automatically by the running process, so Docker restart cycles are not required for routine config edits.
+
+To bring up the optional Postgres sidecar as well:
+
+```bash
+docker compose --profile postgres up -d
+```
+
+Then switch the app to the Postgres state store in `.env`:
+
+```dotenv
+NAPIGATE_STATE_STORE=postgres
+NAPIGATE_POSTGRES_DSN=postgresql://napigate:napigate@postgres:5432/napigate
+```
 
 ### Docker Hub Image
 
@@ -226,14 +282,21 @@ See [`.env.example`](.env.example) for the full template.
 - `NAPIGATE_IMAGE_UID`
 - `NAPIGATE_IMAGE_GID`
 - `APP_PORT`
+- `ADMIN_PORT`
 - `APP_TIMEZONE`
 - `NAPIGATE_CONFIG`
 - `NAPIGATE_SECURITY_CONFIG`
+- `NAPIGATE_STATE_STORE`
+- `NAPIGATE_POSTGRES_DSN`
+- `NAPIGATE_STATE_SYNC_INTERVAL_SECONDS`
 - `NAPIGATE_ADMIN_USERNAME`
 - `NAPIGATE_ADMIN_PASSWORD`
 - `NAPIGATE_ADMIN_ACCESS_WHITELIST_IPS`
 - `NAPIGATE_REDIS_URL`
 - `NAPIGATE_MAX_WORKERS`
+- `POSTGRES_DB`
+- `POSTGRES_USER`
+- `POSTGRES_PASSWORD`
 - `UID`
 - `GID`
 - `CURRENT_USER`

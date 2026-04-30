@@ -10,6 +10,7 @@ import ipaddress
 import json
 import logging
 from pathlib import Path
+import threading
 import time
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -35,7 +36,12 @@ from gateway.admin_ops import (
     save_user,
 )
 from gateway.admin_state import build_admin_page_state
-from gateway.config import load_config_document, save_config_document
+from gateway.config import (
+    configure_config_document_io,
+    get_config_source_label,
+    load_config_document,
+    save_config_document,
+)
 from gateway.logging_utils import setup_logging, shutdown_logging
 from gateway.output_sandbox import validate_custom_output_code
 from gateway.runtime import GatewayError, GatewayRuntime, IncomingRequest, OutgoingResponse
@@ -43,27 +49,60 @@ from gateway.security import (
     AuthenticatedPrincipal,
     SECURITY_CONFIG_PATH,
     SecurityManager,
+    configure_security_document_io,
+    get_security_source_label,
 )
 from gateway.settings import get_env, load_env_file, load_settings
+from gateway.state_store import build_state_store
 
 
 load_env_file()
 setup_logging()
 LOGGER = logging.getLogger("gateway.main")
 SETTINGS = load_settings()
-runtime = GatewayRuntime(
-    config_path=Path(get_env("NAPIGATE_CONFIG", "APIGATE_CONFIG", default="config/services.yaml")),
-    redis_url=SETTINGS.redis_url,
-)
-security = SecurityManager(
-    config_path=Path(
-        get_env(
-            "NAPIGATE_SECURITY_CONFIG",
-            "APIGATE_SECURITY_CONFIG",
-            default=str(SECURITY_CONFIG_PATH),
-        )
+runtime: GatewayRuntime
+security: SecurityManager
+state_store: Any
+
+
+def _config_path_arg_default() -> str:
+    return get_env("NAPIGATE_CONFIG", "APIGATE_CONFIG", default="config/services.yaml")
+
+
+def _security_path_default() -> str:
+    return get_env(
+        "NAPIGATE_SECURITY_CONFIG",
+        "APIGATE_SECURITY_CONFIG",
+        default=str(SECURITY_CONFIG_PATH),
     )
-)
+
+
+def configure_application(*, config_path: Path | str, security_path: Path | str) -> None:
+    global runtime
+    global security
+    global state_store
+
+    state_store = build_state_store(
+        mode=SETTINGS.state_store_mode,
+        config_path=config_path,
+        security_path=security_path,
+        postgres_dsn=SETTINGS.postgres_dsn,
+        sync_interval_seconds=SETTINGS.state_sync_interval_seconds,
+    )
+    configure_config_document_io(
+        loader=lambda _path: state_store.load_config_document(),
+        saver=lambda _path, document: state_store.save_config_document(document),
+        revision_provider=lambda _path: state_store.config_revision(),
+        source_label_provider=lambda _path: state_store.config_source_label,
+    )
+    configure_security_document_io(
+        loader=lambda _path: state_store.load_security_document(),
+        saver=lambda _path, document: state_store.save_security_document(document),
+        revision_provider=lambda _path: state_store.security_revision(),
+        source_label_provider=lambda _path: state_store.security_source_label,
+    )
+    runtime = GatewayRuntime(config_path=Path(config_path), redis_url=SETTINGS.redis_url)
+    security = SecurityManager(config_path=Path(security_path))
 
 
 def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
@@ -404,7 +443,7 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
               <button id="pause-button" class="toolbar-btn" type="button">Pause</button>
               <button id="clear-filters-button" class="toolbar-btn" type="button" disabled>Clear Filters</button>
               <div id="filter-summary" class="chip">Filters: none</div>
-              <div class="chip">Config: <span class="mono">{escape(str(runtime.config_path))}</span></div>
+              <div class="chip">Config: <span class="mono">{escape(get_config_source_label(runtime.config_path))}</span></div>
               <div class="links">
                 <a href="/__monitor/logs">JSON</a>
                 <a href="/__admin">Admin</a>
@@ -882,31 +921,51 @@ def build_admin_state(
     *,
     principal: AuthenticatedPrincipal,
     document: dict[str, Any],
+    public_base_url: str,
+    admin_base_url: str,
 ) -> dict[str, Any]:
     can_view_live = principal.can("monitor_access")
-    return build_admin_page_state(
+    state = build_admin_page_state(
         principal=principal,
         document=document,
         security_state=security.public_state(),
-        services_config_path=str(runtime.config_path),
-        security_config_path=str(security.config_path),
+        services_config_path=get_config_source_label(runtime.config_path),
+        security_config_path=get_security_source_label(security.config_path),
+        audit_logs=state_store.list_admin_change_logs(limit=200),
+        network_state={
+            "public_base_url": public_base_url,
+            "admin_base_url": admin_base_url,
+        },
+        store_state={
+            "mode": getattr(state_store, "mode", "file"),
+            "audit_enabled": bool(getattr(state_store, "audit_enabled", False)),
+        },
         live_state={
             "can_view": can_view_live,
             "logs": runtime.list_logs(limit=40) if can_view_live else [],
-            "logs_url": "/__monitor/logs",
-            "monitor_url": "/__monitor",
+            "logs_url": f"{admin_base_url}/__monitor/logs",
+            "monitor_url": f"{admin_base_url}/__monitor",
         },
     )
+    state["oauth"]["token_url"] = f"{public_base_url}/__oauth/token"
+    return state
 
 
 def render_admin_page(
     *,
     principal: AuthenticatedPrincipal,
     document: dict[str, Any],
+    public_base_url: str,
+    admin_base_url: str,
     message: str = "",
     error: str = "",
 ) -> str:
-    state = build_admin_state(principal=principal, document=document)
+    state = build_admin_state(
+        principal=principal,
+        document=document,
+        public_base_url=public_base_url,
+        admin_base_url=admin_base_url,
+    )
     state_json = json.dumps(state, ensure_ascii=False).replace("</", "<\\/")
     flash = ""
     if message:
@@ -1793,6 +1852,7 @@ def render_admin_page(
           <nav class="sidebar-nav" aria-label="Admin sections">
             <button class="tab active" data-tab="live">Live</button>
             <button class="tab" data-tab="config">Config</button>
+            <button class="tab" data-tab="audit">Audit</button>
             <button class="tab" data-tab="services">Services</button>
             <button class="tab" data-tab="routes">Routes</button>
             <button class="tab" data-tab="output">Output</button>
@@ -1803,8 +1863,9 @@ def render_admin_page(
           </nav>
           <div class="sidebar-meta">
             <div class="chip">User: <strong>{escape(principal.username)}</strong></div>
-            <div class="chip">Services Config: <span class="mono">{escape(str(runtime.config_path))}</span></div>
-            <div class="chip">Security Config: <span class="mono">{escape(str(security.config_path))}</span></div>
+            <div class="chip">Services Config: <span class="mono">{escape(str(state["config_paths"]["services"]))}</span></div>
+            <div class="chip">Security Config: <span class="mono">{escape(str(state["config_paths"]["security"]))}</span></div>
+            <div class="chip">State Store: <strong>{escape(str(state["store"].get("mode", "file")).upper())}</strong></div>
           </div>
         </aside>
 
@@ -1827,8 +1888,9 @@ def render_admin_page(
               </div>
               <div class="meta-box">
                 <div class="chip">User: <strong>{escape(principal.username)}</strong></div>
-                <div class="chip">Services Config: <span class="mono">{escape(str(runtime.config_path))}</span></div>
-                <div class="chip">Security Config: <span class="mono">{escape(str(security.config_path))}</span></div>
+                <div class="chip">Services Config: <span class="mono">{escape(str(state["config_paths"]["services"]))}</span></div>
+                <div class="chip">Security Config: <span class="mono">{escape(str(state["config_paths"]["security"]))}</span></div>
+                <div class="chip">State Store: <strong>{escape(str(state["store"].get("mode", "file")).upper())}</strong></div>
               </div>
             </div>
             {flash}
@@ -1837,6 +1899,7 @@ def render_admin_page(
               <nav class="tabs desktop-tabs" aria-label="Admin sections">
                 <button class="tab active" data-tab="live">Live</button>
                 <button class="tab" data-tab="config">Config</button>
+                <button class="tab" data-tab="audit">Audit</button>
                 <button class="tab" data-tab="services">Services</button>
                 <button class="tab" data-tab="routes">Routes</button>
                 <button class="tab" data-tab="output">Output</button>
@@ -1864,6 +1927,17 @@ def render_admin_page(
               </div>
             </div>
             <div id="config-wrap"></div>
+              </section>
+
+              <section class="section" data-section="audit">
+            <div class="section-head">
+              <div>
+                <h2 class="section-title">Audit</h2>
+                <div class="section-note">Track admin-side config and security mutations with actor, target, listener, and summary details.</div>
+              </div>
+              <div class="actions" id="audit-top-actions"></div>
+            </div>
+            <div class="card" id="audit-wrap"></div>
               </section>
 
               <section class="section" data-section="services">
@@ -2312,6 +2386,7 @@ def render_admin_page(
           renderOutputProfiles();
           renderClients();
           renderConfig();
+          renderAudit();
           renderUsers();
           renderRoles();
           renderLive();
@@ -3119,6 +3194,12 @@ def render_admin_page(
           );
           const canEdit = has("services_manage");
           const retentionLabel = retentionValue ? `${{retentionValue}} hour(s)` : "Unlimited";
+          const publicBaseUrl = String(STATE.network?.public_base_url || "");
+          const adminBaseUrl = String(STATE.network?.admin_base_url || "");
+          const servicesConfigSource = String(STATE.config_paths?.services || "");
+          const securityConfigSource = String(STATE.config_paths?.security || "");
+          const stateStoreMode = String(STATE.store?.mode || "file");
+          const auditEnabled = Boolean(STATE.store?.audit_enabled);
           const gatewayResponseProfileOptions = STATE.output_profiles.length
             ? STATE.output_profiles.map((profile) => `
                 <option value="${{esc(profile.slug)}}" ${{gatewayResponseOutputProfile === profile.slug ? "selected" : ""}}>
@@ -3134,6 +3215,36 @@ def render_admin_page(
 
           wrap.innerHTML = `
             <form method="post" action="/__admin/settings/save" onsubmit="return submitGatewaySettings(event, this)">
+              <div class="card">
+                <div class="section-head" style="margin-bottom: 14px;">
+                  <div>
+                    <h3 class="section-title" style="font-size:16px; margin-bottom:4px;">Control Plane</h3>
+                    <div class="section-note">The public listener serves gateway traffic and token issuance. Admin, monitor, and logout stay on the admin listener only.</div>
+                  </div>
+                  <div class="actions">
+                    <span class="tag">Store: ${{esc(stateStoreMode.toUpperCase())}}</span>
+                    <span class="tag">${{auditEnabled ? "Audit enabled" : "Audit disabled"}}</span>
+                  </div>
+                </div>
+                <div class="form-grid">
+                  <div class="full detail-box">
+                    <div><strong>Public listener</strong></div>
+                    <div class="mono">${{esc(publicBaseUrl || "-")}}</div>
+                  </div>
+                  <div class="full detail-box">
+                    <div><strong>Admin listener</strong></div>
+                    <div class="mono">${{esc(adminBaseUrl || "-")}}</div>
+                  </div>
+                  <div class="full detail-box">
+                    <div><strong>Services config source</strong></div>
+                    <div class="mono">${{esc(servicesConfigSource || "-")}}</div>
+                  </div>
+                  <div class="full detail-box">
+                    <div><strong>Security config source</strong></div>
+                    <div class="mono">${{esc(securityConfigSource || "-")}}</div>
+                  </div>
+                </div>
+              </div>
               <div class="card">
                 <div class="section-head" style="margin-bottom: 14px;">
                   <div>
@@ -3243,6 +3354,78 @@ def render_admin_page(
           if (form) {{
             syncGatewayResponseSettings(form);
           }}
+        }}
+
+        function renderAudit() {{
+          const wrap = document.getElementById("audit-wrap");
+          const topActions = document.getElementById("audit-top-actions");
+          if (!wrap || !topActions) return;
+
+          const rows = Array.isArray(STATE.audit_logs) ? STATE.audit_logs : [];
+          const stateStoreMode = String(STATE.store?.mode || "file");
+          const auditEnabled = Boolean(STATE.store?.audit_enabled);
+
+          topActions.innerHTML = `
+            <span class="tag">Store ${{esc(stateStoreMode.toUpperCase())}}</span>
+            <span class="tag">${{rows.length}} recent change(s)</span>
+          `;
+
+          if (!auditEnabled) {{
+            wrap.innerHTML = '<div class="empty">Admin change logging is not enabled for the current state store.</div>';
+            return;
+          }}
+
+          if (!rows.length) {{
+            wrap.innerHTML = '<div class="empty">No admin changes have been recorded yet.</div>';
+            return;
+          }}
+
+          wrap.innerHTML = `
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>User</th>
+                  <th>Action</th>
+                  <th>Target</th>
+                  <th>Listener</th>
+                  <th>Client IP</th>
+                  <th>Message</th>
+                  <th>Details</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${{
+                  rows.map((entry) => {{
+                    const details = entry.details && typeof entry.details === "object" ? entry.details : {{}};
+                    const detailKeys = Object.keys(details);
+                    const detailsHtml = detailKeys.length
+                      ? `
+                        <details>
+                          <summary>${{detailKeys.length}} field(s)</summary>
+                          <div class="detail-box" style="margin-top:8px;">
+                            <pre>${{esc(JSON.stringify(details, null, 2))}}</pre>
+                          </div>
+                        </details>
+                      `
+                      : '<span class="muted">-</span>';
+                    return `
+                      <tr>
+                        <td>${{esc(formatDateTime(entry.created_at))}}</td>
+                        <td><strong>${{esc(entry.principal_username)}}</strong><div class="muted">${{esc(entry.principal_source || "")}}</div></td>
+                        <td><span class="tag">${{esc(entry.action)}}</span></td>
+                        <td><div><strong>${{esc(entry.target_kind)}}</strong></div><div class="mono">${{esc(entry.target_ref)}}</div></td>
+                        <td><span class="tag">${{esc(entry.listener || "-")}}</span></td>
+                        <td class="mono">${{esc(entry.client_ip || "-")}}</td>
+                        <td>${{esc(entry.message || "")}}</td>
+                        <td>${{detailsHtml}}</td>
+                      </tr>
+                    `;
+                  }}).join("")
+                }}
+              </tbody>
+            </table>
+          `;
         }}
 
         async function submitGatewaySettings(event, form) {{
@@ -3543,7 +3726,8 @@ def render_admin_page(
           const route = routeBySlug(routeSlug);
           if (!route) return "";
           const requestMethod = String(methodName || route.methods?.[0] || "GET").toUpperCase();
-          let url = `${{window.location.origin}}${{sampleGatewayPath(route.gateway_path)}}`;
+          const publicBaseUrl = String(STATE.network?.public_base_url || window.location.origin || "").trim();
+          let url = `${{publicBaseUrl}}${{sampleGatewayPath(route.gateway_path)}}`;
           const command = ["curl", `-X ${{requestMethod}}`];
 
           const sample = authSample || emptyAuthSample();
@@ -5277,6 +5461,7 @@ parallel_race: call all targets concurrently and return first healthy response</
         renderOutputProfiles();
         renderClients();
         renderConfig();
+        renderAudit();
         renderUsers();
         renderRoles();
       </script>
@@ -5288,9 +5473,21 @@ parallel_race: call all targets concurrently and return first healthy response</
 class PooledHTTPServer(ThreadingHTTPServer):
     """ThreadingHTTPServer with a bounded thread pool instead of unbounded thread spawning."""
 
-    def __init__(self, server_address, RequestHandlerClass, max_workers: int = 256) -> None:
+    def __init__(
+        self,
+        server_address,
+        RequestHandlerClass,
+        max_workers: int = 256,
+        *,
+        listener_role: str = "public",
+        public_port: int = 8000,
+        admin_port: int = 8001,
+    ) -> None:
         super().__init__(server_address, RequestHandlerClass)
         self._pool = ThreadPoolExecutor(max_workers=max_workers)
+        self.listener_role = listener_role
+        self.public_port = public_port
+        self.admin_port = admin_port
 
     def process_request(self, request, client_address) -> None:  # type: ignore[override]
         self._pool.submit(self.process_request_thread, request, client_address)
@@ -5328,6 +5525,75 @@ class GatewayHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:
         LOGGER.info("%s - %s", self.address_string(), fmt % args)
 
+    def _listener_role(self) -> str:
+        return str(getattr(self.server, "listener_role", "public") or "public")
+
+    def _is_admin_listener(self) -> bool:
+        return self._listener_role() == "admin"
+
+    def _request_scheme(self) -> str:
+        forwarded = str(self.headers.get("X-Forwarded-Proto", "") or "").split(",", 1)[0].strip()
+        if forwarded:
+            return forwarded
+        return "http"
+
+    def _request_host_name(self) -> str:
+        raw_host = (
+            str(self.headers.get("X-Forwarded-Host", "") or "").split(",", 1)[0].strip()
+            or str(self.headers.get("Host", "127.0.0.1") or "127.0.0.1").strip()
+        )
+        if raw_host.startswith("["):
+            closing = raw_host.find("]")
+            if closing != -1:
+                return raw_host[: closing + 1]
+        if ":" in raw_host:
+            return raw_host.rsplit(":", 1)[0]
+        return raw_host
+
+    def _base_url_for_port(self, port: int) -> str:
+        host = self._request_host_name() or "127.0.0.1"
+        scheme = self._request_scheme()
+        if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+            return f"{scheme}://{host}"
+        return f"{scheme}://{host}:{port}"
+
+    def _public_base_url(self) -> str:
+        return self._base_url_for_port(int(getattr(self.server, "public_port", SETTINGS.public_port)))
+
+    def _admin_base_url(self) -> str:
+        return self._base_url_for_port(int(getattr(self.server, "admin_port", SETTINGS.admin_port)))
+
+    def _not_found(self) -> None:
+        self._discard_request_body()
+        self._send_json({"detail": "Not found."}, status_code=404)
+
+    def _audit_admin_change(
+        self,
+        *,
+        action: str,
+        target_kind: str,
+        target_ref: str,
+        message: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        principal = self._authenticate_principal()
+        if principal is None:
+            return
+        try:
+            state_store.log_admin_change(
+                principal_username=principal.username,
+                principal_source=principal.source,
+                listener=self._listener_role(),
+                action=action,
+                target_kind=target_kind,
+                target_ref=target_ref,
+                message=message,
+                client_ip=self._client_ip(),
+                details=details or {},
+            )
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to persist admin audit log for %s %s", action, target_ref)
+
     def _dispatch(self) -> None:
         runtime.maybe_reload()
         security.maybe_reload()
@@ -5338,23 +5604,37 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self._send_json(
                 {
                     "status": "ok",
+                    "listener_role": self._listener_role(),
                     "service_count": runtime.service_count(),
                     "route_count": runtime.route_count(),
                     "output_profile_count": runtime.output_profile_count(),
-                    "config_path": str(runtime.config_path),
+                    "config_source": get_config_source_label(runtime.config_path),
+                    "security_source": get_security_source_label(security.config_path),
+                    "state_store_mode": getattr(state_store, "mode", "file"),
+                    "public_port": int(getattr(self.server, "public_port", SETTINGS.public_port)),
+                    "admin_port": int(getattr(self.server, "admin_port", SETTINGS.admin_port)),
                 }
             )
             return
 
         if parsed.path == "/__logout":
+            if not self._is_admin_listener():
+                self._not_found()
+                return
             self._force_logout()
             return
 
         if parsed.path == "/__oauth/token" and self.command == "POST":
+            if self._is_admin_listener():
+                self._not_found()
+                return
             self._handle_oauth_token()
             return
 
         if parsed.path.startswith("/__monitor"):
+            if not self._is_admin_listener():
+                self._not_found()
+                return
             principal = self._require_permission("monitor_access")
             if principal is None:
                 return
@@ -5379,6 +5659,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 return
 
         if parsed.path.startswith("/__admin"):
+            if not self._is_admin_listener():
+                self._not_found()
+                return
             if not self._ensure_admin_ip_allowed():
                 return
             if parsed.path == "/__admin":
@@ -5388,6 +5671,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 body = render_admin_page(
                     principal=principal,
                     document=load_config_document(runtime.config_path),
+                    public_base_url=self._public_base_url(),
+                    admin_base_url=self._admin_base_url(),
                     message=query.get("message", ""),
                     error=query.get("error", ""),
                 ).encode("utf-8")
@@ -5545,6 +5830,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     return
                 self._handle_user_delete()
                 return
+
+        if self._is_admin_listener():
+            self._not_found()
+            return
 
         request = None
         try:
@@ -5867,7 +6156,16 @@ class GatewayHandler(BaseHTTPRequestHandler):
         self._send_json(
             {
                 "message": message,
-                "state": build_admin_state(principal=principal, document=document) if principal else None,
+                "state": (
+                    build_admin_state(
+                        principal=principal,
+                        document=document,
+                        public_base_url=self._public_base_url(),
+                        admin_base_url=self._admin_base_url(),
+                    )
+                    if principal
+                    else None
+                ),
             }
         )
 
@@ -5967,6 +6265,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 gateway_response_headers=gateway_response_headers,
             )
             runtime.load()
+            self._audit_admin_change(
+                action="save",
+                target_kind="settings",
+                target_ref="gateway",
+                message=message,
+            )
             self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
             self._send_admin_mutation_error(exc)
@@ -6058,6 +6362,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 rate_limit_scope=rate_limit_scope,
             )
             runtime.load()
+            self._audit_admin_change(
+                action="save",
+                target_kind="service",
+                target_ref=service_name,
+                message=message,
+            )
             self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
             self._send_admin_mutation_error(exc)
@@ -6068,6 +6378,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
             service_name = str(form.get("service_name", "")).strip()
             message = delete_service(runtime.config_path, service_name=service_name)
             runtime.load()
+            self._audit_admin_change(
+                action="delete",
+                target_kind="service",
+                target_ref=service_name,
+                message=message,
+            )
             self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
             self._send_admin_mutation_error(exc)
@@ -6107,6 +6423,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 auth_methods=auth_methods,
             )
             runtime.load()
+            self._audit_admin_change(
+                action="save",
+                target_kind="client",
+                target_ref=client_slug or client_code,
+                message=message,
+            )
             self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
             self._send_admin_mutation_error(exc)
@@ -6117,6 +6439,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
             client_slug = str(form.get("client_slug", "")).strip().lower()
             message = delete_client(runtime.config_path, client_slug=client_slug)
             runtime.load()
+            self._audit_admin_change(
+                action="delete",
+                target_kind="client",
+                target_ref=client_slug,
+                message=message,
+            )
             self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
             self._send_admin_mutation_error(exc)
@@ -6176,6 +6504,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 response_cache_methods=response_cache_methods,
             )
             runtime.load()
+            self._audit_admin_change(
+                action="save",
+                target_kind="endpoint",
+                target_ref=f"{service_name}/{endpoint_name}",
+                message=message,
+            )
             self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
             self._send_admin_mutation_error(exc)
@@ -6191,6 +6525,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 endpoint_name=endpoint_name,
             )
             runtime.load()
+            self._audit_admin_change(
+                action="delete",
+                target_kind="endpoint",
+                target_ref=f"{service_name}/{endpoint_name}",
+                message=message,
+            )
             self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
             self._send_admin_mutation_error(exc)
@@ -6283,6 +6623,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 success_hook_include_request_body=success_hook_include_request_body,
             )
             runtime.load()
+            self._audit_admin_change(
+                action="save",
+                target_kind="route",
+                target_ref=route_slug,
+                message=message,
+            )
             self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
             self._send_admin_mutation_error(exc)
@@ -6293,6 +6639,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
             route_slug = str(form.get("route_slug", "")).strip().lower()
             message = delete_route(runtime.config_path, route_slug=route_slug)
             runtime.load()
+            self._audit_admin_change(
+                action="delete",
+                target_kind="route",
+                target_ref=route_slug,
+                message=message,
+            )
             self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
             self._send_admin_mutation_error(exc)
@@ -6389,6 +6741,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 headers=headers,
             )
             runtime.load()
+            self._audit_admin_change(
+                action="save",
+                target_kind="output_profile",
+                target_ref=profile_slug,
+                message=message,
+            )
             self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
             self._send_admin_mutation_error(exc)
@@ -6399,6 +6757,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
             profile_slug = str(form.get("profile_slug", "")).strip().lower()
             message = delete_output_profile(runtime.config_path, profile_slug=profile_slug)
             runtime.load()
+            self._audit_admin_change(
+                action="delete",
+                target_kind="output_profile",
+                target_ref=profile_slug,
+                message=message,
+            )
             self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
             self._send_admin_mutation_error(exc)
@@ -6421,6 +6785,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 permissions=permissions,
             )
             security.load()
+            self._audit_admin_change(
+                action="save",
+                target_kind="role",
+                target_ref=role_name,
+                message=message,
+            )
             self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
             self._send_admin_mutation_error(exc)
@@ -6431,6 +6801,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
             role_name = str(form.get("role_name", "")).strip()
             message = delete_role(security.config_path, role_name=role_name)
             security.load()
+            self._audit_admin_change(
+                action="delete",
+                target_kind="role",
+                target_ref=role_name,
+                message=message,
+            )
             self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
             self._send_admin_mutation_error(exc)
@@ -6457,6 +6833,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 enabled=enabled,
             )
             security.load()
+            self._audit_admin_change(
+                action="save",
+                target_kind="user",
+                target_ref=username,
+                message=message,
+            )
             self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
             self._send_admin_mutation_error(exc)
@@ -6467,6 +6849,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
             username = str(form.get("username", "")).strip()
             message = delete_user(security.config_path, username=username)
             security.load()
+            self._audit_admin_change(
+                action="delete",
+                target_kind="user",
+                target_ref=username,
+                message=message,
+            )
             self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
             self._send_admin_mutation_error(exc)
@@ -6481,6 +6869,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 raise ValueError("Config body must be a top-level mapping.")
             save_config_document(runtime.config_path, document)
             runtime.load()
+            self._audit_admin_change(
+                action="replace",
+                target_kind="config",
+                target_ref="services",
+                message="Config replaced.",
+            )
             self._send_json({"message": "Config replaced."})
         except Exception as exc:  # noqa: BLE001
             self._send_json({"detail": str(exc)}, status_code=400)
@@ -6540,6 +6934,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 auth_methods=auth_methods,
             )
             runtime.load()
+            self._audit_admin_change(
+                action="save",
+                target_kind="client",
+                target_ref=client_slug or client_code,
+                message=message,
+            )
             saved = self._client_document_by_slug(client_slug)
             self._send_json(
                 {
@@ -6556,6 +6956,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
         try:
             message = delete_client(runtime.config_path, client_slug=slug)
             runtime.load()
+            self._audit_admin_change(
+                action="delete",
+                target_kind="client",
+                target_ref=slug,
+                message=message,
+            )
             self._send_json({"message": message})
         except Exception as exc:  # noqa: BLE001
             self._send_json({"detail": str(exc)}, status_code=400)
@@ -6668,6 +7074,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 headers=headers,
             )
             runtime.load()
+            self._audit_admin_change(
+                action="save",
+                target_kind="output_profile",
+                target_ref=profile_slug,
+                message=message,
+            )
             profile = self._output_profile_document_by_slug(profile_slug)
             self._send_json(
                 {
@@ -6684,6 +7096,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
         try:
             message = delete_output_profile(runtime.config_path, profile_slug=slug)
             runtime.load()
+            self._audit_admin_change(
+                action="delete",
+                target_kind="output_profile",
+                target_ref=slug,
+                message=message,
+            )
             self._send_json({"message": message})
         except Exception as exc:  # noqa: BLE001
             self._send_json({"detail": str(exc)}, status_code=400)
@@ -6759,31 +7177,75 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the NapiGate server.")
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--host", default=get_env("NAPIGATE_PUBLIC_HOST", default="0.0.0.0"))
+    parser.add_argument("--port", type=int, default=SETTINGS.public_port)
+    parser.add_argument("--admin-host", default=get_env("NAPIGATE_ADMIN_HOST", default="0.0.0.0"))
+    parser.add_argument("--admin-port", type=int, default=SETTINGS.admin_port)
     parser.add_argument(
         "--config",
-        default=get_env("NAPIGATE_CONFIG", "APIGATE_CONFIG", default="config/services.yaml"),
+        default=_config_path_arg_default(),
+    )
+    parser.add_argument(
+        "--security-config",
+        default=_security_path_default(),
     )
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
-    runtime.config_path = Path(args.config)
+    if args.port == args.admin_port:
+        raise ValueError("Public port and admin port must be different.")
+    configure_application(config_path=Path(args.config), security_path=Path(args.security_config))
     runtime.load()
     security.load()
     max_workers = int(get_env("NAPIGATE_MAX_WORKERS", default="256"))
-    server = PooledHTTPServer((args.host, args.port), GatewayHandler, max_workers=max_workers)
-    LOGGER.info("NapiGate listening on %s:%s (max_workers=%s)", args.host, args.port, max_workers)
+    public_server = PooledHTTPServer(
+        (args.host, args.port),
+        GatewayHandler,
+        max_workers=max_workers,
+        listener_role="public",
+        public_port=args.port,
+        admin_port=args.admin_port,
+    )
+    admin_server = PooledHTTPServer(
+        (args.admin_host, args.admin_port),
+        GatewayHandler,
+        max_workers=max_workers,
+        listener_role="admin",
+        public_port=args.port,
+        admin_port=args.admin_port,
+    )
+    admin_thread = threading.Thread(
+        target=admin_server.serve_forever,
+        name="napigate-admin-listener",
+        daemon=True,
+    )
+    admin_thread.start()
+    LOGGER.info(
+        "NapiGate public listener on %s:%s and admin listener on %s:%s (max_workers=%s, state_store=%s)",
+        args.host,
+        args.port,
+        args.admin_host,
+        args.admin_port,
+        max_workers,
+        getattr(state_store, "mode", "file"),
+    )
     try:
-        server.serve_forever()
+        public_server.serve_forever()
     except KeyboardInterrupt:
         LOGGER.info("Shutting down NapiGate")
     finally:
-        server.server_close()
+        public_server.shutdown()
+        admin_server.shutdown()
+        admin_thread.join(timeout=2)
+        public_server.server_close()
+        admin_server.server_close()
         runtime.close()
-        shutdown_logging()
+        try:
+            state_store.close()
+        finally:
+            shutdown_logging()
 
 
 if __name__ == "__main__":

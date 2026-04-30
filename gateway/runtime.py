@@ -33,6 +33,8 @@ from gateway.config import (
     ServiceConfig,
     SuccessHookConfig,
     StaticResponseConfig,
+    get_config_revision,
+    get_config_source_label,
     load_gateway_config,
 )
 from gateway.integrations import IntegrationDispatcher
@@ -152,7 +154,7 @@ class GatewayRuntime:
         self._cache: CacheBackend
         self._rate_limiter: RateLimitBackend
         self._cache, self._rate_limiter = make_backends(redis_url)
-        self._config_signature: tuple[int, int] | None = None
+        self._config_signature: Any = None
         self._route_round_robin: dict[str, int] = {}
         self._lock = threading.RLock()
         self.dispatcher = IntegrationDispatcher()
@@ -164,7 +166,7 @@ class GatewayRuntime:
         clients = gateway_config.clients
         output_profiles = gateway_config.output_profiles
         gateway_responses = gateway_config.gateway_responses
-        signature = self._file_signature(self.config_path)
+        signature = get_config_revision(self.config_path)
         with self._lock:
             self.services = services
             self.routes = routes
@@ -183,11 +185,11 @@ class GatewayRuntime:
             len(routes),
             len(clients),
             len(output_profiles),
-            self.config_path,
+            get_config_source_label(self.config_path),
         )
 
     def maybe_reload(self) -> None:
-        current_signature = self._file_signature(self.config_path)
+        current_signature = get_config_revision(self.config_path)
         with self._lock:
             known_signature = self._config_signature
         if current_signature == known_signature:
@@ -195,7 +197,7 @@ class GatewayRuntime:
         try:
             self.load()
         except Exception:  # noqa: BLE001
-            LOGGER.exception("Failed to reload gateway config from %s", self.config_path)
+            LOGGER.exception("Failed to reload gateway config from %s", get_config_source_label(self.config_path))
             with self._lock:
                 self._config_signature = known_signature
 

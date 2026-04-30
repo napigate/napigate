@@ -8,7 +8,7 @@ import logging
 import secrets
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -49,6 +49,12 @@ DEFAULT_SECURITY_DOCUMENT: dict[str, Any] = {
     },
     "users": {},
 }
+
+
+SecurityDocumentLoader = Callable[[Path], dict[str, Any]]
+SecurityDocumentSaver = Callable[[Path, dict[str, Any]], None]
+SecurityRevisionProvider = Callable[[Path], Any]
+SecuritySourceLabelProvider = Callable[[Path], str]
 
 
 @dataclass(slots=True)
@@ -97,8 +103,7 @@ def verify_password(password: str, password_hash: str) -> bool:
     return hmac.compare_digest(calculated, expected_digest)
 
 
-def load_security_document(config_path: Path | str = SECURITY_CONFIG_PATH) -> dict[str, Any]:
-    config_path = Path(config_path)
+def _load_security_document_from_file(config_path: Path) -> dict[str, Any]:
     if not config_path.exists():
         return _copy_default_security()
 
@@ -174,9 +179,12 @@ def _validate_security_document(document: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def save_security_document(config_path: Path | str, document: dict[str, Any]) -> None:
-    config_path = Path(config_path)
-    normalized = _validate_security_document(document)
+def validate_security_document(document: dict[str, Any]) -> dict[str, Any]:
+    return _validate_security_document(document)
+
+
+def _save_security_document_to_file(config_path: Path, document: dict[str, Any]) -> None:
+    normalized = validate_security_document(document)
     serialized = yaml.safe_dump(
         normalized,
         sort_keys=False,
@@ -185,8 +193,59 @@ def save_security_document(config_path: Path | str, document: dict[str, Any]) ->
     config_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = config_path.with_name(f"{config_path.name}.tmp")
     temp_path.write_text(serialized, encoding="utf-8")
-    load_security_document(temp_path)
     temp_path.replace(config_path)
+
+
+def _security_file_revision(config_path: Path) -> tuple[int, int] | None:
+    try:
+        stat = config_path.stat()
+    except FileNotFoundError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
+
+
+def _security_file_source_label(config_path: Path) -> str:
+    return str(config_path)
+
+
+_SECURITY_DOCUMENT_LOADER: SecurityDocumentLoader = _load_security_document_from_file
+_SECURITY_DOCUMENT_SAVER: SecurityDocumentSaver = _save_security_document_to_file
+_SECURITY_REVISION_PROVIDER: SecurityRevisionProvider = _security_file_revision
+_SECURITY_SOURCE_LABEL_PROVIDER: SecuritySourceLabelProvider = _security_file_source_label
+
+
+def configure_security_document_io(
+    *,
+    loader: SecurityDocumentLoader | None = None,
+    saver: SecurityDocumentSaver | None = None,
+    revision_provider: SecurityRevisionProvider | None = None,
+    source_label_provider: SecuritySourceLabelProvider | None = None,
+) -> None:
+    global _SECURITY_DOCUMENT_LOADER
+    global _SECURITY_DOCUMENT_SAVER
+    global _SECURITY_REVISION_PROVIDER
+    global _SECURITY_SOURCE_LABEL_PROVIDER
+
+    _SECURITY_DOCUMENT_LOADER = loader or _load_security_document_from_file
+    _SECURITY_DOCUMENT_SAVER = saver or _save_security_document_to_file
+    _SECURITY_REVISION_PROVIDER = revision_provider or _security_file_revision
+    _SECURITY_SOURCE_LABEL_PROVIDER = source_label_provider or _security_file_source_label
+
+
+def load_security_document(config_path: Path | str = SECURITY_CONFIG_PATH) -> dict[str, Any]:
+    return _SECURITY_DOCUMENT_LOADER(Path(config_path))
+
+
+def save_security_document(config_path: Path | str, document: dict[str, Any]) -> None:
+    _SECURITY_DOCUMENT_SAVER(Path(config_path), document)
+
+
+def get_security_revision(config_path: Path | str = SECURITY_CONFIG_PATH) -> Any:
+    return _SECURITY_REVISION_PROVIDER(Path(config_path))
+
+
+def get_security_source_label(config_path: Path | str = SECURITY_CONFIG_PATH) -> str:
+    return _SECURITY_SOURCE_LABEL_PROVIDER(Path(config_path))
 
 
 class SecurityManager:
@@ -198,15 +257,15 @@ class SecurityManager:
         self._config_signature: tuple[int, int] | None = None
 
     def load(self) -> None:
-        document = _validate_security_document(load_security_document(self.config_path))
-        signature = self._file_signature(self.config_path)
+        document = validate_security_document(load_security_document(self.config_path))
+        signature = get_security_revision(self.config_path)
         with self._lock:
             self.roles = document["roles"]
             self.users = document["users"]
             self._config_signature = signature
 
     def maybe_reload(self) -> None:
-        current_signature = self._file_signature(self.config_path)
+        current_signature = get_security_revision(self.config_path)
         with self._lock:
             known_signature = self._config_signature
         if current_signature == known_signature:
@@ -291,10 +350,3 @@ class SecurityManager:
             "users": public_users,
             "permission_labels": dict(PERMISSION_LABELS),
         }
-
-    def _file_signature(self, path: Path) -> tuple[int, int] | None:
-        try:
-            stat = path.stat()
-        except FileNotFoundError:
-            return None
-        return stat.st_mtime_ns, stat.st_size

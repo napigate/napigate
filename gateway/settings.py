@@ -48,6 +48,11 @@ class AppSettings:
     admin_auth: BasicAuthSettings
     admin_access_allowlist: list[str]
     redis_url: str = ""
+    state_store_mode: str = "file"
+    postgres_dsn: str = ""
+    state_sync_interval_seconds: float = 2.0
+    public_port: int = 8000
+    admin_port: int = 8001
 
 
 def get_env(*names: str, default: str = "") -> str:
@@ -84,6 +89,17 @@ def load_settings() -> AppSettings:
             allowlist.append(entry)
 
     redis_url = get_env("NAPIGATE_REDIS_URL").strip()
+    state_store_mode = get_env("NAPIGATE_STATE_STORE", default="file").strip().lower() or "file"
+    if state_store_mode not in {"file", "postgres"}:
+        raise ValueError("NAPIGATE_STATE_STORE must be file or postgres.")
+    postgres_dsn = get_env("NAPIGATE_POSTGRES_DSN").strip()
+    state_sync_interval_seconds = float(
+        get_env("NAPIGATE_STATE_SYNC_INTERVAL_SECONDS", default="2").strip() or "2"
+    )
+    if state_sync_interval_seconds <= 0:
+        raise ValueError("NAPIGATE_STATE_SYNC_INTERVAL_SECONDS must be positive.")
+    public_port = int(get_env("NAPIGATE_PUBLIC_PORT", "APP_PORT", default="8000").strip() or "8000")
+    admin_port = int(get_env("NAPIGATE_ADMIN_PORT", "ADMIN_PORT", default="8001").strip() or "8001")
 
     return AppSettings(
         admin_auth=BasicAuthSettings(
@@ -93,4 +109,9 @@ def load_settings() -> AppSettings:
         ),
         admin_access_allowlist=allowlist,
         redis_url=redis_url,
+        state_store_mode=state_store_mode,
+        postgres_dsn=postgres_dsn,
+        state_sync_interval_seconds=state_sync_interval_seconds,
+        public_port=public_port,
+        admin_port=admin_port,
     )

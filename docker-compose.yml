@@ -12,13 +12,17 @@ services:
     command: >
       python3 -m gateway.main
       --host 0.0.0.0
-      --port 8000
+      --port ${APP_PORT:-8000}
+      --admin-host 0.0.0.0
+      --admin-port ${ADMIN_PORT:-8001}
       --config ${NAPIGATE_CONFIG:-config/services.yaml}
+      --security-config ${NAPIGATE_SECURITY_CONFIG:-config/security.yaml}
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "${APP_PORT:-8000}:8000"
+      - "${APP_PORT:-8000}:${APP_PORT:-8000}"
+      - "${ADMIN_PORT:-8001}:${ADMIN_PORT:-8001}"
     volumes:
       - ./config:/code/config
       - ./data:/code/data
@@ -26,12 +30,35 @@ services:
     healthcheck:
       test:
         [
-          "CMD",
-          "python3",
-          "-c",
-          "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/__health', timeout=5).read()",
+          "CMD-SHELL",
+          "python3 -c \"import os; from urllib.request import urlopen; port=os.environ.get('APP_PORT', '8000'); urlopen(f'http://127.0.0.1:{port}/__health', timeout=5).read()\"",
         ]
       interval: 30s
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: napigate-postgres
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-napigate}
+      POSTGRES_USER: ${POSTGRES_USER:-napigate}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-napigate}
+      TZ: ${APP_TIMEZONE:-UTC}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-napigate} -d ${POSTGRES_DB:-napigate}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  postgres-data:
