@@ -49,20 +49,4 @@ RUN mkdir -p /code/config /code/data /code/logs && \
 
 USER ${CURRENT_USER}
 
-CMD [
-    "python3",
-    "-m",
-    "gateway.main",
-    "--host",
-    "0.0.0.0",
-    "--port",
-    "8000",
-    "--admin-host",
-    "0.0.0.0",
-    "--admin-port",
-    "8001",
-    "--config",
-    "config/services.yaml",
-    "--security-config",
-    "config/security.yaml"
-]
+CMD ["python3", "-m", "gateway.main", "--host", "0.0.0.0", "--port", "8000", "--admin-host", "0.0.0.0", "--admin-port", "8001", "--config", "config/services.yaml", "--security-config", "config/security.yaml"]
