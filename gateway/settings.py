@@ -63,6 +63,21 @@ def get_env(*names: str, default: str = "") -> str:
     return default
 
 
+def _parse_network_allowlist(raw: str, *, env_name: str) -> list[str]:
+    allowlist: list[str] = []
+    for item in raw.replace("\n", ",").split(","):
+        entry = item.strip()
+        if not entry:
+            continue
+        try:
+            ipaddress.ip_network(entry, strict=False)
+        except ValueError as exc:
+            raise ValueError(f"{env_name} contains invalid IP/CIDR '{entry}'.") from exc
+        if entry not in allowlist:
+            allowlist.append(entry)
+    return allowlist
+
+
 def load_settings() -> AppSettings:
     username = get_env("NAPIGATE_ADMIN_USERNAME", "APIGATE_ADMIN_USERNAME").strip()
     password = get_env("NAPIGATE_ADMIN_PASSWORD", "APIGATE_ADMIN_PASSWORD").strip()
@@ -74,20 +89,10 @@ def load_settings() -> AppSettings:
             "NAPIGATE_ADMIN_PASSWORD must be set to enable protection."
         )
 
-    allowlist: list[str] = []
-    for item in raw_allowlist.replace("\n", ",").split(","):
-        entry = item.strip()
-        if not entry:
-            continue
-        try:
-            ipaddress.ip_network(entry, strict=False)
-        except ValueError as exc:
-            raise ValueError(
-                f"NAPIGATE_ADMIN_ACCESS_WHITELIST_IPS contains invalid IP/CIDR '{entry}'."
-            ) from exc
-        if entry not in allowlist:
-            allowlist.append(entry)
-
+    allowlist = _parse_network_allowlist(
+        raw_allowlist,
+        env_name="NAPIGATE_ADMIN_ACCESS_WHITELIST_IPS",
+    )
     redis_url = get_env("NAPIGATE_REDIS_URL").strip()
     state_store_mode = get_env("NAPIGATE_STATE_STORE", default="file").strip().lower() or "file"
     if state_store_mode not in {"file", "postgres"}:

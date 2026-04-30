@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from gateway.config import DEFAULT_TRUSTED_PROXY_IPS
 from gateway.security import AuthenticatedPrincipal
 
 
@@ -272,12 +273,16 @@ def serialize_gateway_settings(document: dict[str, Any]) -> dict[str, Any]:
         else:
             gateway_response_mode = "default"
     retention_hours = observability.get("log_retention_hours")
+    trusted_proxy_ips = observability.get("trusted_proxy_ips")
+    if not isinstance(trusted_proxy_ips, list) or not trusted_proxy_ips:
+        trusted_proxy_ips = list(DEFAULT_TRUSTED_PROXY_IPS)
     return {
         "log_retention_hours": (
             str(int(retention_hours))
             if retention_hours not in (None, "", 0, "0")
             else ""
         ),
+        "trusted_proxy_ips": list(trusted_proxy_ips),
         "gateway_responses": {
             "enabled": gateway_response_mode != "default",
             "mode": gateway_response_mode,

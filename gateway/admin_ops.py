@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
 
-from gateway.config import load_config_document, save_config_document
+from gateway.config import DEFAULT_TRUSTED_PROXY_IPS, load_config_document, save_config_document
 from gateway.security import (
     ALL_PERMISSIONS,
     hash_password,
@@ -211,6 +211,7 @@ def save_gateway_settings(
     config_path: Path,
     *,
     log_retention_hours: int | None,
+    trusted_proxy_ips: list[str],
     gateway_response_mode: str,
     gateway_response_output_profile: str,
     gateway_response_success_key: str,
@@ -230,6 +231,7 @@ def save_gateway_settings(
         observability.pop("log_retention_hours", None)
     else:
         observability["log_retention_hours"] = int(log_retention_hours)
+    observability["trusted_proxy_ips"] = list(trusted_proxy_ips or DEFAULT_TRUSTED_PROXY_IPS)
 
     document["gateway_responses"] = {
         "enabled": gateway_response_mode != "default",

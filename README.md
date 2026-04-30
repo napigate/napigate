@@ -160,6 +160,8 @@ python3 -m gateway.main \
 
 If you proxy NapiGate through Nginx, keep SSE buffering disabled for `__monitor/stream`, otherwise the live monitor can appear stuck in a connecting state even though direct access works. With the default listener split, public traffic points at port `8000` and admin/monitor traffic points at port `8001`.
 
+If you want the request monitor and audit log to show the real client IP instead of the proxy/container IP, add those Nginx or ingress addresses to `observability.trusted_proxy_ips` in `config/services.yaml`.
+
 Example:
 
 ```nginx
@@ -858,6 +860,8 @@ Current permissions:
 If `NAPIGATE_ADMIN_USERNAME` and `NAPIGATE_ADMIN_PASSWORD` are set, admin and monitor routes also require HTTP Basic Auth. The bootstrap admin from `.env` can then manage file-backed users and roles from the admin UI.
 
 If `NAPIGATE_ADMIN_ACCESS_WHITELIST_IPS` is empty, admin routes accept requests from any IP. If it contains comma-separated IPs or CIDRs, every `/__admin` page and admin API request must originate from one of those ranges.
+
+If NapiGate sits behind Docker, Nginx, Traefik, HAProxy, or another reverse proxy, set `observability.trusted_proxy_ips` to the IPs or CIDRs of only those proxies. When the direct peer matches that allowlist, NapiGate resolves the request IP from `X-Forwarded-For`, `Forwarded`, or `X-Real-IP` and stores the end-user IP in monitor/audit logs. If the peer is not trusted, those headers are ignored to avoid spoofing.
 
 ## Monitoring And Logs
 

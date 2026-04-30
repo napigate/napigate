@@ -2173,6 +2173,7 @@ def render_admin_page(
           jsonp_default_callback: {{ title: "JSONP Default Callback", text: "Fallback callback name used when the request omits the callback parameter.", example: "callback" }},
           output_headers_yaml: {{ title: "Profile Headers", text: "Headers applied after the output profile transforms the response.", example: '{{ "Cache-Control": "no-store" }}' }},
           log_retention_hours: {{ title: "Log Retention Hours", text: "When set, request log rows and rotated file logs older than this many hours are deleted by an hourly cleanup worker. Leave blank for unlimited retention.", example: "168" }},
+          trusted_proxy_ips: {{ title: "Trusted Proxy IPs", text: "Only forwarded headers from these direct proxy IPs or CIDRs are trusted for client IP, host, and scheme detection.", example: "127.0.0.1, 172.24.0.0/12, 192.168.0.0/16, 10.0.0.0/8" }},
           gateway_response_mode: {{ title: "Gateway Response Mode", text: "Choose the default detail-only error body, a selected output profile, or the legacy inline envelope fields below.", example: "profile" }},
           gateway_response_output_profile: {{ title: "Gateway Response Output Profile", text: "When mode is profile, NapiGate first builds a gateway error payload with detail, message, error, status_code, and status, then sends that payload through the selected output profile.", example: "gateway_error_contract" }},
           gateway_response_empty_value: {{ title: "Gateway Empty Value", text: "Fallback value written into empty envelope fields for gateway-generated errors. Blank means an empty string.", example: 'null or ""' }},
@@ -3179,6 +3180,9 @@ def render_admin_page(
           if (!wrap) return;
 
           const retentionValue = String(STATE.settings?.log_retention_hours || "");
+          const trustedProxyIpsValue = Array.isArray(STATE.settings?.trusted_proxy_ips)
+            ? STATE.settings.trusted_proxy_ips.join("\\n")
+            : "";
           const gatewayResponses = STATE.settings?.gateway_responses || {{}};
           const gatewayResponseMode = String(gatewayResponses.mode || "default") || "default";
           const gatewayResponseOutputProfile = String(gatewayResponses.output_profile || "");
@@ -3271,6 +3275,18 @@ def render_admin_page(
                   </label>
                   <div class="full section-note">
                     This applies to monitor rows in <span class="mono">data/monitor.db</span> and rotated files under <span class="mono">logs/</span>.
+                  </div>
+                  <label class="full" data-help="trusted_proxy_ips">
+                    <span>Trusted Proxy IPs / CIDRs</span>
+                    <textarea
+                      name="trusted_proxy_ips"
+                      rows="4"
+                      placeholder="One IP or CIDR per line"
+                      ${{canEdit ? "" : "disabled"}}
+                    >${{esc(trustedProxyIpsValue)}}</textarea>
+                  </label>
+                  <div class="full section-note">
+                    Forwarded headers such as <span class="mono">X-Forwarded-For</span> are only trusted when the direct peer matches one of these entries.
                   </div>
                 </div>
               </div>
@@ -5531,17 +5547,79 @@ class GatewayHandler(BaseHTTPRequestHandler):
     def _is_admin_listener(self) -> bool:
         return self._listener_role() == "admin"
 
+    def _raw_client_ip(self) -> str:
+        return self.client_address[0] if self.client_address else "-"
+
+    def _ip_in_allowlist(self, client_ip: str, allowlist: list[str]) -> bool:
+        try:
+            address = ipaddress.ip_address(client_ip)
+        except ValueError:
+            return False
+        return any(address in ipaddress.ip_network(entry, strict=False) for entry in allowlist)
+
+    def _request_via_trusted_proxy(self) -> bool:
+        allowlist = runtime.trusted_proxy_allowlist()
+        return bool(allowlist) and self._ip_in_allowlist(self._raw_client_ip(), allowlist)
+
+    def _normalize_forwarded_ip(self, raw_value: str) -> str:
+        value = str(raw_value or "").strip().strip('"').strip("'")
+        if not value:
+            return ""
+        if value.lower().startswith("for="):
+            value = value[4:].strip().strip('"').strip("'")
+        if not value or value.lower() == "unknown" or value.startswith("_"):
+            return ""
+        if value.startswith("["):
+            closing = value.find("]")
+            if closing == -1:
+                return ""
+            value = value[1:closing]
+        elif value.count(":") == 1 and "." in value:
+            value = value.rsplit(":", 1)[0]
+        try:
+            ipaddress.ip_address(value)
+        except ValueError:
+            return ""
+        return value
+
+    def _forwarded_ip_chain(self) -> list[str]:
+        x_forwarded_for = str(self.headers.get("X-Forwarded-For", "") or "")
+        chain = [
+            candidate
+            for candidate in (
+                self._normalize_forwarded_ip(part)
+                for part in x_forwarded_for.split(",")
+            )
+            if candidate
+        ]
+        if chain:
+            return chain
+
+        forwarded_header = str(self.headers.get("Forwarded", "") or "")
+        forwarded_chain: list[str] = []
+        for segment in forwarded_header.split(","):
+            for item in segment.split(";"):
+                candidate = self._normalize_forwarded_ip(item)
+                if candidate:
+                    forwarded_chain.append(candidate)
+                    break
+        return forwarded_chain
+
     def _request_scheme(self) -> str:
+        if not self._request_via_trusted_proxy():
+            return "http"
         forwarded = str(self.headers.get("X-Forwarded-Proto", "") or "").split(",", 1)[0].strip()
         if forwarded:
             return forwarded
         return "http"
 
     def _request_host_name(self) -> str:
-        raw_host = (
-            str(self.headers.get("X-Forwarded-Host", "") or "").split(",", 1)[0].strip()
-            or str(self.headers.get("Host", "127.0.0.1") or "127.0.0.1").strip()
-        )
+        raw_host = str(self.headers.get("Host", "127.0.0.1") or "127.0.0.1").strip()
+        if self._request_via_trusted_proxy():
+            raw_host = (
+                str(self.headers.get("X-Forwarded-Host", "") or "").split(",", 1)[0].strip()
+                or raw_host
+            )
         if raw_host.startswith("["):
             closing = raw_host.find("]")
             if closing != -1:
@@ -6009,6 +6087,20 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 values.append(item)
         return values
 
+    def _parse_ip_network_list(self, raw: str, label: str) -> list[str]:
+        values = []
+        for part in raw.replace("\n", ",").split(","):
+            item = part.strip()
+            if not item:
+                continue
+            try:
+                ipaddress.ip_network(item, strict=False)
+            except ValueError as exc:
+                raise ValueError(f"{label} contains invalid IP/CIDR '{item}'.") from exc
+            if item not in values:
+                values.append(item)
+        return values
+
     def _validate_output_key(self, value: str, label: str) -> str:
         key = value.strip()
         if not key:
@@ -6058,17 +6150,29 @@ class GatewayHandler(BaseHTTPRequestHandler):
         return username, password
 
     def _client_ip(self) -> str:
-        return self.client_address[0] if self.client_address else "-"
+        peer_ip = self._raw_client_ip()
+        if not self._request_via_trusted_proxy():
+            return peer_ip
+
+        proxy_allowlist = runtime.trusted_proxy_allowlist()
+        for candidate in reversed(self._forwarded_ip_chain()):
+            if not self._ip_in_allowlist(candidate, proxy_allowlist):
+                return candidate
+
+        real_ip = self._normalize_forwarded_ip(str(self.headers.get("X-Real-IP", "") or ""))
+        if real_ip:
+            return real_ip
+
+        chain = self._forwarded_ip_chain()
+        if chain:
+            return chain[0]
+        return peer_ip
 
     def _admin_ip_allowed(self) -> bool:
         allowlist = SETTINGS.admin_access_allowlist
         if not allowlist:
             return True
-        try:
-            address = ipaddress.ip_address(self._client_ip())
-        except ValueError:
-            return False
-        return any(address in ipaddress.ip_network(entry, strict=False) for entry in allowlist)
+        return self._ip_in_allowlist(self._client_ip(), allowlist)
 
     def _ensure_admin_ip_allowed(self) -> bool:
         if self._admin_ip_allowed():
@@ -6210,6 +6314,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
             form = self._parse_form()
             retention_raw = str(form.get("log_retention_hours", "")).strip()
             log_retention_hours = int(retention_raw) if retention_raw else None
+            trusted_proxy_ips = self._parse_ip_network_list(
+                str(form.get("trusted_proxy_ips", "")),
+                "Trusted proxy IPs",
+            )
             gateway_response_mode = str(form.get("gateway_response_mode", "default")).strip().lower() or "default"
             gateway_response_output_profile = (
                 str(form.get("gateway_response_output_profile", "")).strip().lower()
@@ -6255,6 +6363,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             message = save_gateway_settings(
                 runtime.config_path,
                 log_retention_hours=log_retention_hours,
+                trusted_proxy_ips=trusted_proxy_ips,
                 gateway_response_mode=gateway_response_mode,
                 gateway_response_output_profile=gateway_response_output_profile,
                 gateway_response_success_key=gateway_response_success_key,

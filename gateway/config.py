@@ -9,6 +9,13 @@ from typing import Any, Callable
 import yaml
 from gateway.output_sandbox import validate_custom_output_code
 
+DEFAULT_TRUSTED_PROXY_IPS = [
+    "127.0.0.1",
+    "172.24.0.0/12",
+    "192.168.0.0/16",
+    "10.0.0.0/8",
+]
+
 
 CONFIG_PATH = Path("config/services.yaml")
 PATH_TOKEN_PATTERN = re.compile(r"{([a-zA-Z_][a-zA-Z0-9_]*)(:path)?}")
@@ -248,6 +255,7 @@ class GatewayConfig:
     gateway_responses: GatewayResponseConfig = field(default_factory=GatewayResponseConfig)
     log_aggregators: list[LogAggregatorConfig] = field(default_factory=list)
     log_retention_hours: int | None = None
+    trusted_proxy_ips: list[str] = field(default_factory=lambda: list(DEFAULT_TRUSTED_PROXY_IPS))
 
 
 def compile_gateway_path(pattern: str) -> re.Pattern[str]:
@@ -692,6 +700,28 @@ def _load_log_retention_hours(observability_block: Any) -> int | None:
     if retention_hours < 0:
         raise ValueError("Config 'observability.log_retention_hours' must be zero or positive.")
     return retention_hours or None
+
+
+def _load_trusted_proxy_ips(observability_block: Any) -> list[str]:
+    if observability_block in (None, {}):
+        return list(DEFAULT_TRUSTED_PROXY_IPS)
+    if not isinstance(observability_block, dict):
+        raise ValueError("Config 'observability' must be a mapping.")
+
+    raw_value = observability_block.get("trusted_proxy_ips")
+    if raw_value in (None, "", []):
+        return list(DEFAULT_TRUSTED_PROXY_IPS)
+    if isinstance(raw_value, str):
+        items = [item.strip() for item in raw_value.replace("\n", ",").split(",") if item.strip()]
+    elif isinstance(raw_value, list):
+        items = [str(item).strip() for item in raw_value if str(item).strip()]
+    else:
+        raise ValueError("Config 'observability.trusted_proxy_ips' must be a list or comma-separated string.")
+    validated = _validate_ip_allowlist(
+        items,
+        label="Config 'observability.trusted_proxy_ips'",
+    )
+    return validated or list(DEFAULT_TRUSTED_PROXY_IPS)
 
 
 def _validate_ip_allowlist(ip_allowlist: list[str], *, label: str) -> list[str]:
@@ -1302,6 +1332,7 @@ def load_gateway_config_document(document: dict[str, Any]) -> GatewayConfig:
     observability = raw.get("observability")
     log_aggregators = _load_log_aggregators_block(observability)
     log_retention_hours = _load_log_retention_hours(observability)
+    trusted_proxy_ips = _load_trusted_proxy_ips(observability)
     services = _load_services_block(
         raw.get("services") or {},
         output_profiles=output_profiles,
@@ -1319,6 +1350,7 @@ def load_gateway_config_document(document: dict[str, Any]) -> GatewayConfig:
         gateway_responses=gateway_responses,
         log_aggregators=log_aggregators,
         log_retention_hours=log_retention_hours,
+        trusted_proxy_ips=trusted_proxy_ips,
     )
 
 

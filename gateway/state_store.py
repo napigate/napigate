@@ -262,9 +262,17 @@ class PostgresStateStore:
 
     def _dsn_label(self) -> str:
         if self._dsn.startswith(("postgres://", "postgresql://")):
-            parsed = urlsplit(self._dsn)
+            try:
+                parsed = urlsplit(self._dsn)
+            except ValueError:
+                LOGGER.warning(
+                    "Could not parse PostgreSQL DSN for source label. Falling back to a generic label."
+                )
+                return "postgresql"
             host = parsed.hostname or "postgres"
             database = parsed.path.lstrip("/") or "postgres"
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
             return f"postgresql://{host}/{database}"
         return "postgresql"
 

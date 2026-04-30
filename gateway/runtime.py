@@ -24,6 +24,7 @@ from gateway.cache import CacheBackend, RateLimitBackend, make_backends
 from gateway.config import (
     AuthMethodConfig,
     ClientConfig,
+    DEFAULT_TRUSTED_PROXY_IPS,
     EndpointConfig,
     GatewayResponseConfig,
     OutputProfileConfig,
@@ -150,6 +151,7 @@ class GatewayRuntime:
         self.clients: dict[str, ClientConfig] = {}
         self.output_profiles: dict[str, OutputProfileConfig] = {}
         self.gateway_responses = GatewayResponseConfig()
+        self.trusted_proxy_ips: list[str] = list(DEFAULT_TRUSTED_PROXY_IPS)
         self.log_store = RequestLogStore()
         self._cache: CacheBackend
         self._rate_limiter: RateLimitBackend
@@ -173,6 +175,7 @@ class GatewayRuntime:
             self.clients = clients
             self.output_profiles = output_profiles
             self.gateway_responses = gateway_responses
+            self.trusted_proxy_ips = list(gateway_config.trusted_proxy_ips)
             self._cache.clear()
             self._route_round_robin.clear()
             self._config_signature = signature
@@ -828,6 +831,10 @@ class GatewayRuntime:
     def output_profile_count(self) -> int:
         with self._lock:
             return len(self.output_profiles)
+
+    def trusted_proxy_allowlist(self) -> list[str]:
+        with self._lock:
+            return list(self.trusted_proxy_ips)
 
     def _route_response_cache_config(self, matched: MatchedEndpoint) -> ResponseCacheConfig:
         for cache_config in (

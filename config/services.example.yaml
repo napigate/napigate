@@ -156,6 +156,13 @@ observability:
   # Leave unset for unlimited retention. When set, monitor rows and rotated
   # file logs older than this many hours are deleted by an hourly cleanup job.
   log_retention_hours: 168
+  # Only forwarded headers from these direct proxy IPs/CIDRs are trusted when
+  # resolving the end-user client IP, scheme, and host.
+  trusted_proxy_ips:
+    - 127.0.0.1
+    - 172.24.0.0/12
+    - 192.168.0.0/16
+    - 10.0.0.0/8
   log_aggregators:
     audit_loki:
       enabled: false

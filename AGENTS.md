@@ -757,6 +757,7 @@ pip install requests pyyaml
   - `NAPIGATE_IMAGE_GROUP`
 - `NAPIGATE_ADMIN_USERNAME` and `NAPIGATE_ADMIN_PASSWORD` protect both monitor and admin pages.
 - `NAPIGATE_ADMIN_ACCESS_WHITELIST_IPS` restricts `/__admin` UI and admin API requests to comma-separated IP/CIDR ranges when set.
+- `observability.trusted_proxy_ips` lists the reverse proxies whose forwarded IP headers can be trusted; when set, monitor and audit logs resolve the end-user IP from `X-Forwarded-For`, `Forwarded`, or `X-Real-IP`.
 - `/__admin`, `/__monitor`, and `/__logout` do not exist on the public listener by design.
 - `NAPIGATE_SECURITY_CONFIG` can override the default security file path.
 - Default mirrors:
