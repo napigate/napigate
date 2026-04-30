@@ -5614,12 +5614,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         return "http"
 
     def _request_host_name(self) -> str:
-        raw_host = str(self.headers.get("Host", "127.0.0.1") or "127.0.0.1").strip()
-        if self._request_via_trusted_proxy():
-            raw_host = (
-                str(self.headers.get("X-Forwarded-Host", "") or "").split(",", 1)[0].strip()
-                or raw_host
-            )
+        raw_host = self._request_authority()
         if raw_host.startswith("["):
             closing = raw_host.find("]")
             if closing != -1:
@@ -5628,9 +5623,29 @@ class GatewayHandler(BaseHTTPRequestHandler):
             return raw_host.rsplit(":", 1)[0]
         return raw_host
 
+    def _request_authority(self) -> str:
+        raw_host = str(self.headers.get("Host", "127.0.0.1") or "127.0.0.1").strip()
+        if not self._request_via_trusted_proxy():
+            return raw_host
+
+        forwarded_host = str(self.headers.get("X-Forwarded-Host", "") or "").split(",", 1)[0].strip()
+        authority = forwarded_host or raw_host
+        forwarded_port = str(self.headers.get("X-Forwarded-Port", "") or "").split(",", 1)[0].strip()
+        scheme = str(self.headers.get("X-Forwarded-Proto", "") or "").split(",", 1)[0].strip() or "http"
+        if (
+            forwarded_port
+            and ":" not in authority
+            and not ((scheme == "http" and forwarded_port == "80") or (scheme == "https" and forwarded_port == "443"))
+        ):
+            authority = f"{authority}:{forwarded_port}"
+        return authority
+
     def _base_url_for_port(self, port: int) -> str:
-        host = self._request_host_name() or "127.0.0.1"
         scheme = self._request_scheme()
+        if self._request_via_trusted_proxy():
+            authority = self._request_authority() or "127.0.0.1"
+            return f"{scheme}://{authority}"
+        host = self._request_host_name() or "127.0.0.1"
         if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
             return f"{scheme}://{host}"
         return f"{scheme}://{host}:{port}"
