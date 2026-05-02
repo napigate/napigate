@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 import yaml
 
 from gateway.admin_ops import (
+    backup_scope_definition,
     build_status_query,
     delete_client,
     delete_endpoint,
@@ -31,6 +32,8 @@ from gateway.admin_ops import (
     delete_route,
     delete_service,
     delete_user,
+    export_backup_scope,
+    import_backup_scope,
     save_client,
     save_endpoint,
     save_gateway_settings,
@@ -3884,6 +3887,189 @@ def render_admin_page(
           `;
         }}
 
+        function backupScopeCatalog() {{
+          return Array.isArray(STATE.backup_scopes) ? STATE.backup_scopes : [];
+        }}
+
+        function backupScopeByCode(code) {{
+          const target = String(code || "").trim().toLowerCase();
+          return backupScopeCatalog().find((scope) => String(scope.code || "").trim().toLowerCase() === target) || null;
+        }}
+
+        function backupScopeSummaryHtml(scopeCode) {{
+          const scope = backupScopeByCode(scopeCode);
+          if (!scope) {{
+            return '<div class="muted">No backup scope selected.</div>';
+          }}
+          const group = String(scope.group || "config");
+          const groupLabel = group === "bundle"
+            ? "Full snapshot"
+            : group === "security"
+              ? "Security section"
+              : "Config section";
+          return `
+            <div><strong>${{esc(scope.title || scope.code || "Backup scope")}}</strong></div>
+            <div class="muted" style="margin-top:6px;">${{esc(scope.description || "")}}</div>
+            <div style="margin-top:8px;"><span class="tag">${{esc(groupLabel)}}</span></div>
+          `;
+        }}
+
+        function syncBackupControls(root = document) {{
+          const card = root.querySelector("[data-backup-card]");
+          if (!card) return;
+          const exportSelect = card.querySelector('[name="backup_export_scope"]');
+          const importSelect = card.querySelector('[name="backup_import_scope"]');
+          const exportSummary = card.querySelector("[data-backup-export-summary]");
+          const importSummary = card.querySelector("[data-backup-import-summary]");
+
+          if (exportSummary) {{
+            exportSummary.innerHTML = backupScopeSummaryHtml(exportSelect?.value || "");
+          }}
+          if (importSummary) {{
+            importSummary.innerHTML = backupScopeSummaryHtml(importSelect?.value || "");
+          }}
+
+          const refresh = () => syncBackupControls(root);
+          if (exportSelect && !exportSelect.dataset.boundBackup) {{
+            exportSelect.dataset.boundBackup = "1";
+            exportSelect.addEventListener("change", refresh);
+          }}
+          if (importSelect && !importSelect.dataset.boundBackup) {{
+            importSelect.dataset.boundBackup = "1";
+            importSelect.addEventListener("change", refresh);
+          }}
+        }}
+
+        function backupFileName(scope, format) {{
+          const stamp = new Date().toISOString().replace(/[:-]/g, "").replace(/\\..+/, "").replace("T", "-");
+          const extension = format === "json" ? "json" : "yaml";
+          return `napigate-${{scope || "backup"}}-${{stamp}}.${{extension}}`;
+        }}
+
+        function downloadTextFile(filename, text, mimeType) {{
+          const blob = new Blob([text], {{ type: mimeType }});
+          const url = URL.createObjectURL(blob);
+          const anchor = document.createElement("a");
+          anchor.href = url;
+          anchor.download = filename;
+          document.body.appendChild(anchor);
+          anchor.click();
+          anchor.remove();
+          window.setTimeout(() => URL.revokeObjectURL(url), 250);
+        }}
+
+        async function fetchBackupExport(scope, format) {{
+          const response = await fetch(`/__admin/api/backup?scope=${{encodeURIComponent(scope)}}&format=${{encodeURIComponent(format)}}`, {{
+            headers: {{
+              "Accept": format === "json" ? "application/json" : "application/yaml",
+              "X-Requested-With": "XMLHttpRequest",
+            }},
+          }});
+          const text = await response.text();
+          if (!response.ok) {{
+            let detail = text || `HTTP ${{response.status}}`;
+            try {{
+              const payload = JSON.parse(text);
+              detail = payload.detail || detail;
+            }} catch (_error) {{
+              // Keep raw text detail.
+            }}
+            throw new Error(detail);
+          }}
+          return {{
+            text,
+            mimeType: String(response.headers.get("Content-Type") || (format === "json" ? "application/json" : "application/yaml")),
+          }};
+        }}
+
+        async function downloadBackupExport(button) {{
+          const card = button?.closest("[data-backup-card]");
+          if (!card) return;
+          const scope = String(card.querySelector('[name="backup_export_scope"]')?.value || "").trim();
+          const format = String(card.querySelector('[name="backup_export_format"]')?.value || "yaml").trim().toLowerCase() || "yaml";
+          if (!scope) {{
+            showAdminNotice("Select a backup scope first.", "error");
+            return;
+          }}
+          showAdminNotice("");
+          button?.setAttribute("disabled", "disabled");
+          try {{
+            const exported = await fetchBackupExport(scope, format);
+            downloadTextFile(backupFileName(scope, format), exported.text, exported.mimeType);
+            const label = backupScopeByCode(scope)?.title || scope;
+            showAdminNotice(`${{label}} exported.`);
+          }} catch (error) {{
+            showAdminNotice(String(error?.message || error), "error");
+          }} finally {{
+            button?.removeAttribute("disabled");
+          }}
+        }}
+
+        function readTextFile(file) {{
+          return new Promise((resolve, reject) => {{
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result || ""));
+            reader.onerror = () => reject(new Error(`Could not read ${{file?.name || "backup file"}}.`));
+            reader.readAsText(file);
+          }});
+        }}
+
+        async function submitBackupImport(event, form) {{
+          event.preventDefault();
+          const scope = String(form?.querySelector('[name="backup_import_scope"]')?.value || "").trim();
+          const scopeInfo = backupScopeByCode(scope);
+          if (!scope || !scopeInfo) {{
+            showAdminNotice("Select a valid backup scope first.", "error");
+            return false;
+          }}
+          const file = form.querySelector('[name="backup_import_file"]')?.files?.[0] || null;
+          const textarea = form.querySelector('[name="backup_import_body"]');
+          const submitButton = form.querySelector('[type="submit"]');
+          let text = "";
+          try {{
+            text = file ? await readTextFile(file) : String(textarea?.value || "");
+          }} catch (error) {{
+            showAdminNotice(String(error?.message || error), "error");
+            return false;
+          }}
+          if (!text.trim()) {{
+            showAdminNotice("Provide a backup file or paste YAML/JSON before importing.", "error");
+            return false;
+          }}
+          const confirmText = scope === "full"
+            ? "Import the full config and security snapshot? This replaces both current documents."
+            : `Import ${{scopeInfo.title}}? This replaces the current section.`;
+          if (!window.confirm(confirmText)) {{
+            return false;
+          }}
+          showAdminNotice("");
+          submitButton?.setAttribute("disabled", "disabled");
+          try {{
+            const response = await fetch(`/__admin/api/import?scope=${{encodeURIComponent(scope)}}`, {{
+              method: "POST",
+              headers: {{
+                "Accept": "application/json",
+                "Content-Type": "application/yaml; charset=UTF-8",
+                "X-Requested-With": "XMLHttpRequest",
+              }},
+              body: text,
+            }});
+            const payload = await response.json().catch(() => ({{}}));
+            if (!response.ok) {{
+              throw new Error(payload.detail || `HTTP ${{response.status}}`);
+            }}
+            applyState(payload.state);
+            form.reset();
+            syncBackupControls(document);
+            showAdminNotice(payload.message || `${{scopeInfo.title}} imported.`);
+          }} catch (error) {{
+            showAdminNotice(String(error?.message || error), "error");
+          }} finally {{
+            submitButton?.removeAttribute("disabled");
+          }}
+          return false;
+        }}
+
         function renderConfig() {{
           const wrap = document.getElementById("config-wrap");
           if (!wrap) return;
@@ -3913,6 +4099,18 @@ def render_admin_page(
           const securityConfigSource = String(STATE.config_paths?.security || "");
           const stateStoreMode = String(STATE.store?.mode || "file");
           const auditEnabled = Boolean(STATE.store?.audit_enabled);
+          const backupScopes = Array.isArray(STATE.backup_scopes) ? STATE.backup_scopes : [];
+          const backupScopeOptions = backupScopes.length
+            ? backupScopes.map((scope, index) => `
+                <option value="${{esc(scope.code)}}" ${{index === 0 ? "selected" : ""}}>
+                  ${{esc(scope.title)}}
+                </option>
+              `).join("")
+            : '<option value="">No backup scopes available</option>';
+          const backupActionsDisabled = backupScopes.length ? "" : "disabled";
+          const backupAccessLabel = backupScopes.length
+            ? `${{backupScopes.length}} backup scope(s) available`
+            : "No backup scopes available for this account";
           const gatewayResponseProfileOptions = STATE.output_profiles.length
             ? STATE.output_profiles.map((profile) => `
                 <option value="${{esc(profile.slug)}}" ${{gatewayResponseOutputProfile === profile.slug ? "selected" : ""}}>
@@ -3927,37 +4125,93 @@ def render_admin_page(
               : "Default detail shape";
 
           wrap.innerHTML = `
-            <form method="post" action="/__admin/settings/save" onsubmit="return submitGatewaySettings(event, this)">
-              <div class="card">
-                <div class="section-head" style="margin-bottom: 14px;">
-                  <div>
-                    <h3 class="section-title" style="font-size:16px; margin-bottom:4px;">Control Plane</h3>
-                    <div class="section-note">The public listener serves gateway traffic and token issuance. Admin, monitor, and logout stay on the admin listener only.</div>
-                  </div>
-                  <div class="actions">
-                    <span class="tag">Store: ${{esc(stateStoreMode.toUpperCase())}}</span>
-                    <span class="tag">${{auditEnabled ? "Audit enabled" : "Audit disabled"}}</span>
-                  </div>
+            <div class="card">
+              <div class="section-head" style="margin-bottom: 14px;">
+                <div>
+                  <h3 class="section-title" style="font-size:16px; margin-bottom:4px;">Control Plane</h3>
+                  <div class="section-note">The public listener serves gateway traffic and token issuance. Admin, monitor, and logout stay on the admin listener only.</div>
                 </div>
-                <div class="form-grid">
-                  <div class="full detail-box">
-                    <div><strong>Public listener</strong></div>
-                    <div class="mono">${{esc(publicBaseUrl || "-")}}</div>
-                  </div>
-                  <div class="full detail-box">
-                    <div><strong>Admin listener</strong></div>
-                    <div class="mono">${{esc(adminBaseUrl || "-")}}</div>
-                  </div>
-                  <div class="full detail-box">
-                    <div><strong>Services config source</strong></div>
-                    <div class="mono">${{esc(servicesConfigSource || "-")}}</div>
-                  </div>
-                  <div class="full detail-box">
-                    <div><strong>Security config source</strong></div>
-                    <div class="mono">${{esc(securityConfigSource || "-")}}</div>
-                  </div>
+                <div class="actions">
+                  <span class="tag">Store: ${{esc(stateStoreMode.toUpperCase())}}</span>
+                  <span class="tag">${{auditEnabled ? "Audit enabled" : "Audit disabled"}}</span>
                 </div>
               </div>
+              <div class="form-grid">
+                <div class="full detail-box">
+                  <div><strong>Public listener</strong></div>
+                  <div class="mono">${{esc(publicBaseUrl || "-")}}</div>
+                </div>
+                <div class="full detail-box">
+                  <div><strong>Admin listener</strong></div>
+                  <div class="mono">${{esc(adminBaseUrl || "-")}}</div>
+                </div>
+                <div class="full detail-box">
+                  <div><strong>Services config source</strong></div>
+                  <div class="mono">${{esc(servicesConfigSource || "-")}}</div>
+                </div>
+                <div class="full detail-box">
+                  <div><strong>Security config source</strong></div>
+                  <div class="mono">${{esc(securityConfigSource || "-")}}</div>
+                </div>
+              </div>
+            </div>
+            <div class="card" data-backup-card style="margin-top: 12px;">
+              <div class="section-head" style="margin-bottom: 14px;">
+                <div>
+                  <h3 class="section-title" style="font-size:16px; margin-bottom:4px;">Backup And Import</h3>
+                  <div class="section-note">Download full snapshots or restore a single config/security section without leaving the control plane.</div>
+                </div>
+                <div class="actions">
+                  <span class="tag">${{esc(backupAccessLabel)}}</span>
+                </div>
+              </div>
+              <div class="form-grid">
+                <label>
+                  <span>Export Scope</span>
+                  <select name="backup_export_scope" ${{backupActionsDisabled}}>
+                    ${{backupScopeOptions}}
+                  </select>
+                </label>
+                <label>
+                  <span>Export Format</span>
+                  <select name="backup_export_format" ${{backupActionsDisabled}}>
+                    <option value="yaml" selected>YAML</option>
+                    <option value="json">JSON</option>
+                  </select>
+                </label>
+                <div class="full detail-box" data-backup-export-summary>
+                  <div class="muted">Select a backup scope to see what will be exported.</div>
+                </div>
+                <div class="actions full">
+                  <button class="btn light" type="button" onclick="downloadBackupExport(this)" ${{backupActionsDisabled}}>Download Export</button>
+                </div>
+              </div>
+              <form data-backup-import-form onsubmit="return submitBackupImport(event, this)" style="margin-top: 14px;">
+                <div class="form-grid">
+                  <label>
+                    <span>Import Scope</span>
+                    <select name="backup_import_scope" ${{backupActionsDisabled}}>
+                      ${{backupScopeOptions}}
+                    </select>
+                  </label>
+                  <label>
+                    <span>Backup File</span>
+                    <input name="backup_import_file" type="file" accept=".yaml,.yml,.json,text/plain,application/json,application/yaml,text/yaml" ${{backupActionsDisabled}}>
+                  </label>
+                  <div class="full detail-box" data-backup-import-summary>
+                    <div class="muted">For a full snapshot, provide a mapping with <span class="mono">config</span> and <span class="mono">security</span>. For single sections, paste only that raw section body.</div>
+                  </div>
+                  <label class="full">
+                    <span>Import Body (YAML or JSON)</span>
+                    <textarea name="backup_import_body" rows="10" placeholder="Paste YAML or JSON here when you do not want to upload a file." ${{backupActionsDisabled}}></textarea>
+                  </label>
+                  <div class="actions full">
+                    <button type="submit" ${{backupActionsDisabled}}>Import Selected Scope</button>
+                  </div>
+                </div>
+              </form>
+            </div>
+            <form method="post" action="/__admin/settings/save" data-gateway-settings-form onsubmit="return submitGatewaySettings(event, this)" style="margin-top: 12px;">
               <div class="card">
                 <div class="section-head" style="margin-bottom: 14px;">
                   <div>
@@ -4075,10 +4329,11 @@ def render_admin_page(
             </form>
           `;
           decorateHelp(wrap);
-          const form = wrap.querySelector("form");
+          const form = wrap.querySelector("[data-gateway-settings-form]");
           if (form) {{
             syncGatewayResponseSettings(form);
           }}
+          syncBackupControls(wrap);
         }}
 
         function renderAudit() {{
@@ -6662,6 +6917,14 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            if parsed.path == "/__admin/api/backup" and self.command == "GET":
+                if self._handle_admin_backup_export(parsed):
+                    return
+
+            if parsed.path == "/__admin/api/import" and self.command == "POST":
+                if self._handle_admin_backup_import(parsed):
+                    return
+
             if parsed.path == "/__admin/api/config":
                 if self._require_permission("services_manage") is None:
                     return
@@ -7323,7 +7586,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             return "yaml"
         return "json"
 
-    def _send_config_document(self, document: dict[str, Any], *, parsed) -> None:
+    def _send_structured_document(self, document: Any, *, parsed) -> None:
         response_format = self._config_response_format(parsed)
         if response_format == "yaml":
             body = yaml.safe_dump(document, sort_keys=False, allow_unicode=False).encode("utf-8")
@@ -7336,6 +7599,19 @@ class GatewayHandler(BaseHTTPRequestHandler):
             )
             return
         self._send_json(document)
+
+    def _send_config_document(self, document: dict[str, Any], *, parsed) -> None:
+        self._send_structured_document(document, parsed=parsed)
+
+    def _require_backup_scope_permissions(self, scope: str) -> AuthenticatedPrincipal | None:
+        definition = backup_scope_definition(scope)
+        granted: AuthenticatedPrincipal | None = None
+        for permission in definition.get("permissions") or ():
+            principal = self._require_permission(str(permission))
+            if principal is None:
+                return None
+            granted = principal
+        return granted
 
     def _client_document_by_slug(self, slug: str) -> dict[str, Any] | None:
         document = load_config_document(runtime.config_path)
@@ -8094,6 +8370,58 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self._send_admin_mutation_success(message)
         except Exception as exc:  # noqa: BLE001
             self._send_admin_mutation_error(exc)
+
+    def _handle_admin_backup_export(self, parsed) -> bool:
+        try:
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            scope = str((query.get("scope") or ["full"])[-1]).strip().lower() or "full"
+            principal = self._require_backup_scope_permissions(scope)
+            if principal is None:
+                return True
+            payload = export_backup_scope(
+                runtime.config_path,
+                security.config_path,
+                scope=scope,
+            )
+            self._audit_admin_change(
+                action="export",
+                target_kind="backup",
+                target_ref=scope,
+                message=f"Exported {backup_scope_definition(scope)['title']}.",
+            )
+            self._send_structured_document(payload, parsed=parsed)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._send_json({"detail": str(exc)}, status_code=400)
+            return True
+
+    def _handle_admin_backup_import(self, parsed) -> bool:
+        try:
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            scope = str((query.get("scope") or ["full"])[-1]).strip().lower() or "full"
+            principal = self._require_backup_scope_permissions(scope)
+            if principal is None:
+                return True
+            payload = self._parse_structured_body(label="Backup import")
+            message = import_backup_scope(
+                runtime.config_path,
+                security.config_path,
+                scope=scope,
+                payload=payload,
+            )
+            runtime.load()
+            security.load()
+            self._audit_admin_change(
+                action="import",
+                target_kind="backup",
+                target_ref=scope,
+                message=message,
+            )
+            self._send_admin_mutation_success(message)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._send_json({"detail": str(exc)}, status_code=400)
+            return True
 
     def _handle_admin_config_get(self, parsed) -> None:
         self._send_config_document(load_config_document(runtime.config_path), parsed=parsed)

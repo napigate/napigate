@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from gateway.admin_ops import list_backup_scopes
 from gateway.config import (
     DEFAULT_TRUSTED_PROXY_IPS,
     ROUTE_PROTOCOL_CHOICES,
@@ -374,6 +375,7 @@ def build_admin_page_state(
             "roles": principal.roles,
             "permissions": sorted(principal.permissions),
         },
+        "backup_scopes": list_backup_scopes(permissions=principal.permissions),
         "config_paths": {
             "services": services_config_path,
             "security": security_config_path,

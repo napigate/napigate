@@ -608,6 +608,9 @@ Common:
 - Admin config API:
   - `GET /__admin/api/config`
   - `PUT /__admin/api/config`
+- Admin backup/import APIs:
+  - `GET /__admin/api/backup?scope=full&format=yaml`
+  - `POST /__admin/api/import?scope=services`
 - Admin client APIs:
   - `GET /__admin/api/clients`
   - `POST /__admin/api/clients`
@@ -661,6 +664,7 @@ Common:
 - Monitor and admin Live views now expose the final upstream URL plus a copyable rendered `cURL` for proxied requests.
 - The Admin `Live` tab also includes a 24-hour summary with hourly request/failure buckets and top service/path activity.
 - The Config tab now shows the current public/admin listener URLs plus the active state-store mode.
+- The Config tab now also exposes backup/export and import for either a full snapshot (`config` + `security`) or individual sections such as `services`, `routes`, `clients`, `output_profiles`, `observability`, `roles`, and `users`.
 - Client forms support:
   - slug, title, and code
   - title and code

@@ -964,6 +964,8 @@ Examples:
 
 - `GET /__admin/api/config`
 - `PUT /__admin/api/config`
+- `GET /__admin/api/backup?scope=full&format=yaml`
+- `POST /__admin/api/import?scope=services`
 - `GET /__admin/api/clients`
 - `POST /__admin/api/clients`
 - `GET /__admin/api/clients/{client_slug}`
@@ -978,7 +980,9 @@ Examples:
 Notes:
 
 - These routes require an authenticated admin session plus the normal `services_manage` permission.
+- Backup/import scopes that touch security data require `security_manage`; the full snapshot scope requires both `services_manage` and `security_manage`.
 - Full config replacement accepts JSON or YAML request bodies.
+- The Config tab can now export or import either a full snapshot (`config` + `security`) or an individual section such as `services`, `routes`, `clients`, `output_profiles`, `observability`, `roles`, or `users`.
 - Client automation should use `slug`, not the display title.
 
 ## Example Requests

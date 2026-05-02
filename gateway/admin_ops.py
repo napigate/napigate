@@ -1,16 +1,134 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
 
-from gateway.config import DEFAULT_TRUSTED_PROXY_IPS, load_config_document, save_config_document
+from gateway.config import (
+    DEFAULT_TRUSTED_PROXY_IPS,
+    load_config_document,
+    load_gateway_config_document,
+    normalize_config_document,
+    save_config_document,
+)
 from gateway.security import (
     ALL_PERMISSIONS,
     hash_password,
     load_security_document,
     save_security_document,
+    validate_security_document,
 )
+
+
+BACKUP_SCOPE_DEFINITIONS = (
+    {
+        "code": "full",
+        "title": "Full Snapshot",
+        "description": "Export or restore config plus security together.",
+        "permissions": ("services_manage", "security_manage"),
+        "group": "bundle",
+    },
+    {
+        "code": "config",
+        "title": "Services Config Document",
+        "description": "The entire services config document, including services, routes, clients, output profiles, and observability.",
+        "permissions": ("services_manage",),
+        "group": "config",
+    },
+    {
+        "code": "services",
+        "title": "Services",
+        "description": "Only the services mapping with endpoints and service-level settings.",
+        "permissions": ("services_manage",),
+        "group": "config",
+    },
+    {
+        "code": "routes",
+        "title": "Routes",
+        "description": "Only the public route list and target strategies.",
+        "permissions": ("services_manage",),
+        "group": "config",
+    },
+    {
+        "code": "clients",
+        "title": "Clients",
+        "description": "Only the client auth and access-scope list.",
+        "permissions": ("services_manage",),
+        "group": "config",
+    },
+    {
+        "code": "output_profiles",
+        "title": "Output Profiles",
+        "description": "Only reusable output profile definitions.",
+        "permissions": ("services_manage",),
+        "group": "config",
+    },
+    {
+        "code": "gateway_responses",
+        "title": "Gateway Responses",
+        "description": "Only the gateway-generated public error response contract.",
+        "permissions": ("services_manage",),
+        "group": "config",
+    },
+    {
+        "code": "observability",
+        "title": "Observability",
+        "description": "Only retention, trusted proxies, and log aggregators.",
+        "permissions": ("services_manage",),
+        "group": "config",
+    },
+    {
+        "code": "security",
+        "title": "Security Document",
+        "description": "The entire roles and users security document.",
+        "permissions": ("security_manage",),
+        "group": "security",
+    },
+    {
+        "code": "roles",
+        "title": "Roles",
+        "description": "Only role definitions and permissions.",
+        "permissions": ("security_manage",),
+        "group": "security",
+    },
+    {
+        "code": "users",
+        "title": "Users",
+        "description": "Only user accounts, role assignments, and password hashes.",
+        "permissions": ("security_manage",),
+        "group": "security",
+    },
+)
+BACKUP_SCOPE_MAP = {item["code"]: item for item in BACKUP_SCOPE_DEFINITIONS}
+CONFIG_BACKUP_SCOPES = {
+    "config",
+    "services",
+    "routes",
+    "clients",
+    "output_profiles",
+    "gateway_responses",
+    "observability",
+}
+SECURITY_BACKUP_SCOPES = {"security", "roles", "users"}
+
+
+def backup_scope_definition(scope: str) -> dict[str, Any]:
+    normalized = str(scope or "").strip().lower()
+    definition = BACKUP_SCOPE_MAP.get(normalized)
+    if definition is None:
+        raise ValueError(f"Unknown backup scope '{scope}'.")
+    return dict(definition)
+
+
+def list_backup_scopes(*, permissions: set[str] | list[str] | tuple[str, ...]) -> list[dict[str, Any]]:
+    granted = set(str(item) for item in permissions)
+    visible: list[dict[str, Any]] = []
+    for definition in BACKUP_SCOPE_DEFINITIONS:
+        required = set(definition["permissions"])
+        if required.issubset(granted):
+            visible.append(dict(definition))
+    return visible
 
 
 def build_status_query(*, message: str = "", error: str = "") -> str:
@@ -247,6 +365,144 @@ def save_gateway_settings(
 
     save_config_document(config_path, document)
     return "Gateway settings saved."
+
+
+def _export_config_scope(document: dict[str, Any], *, scope: str) -> Any:
+    if scope == "config":
+        return document
+    if scope == "services":
+        return deepcopy(document.get("services") or {})
+    if scope == "routes":
+        return deepcopy(document.get("routes") or [])
+    if scope == "clients":
+        return deepcopy(document.get("clients") or [])
+    if scope == "output_profiles":
+        return deepcopy(document.get("output_profiles") or {})
+    if scope == "gateway_responses":
+        return deepcopy(document.get("gateway_responses") or {})
+    if scope == "observability":
+        return deepcopy(document.get("observability") or {})
+    raise ValueError(f"Unknown config backup scope '{scope}'.")
+
+
+def _export_security_scope(document: dict[str, Any], *, scope: str) -> Any:
+    if scope == "security":
+        return document
+    if scope == "roles":
+        return deepcopy(document.get("roles") or {})
+    if scope == "users":
+        return deepcopy(document.get("users") or {})
+    raise ValueError(f"Unknown security backup scope '{scope}'.")
+
+
+def export_backup_scope(
+    config_path: Path,
+    security_path: Path,
+    *,
+    scope: str,
+) -> Any:
+    normalized_scope = backup_scope_definition(scope)["code"]
+    if normalized_scope == "full":
+        return {
+            "config": load_config_document(config_path),
+            "security": load_security_document(security_path),
+        }
+    if normalized_scope in CONFIG_BACKUP_SCOPES:
+        return _export_config_scope(load_config_document(config_path), scope=normalized_scope)
+    if normalized_scope in SECURITY_BACKUP_SCOPES:
+        return _export_security_scope(load_security_document(security_path), scope=normalized_scope)
+    raise ValueError(f"Unknown backup scope '{scope}'.")
+
+
+def _validated_config_document(document: dict[str, Any]) -> dict[str, Any]:
+    normalized = normalize_config_document(document)
+    load_gateway_config_document(normalized)
+    return normalized
+
+
+def _import_config_scope(
+    config_path: Path,
+    *,
+    scope: str,
+    payload: Any,
+) -> str:
+    normalized_scope = backup_scope_definition(scope)["code"]
+    if normalized_scope == "config":
+        document = _validated_config_document(payload)
+        save_config_document(config_path, document)
+        return "Config document imported."
+
+    candidate = load_config_document(config_path)
+    if normalized_scope == "services":
+        candidate["services"] = deepcopy(payload)
+    elif normalized_scope == "routes":
+        candidate["routes"] = deepcopy(payload)
+    elif normalized_scope == "clients":
+        candidate["clients"] = deepcopy(payload)
+    elif normalized_scope == "output_profiles":
+        candidate["output_profiles"] = deepcopy(payload)
+    elif normalized_scope == "gateway_responses":
+        candidate["gateway_responses"] = deepcopy(payload)
+    elif normalized_scope == "observability":
+        candidate["observability"] = deepcopy(payload)
+    else:
+        raise ValueError(f"Unknown config backup scope '{scope}'.")
+
+    save_config_document(config_path, _validated_config_document(candidate))
+    return f"{backup_scope_definition(normalized_scope)['title']} imported."
+
+
+def _import_security_scope(
+    security_path: Path,
+    *,
+    scope: str,
+    payload: Any,
+) -> str:
+    normalized_scope = backup_scope_definition(scope)["code"]
+    if normalized_scope == "security":
+        document = validate_security_document(payload)
+        save_security_document(security_path, document)
+        return "Security document imported."
+
+    candidate = load_security_document(security_path)
+    if normalized_scope == "roles":
+        candidate["roles"] = deepcopy(payload)
+    elif normalized_scope == "users":
+        candidate["users"] = deepcopy(payload)
+    else:
+        raise ValueError(f"Unknown security backup scope '{scope}'.")
+
+    save_security_document(security_path, validate_security_document(candidate))
+    return f"{backup_scope_definition(normalized_scope)['title']} imported."
+
+
+def import_backup_scope(
+    config_path: Path,
+    security_path: Path,
+    *,
+    scope: str,
+    payload: Any,
+) -> str:
+    normalized_scope = backup_scope_definition(scope)["code"]
+    if normalized_scope == "full":
+        if not isinstance(payload, dict):
+            raise ValueError("Full backup import body must be a mapping with config and security.")
+        config_document = payload.get("config")
+        security_document = payload.get("security")
+        if not isinstance(config_document, dict):
+            raise ValueError("Full backup import requires a 'config' mapping.")
+        if not isinstance(security_document, dict):
+            raise ValueError("Full backup import requires a 'security' mapping.")
+        validated_config = _validated_config_document(config_document)
+        validated_security = validate_security_document(security_document)
+        save_config_document(config_path, validated_config)
+        save_security_document(security_path, validated_security)
+        return "Full config and security snapshot imported."
+    if normalized_scope in CONFIG_BACKUP_SCOPES:
+        return _import_config_scope(config_path, scope=normalized_scope, payload=payload)
+    if normalized_scope in SECURITY_BACKUP_SCOPES:
+        return _import_security_scope(security_path, scope=normalized_scope, payload=payload)
+    raise ValueError(f"Unknown backup scope '{scope}'.")
 
 
 def save_service(
