@@ -71,7 +71,12 @@ runtime: GatewayRuntime
 security: SecurityManager
 state_store: Any
 ADMIN_SESSION_COOKIE = "napigate_admin_session"
-ADMIN_SESSION_PATH = "/__"
+# Cookie path matching requires either an exact prefix ending with "/"
+# or a boundary slash in the request path after the prefix. Admin routes
+# are "/__admin", "/__monitor", and "/__login", so "/__" would not match
+# them reliably. Use "/" so the session survives redirects across the
+# whole control-plane surface on the admin listener.
+ADMIN_SESSION_PATH = "/"
 ADMIN_SESSION_TTL_SECONDS = 12 * 60 * 60
 _ADMIN_SESSION_SECRET: bytes | None = None
 _PRINCIPAL_CACHE_EMPTY = object()
