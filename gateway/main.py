@@ -796,7 +796,7 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
             </div>
             <div class="stat">
               <div class="stat-label">Average Duration</div>
-              <div class="stat-value" id="stat-duration">0 us</div>
+              <div class="stat-value" id="stat-duration">0.000 ms</div>
             </div>
             <div class="stat">
               <div class="stat-label">Latest Visible</div>
@@ -1067,9 +1067,6 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
 
         function formatDuration(row) {{
           const micros = durationMicros(row);
-          if (micros < 1000) {{
-            return `${{micros}} us`;
-          }}
           const millis = micros / 1000;
           return `${{millis.toFixed(3)}} ms`;
         }}
@@ -1096,9 +1093,7 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
 
           document.getElementById("stat-rows").textContent = String(totalRows);
           document.getElementById("stat-errors").textContent = String(total5xx);
-          document.getElementById("stat-duration").textContent = avgDurationMicros < 1000
-            ? `${{avgDurationMicros}} us`
-            : `${{(avgDurationMicros / 1000).toFixed(3)}} ms`;
+          document.getElementById("stat-duration").textContent = `${{(avgDurationMicros / 1000).toFixed(3)}} ms`;
           document.getElementById("stat-updated").textContent = rows[0]?.created_at || "-";
           filterSummary.textContent = activeCount
             ? `${{totalRows}} / ${{allRows.length}} rows | ${{activeCount}} filter(s)`
@@ -3457,9 +3452,6 @@ def render_admin_page(
 
         function formatDuration(row) {{
           const micros = durationMicros(row);
-          if (micros < 1000) {{
-            return `${{micros}} us`;
-          }}
           return `${{(micros / 1000).toFixed(3)}} ms`;
         }}
 
@@ -3917,7 +3909,7 @@ def render_admin_page(
               </div>
               <div class="live-stat">
                 <div class="live-label">Average Duration</div>
-                <div class="live-value">${{summary.averageDurationMicros < 1000 ? `${{summary.averageDurationMicros}} us` : `${{(summary.averageDurationMicros / 1000).toFixed(3)}} ms`}}</div>
+                <div class="live-value">${{(summary.averageDurationMicros / 1000).toFixed(3)}} ms</div>
                 <div class="live-subvalue">Last event: ${{esc(formatDateTime(summary.lastSeen))}}</div>
               </div>
             </div>

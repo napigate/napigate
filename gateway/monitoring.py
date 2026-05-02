@@ -27,9 +27,10 @@ class LogEntry:
 
 
 def _format_duration(duration_ms: float, duration_us: int) -> str:
-    if duration_us < 1000:
-        return f"{duration_us} us"
-    return f"{duration_ms:.3f} ms"
+    millis = float(duration_ms or 0)
+    if millis <= 0 and duration_us > 0:
+        millis = duration_us / 1000
+    return f"{millis:.3f} ms"
 
 
 class RequestLogStore:
