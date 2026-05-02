@@ -975,6 +975,9 @@ class GatewayRuntime:
     def list_logs(self, limit: int = 200) -> list[dict[str, Any]]:
         return self.log_store.recent(limit=limit)
 
+    def log_report(self, *, hours: int = 24, bucket_minutes: int = 60) -> dict[str, Any]:
+        return self.log_store.report(hours=hours, bucket_minutes=bucket_minutes)
+
     def service_count(self) -> int:
         with self._lock:
             return len(self.services)

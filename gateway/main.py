@@ -812,9 +812,7 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
                   <th><div class="th-inner"><span>Gateway Path</span><button class="filter-btn" type="button" data-filter-column="gateway_path" onclick="openFilterModal('gateway_path')" title="Filter Gateway Path" aria-label="Filter Gateway Path"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
                   <th><div class="th-inner"><span>Service</span><button class="filter-btn" type="button" data-filter-column="service_name" onclick="openFilterModal('service_name')" title="Filter Service" aria-label="Filter Service"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
                   <th><div class="th-inner"><span>Endpoint</span><button class="filter-btn" type="button" data-filter-column="endpoint_name" onclick="openFilterModal('endpoint_name')" title="Filter Endpoint" aria-label="Filter Endpoint"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
-                  <th><div class="th-inner"><span>Upstream</span><button class="filter-btn" type="button" data-filter-column="upstream" onclick="openFilterModal('upstream')" title="Filter Upstream" aria-label="Filter Upstream"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
                   <th><div class="th-inner"><span>Status</span><button class="filter-btn" type="button" data-filter-column="status_code" onclick="openFilterModal('status_code')" title="Filter Status" aria-label="Filter Status"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
-                  <th><div class="th-inner"><span>Response</span><button class="filter-btn" type="button" data-filter-column="response" onclick="openFilterModal('response')" title="Filter Response" aria-label="Filter Response"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
                   <th><div class="th-inner"><span>Duration</span><button class="filter-btn" type="button" data-filter-column="duration_display" onclick="openFilterModal('duration_display')" title="Filter Duration" aria-label="Filter Duration"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
                   <th><div class="th-inner"><span>IP</span><button class="filter-btn" type="button" data-filter-column="client_ip" onclick="openFilterModal('client_ip')" title="Filter IP" aria-label="Filter IP"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
                 </tr>
@@ -870,12 +868,7 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
           gateway_path: {{ label: "Gateway Path", value: (row) => String(row.gateway_path || "") }},
           service_name: {{ label: "Service", value: (row) => String(row.service_name || "") }},
           endpoint_name: {{ label: "Endpoint", value: (row) => String(row.endpoint_name || "") }},
-          upstream: {{
-            label: "Upstream",
-            value: (row) => [row.response_source, row.upstream_url, row.upstream_curl].filter(Boolean).join(" "),
-          }},
           status_code: {{ label: "Status", value: (row) => String(row.status_code || "") }},
-          response: {{ label: "Response", value: (row) => responseText(row) }},
           duration_display: {{ label: "Duration", value: (row) => String(row.duration_display || row.duration_ms || "") }},
           client_ip: {{ label: "IP", value: (row) => String(row.client_ip || "") }},
         }};
@@ -1107,14 +1100,12 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
                   <td class="mono">${{esc(row.gateway_path)}}</td>
                   <td>${{esc(row.service_name)}}</td>
                   <td>${{esc(row.endpoint_name)}}</td>
-                  <td>${{renderUpstreamCell(row)}}</td>
                   <td><span class="status-badge ${{statusClass(row.status_code)}}">${{row.status_code}}</span></td>
-                  <td>${{renderResponseCell(row)}}</td>
                   <td>${{esc(row.duration_display || formatDuration(row))}}</td>
                   <td class="mono">${{esc(row.client_ip)}}</td>
                 </tr>
               `).join("")
-            : `<tr><td colspan="10">${{allRows.length ? "No logs match the active filters." : "No logs yet."}}</td></tr>`;
+            : `<tr><td colspan="8">${{allRows.length ? "No logs match the active filters." : "No logs yet."}}</td></tr>`;
           updateFilterButtons();
           renderConnectionBadge();
         }}
@@ -1296,6 +1287,8 @@ def build_admin_state(
             "can_view": can_view_live,
             "logs": runtime.list_logs(limit=40) if can_view_live else [],
             "logs_url": f"{admin_base_url}/__monitor/logs",
+            "report": runtime.log_report(hours=24, bucket_minutes=60) if can_view_live else {},
+            "report_url": f"{admin_base_url}/__monitor/report?hours=24&bucket_minutes=60",
             "monitor_url": f"{admin_base_url}/__monitor",
         },
     )
@@ -1720,6 +1713,17 @@ def render_admin_page(
           gap: 10px;
           margin-bottom: 12px;
         }}
+        .live-report-grid {{
+          display: grid;
+          grid-template-columns: minmax(0, 1.7fr) minmax(280px, 1fr);
+          gap: 12px;
+          margin-bottom: 12px;
+          align-items: start;
+        }}
+        .live-report-side {{
+          display: grid;
+          gap: 12px;
+        }}
         .live-stat {{
           border: 1px solid #e3e9f1;
           border-radius: 14px;
@@ -1788,6 +1792,133 @@ def render_admin_page(
           padding: 12px;
           background: #fff;
           overflow-x: auto;
+        }}
+        .live-chart-card,
+        .live-list-card {{
+          border: 1px solid #e3e9f1;
+          border-radius: 16px;
+          padding: 12px;
+          background: #fff;
+        }}
+        .live-card-title {{
+          margin: 0 0 4px;
+          font-size: 15px;
+          font-weight: 800;
+        }}
+        .live-card-note {{
+          color: var(--muted);
+          font-size: 12px;
+          margin-bottom: 10px;
+          line-height: 1.45;
+        }}
+        .live-chart-wrap {{
+          display: grid;
+          gap: 10px;
+        }}
+        .live-chart {{
+          width: 100%;
+          height: auto;
+          display: block;
+          border-radius: 12px;
+          background: linear-gradient(180deg, #fcfdff 0%, #f6f9fd 100%);
+        }}
+        .live-chart-grid {{
+          stroke: #e6edf5;
+          stroke-width: 1;
+        }}
+        .live-chart-bar {{
+          fill: rgba(26, 115, 232, 0.78);
+        }}
+        .live-chart-bar-guide {{
+          display: none;
+        }}
+        .live-chart-line {{
+          fill: none;
+          stroke: #d97706;
+          stroke-width: 2.5;
+          stroke-linecap: round;
+          stroke-linejoin: round;
+        }}
+        .live-chart-line-dot {{
+          fill: #d97706;
+          stroke: #fff;
+          stroke-width: 1.5;
+        }}
+        .live-chart-label {{
+          fill: #6b7280;
+          font-size: 11px;
+          font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+        }}
+        .live-chart-legend {{
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px 16px;
+          color: var(--muted);
+          font-size: 12px;
+        }}
+        .live-chart-legend span {{
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+        }}
+        .live-chart-chip {{
+          width: 14px;
+          height: 10px;
+          border-radius: 999px;
+          display: inline-block;
+        }}
+        .live-chart-chip.requests {{
+          background: rgba(26, 115, 232, 0.78);
+        }}
+        .live-chart-chip.failures {{
+          background: #d97706;
+        }}
+        .live-pill-grid {{
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+          gap: 8px;
+        }}
+        .live-pill {{
+          border: 1px solid #edf1f5;
+          border-radius: 12px;
+          padding: 8px 9px;
+          background: #fafcff;
+        }}
+        .live-pill strong {{
+          display: block;
+          font-size: 17px;
+          line-height: 1;
+        }}
+        .live-list {{
+          display: grid;
+          gap: 8px;
+        }}
+        .live-list-row {{
+          display: grid;
+          grid-template-columns: 28px minmax(0, 1fr);
+          gap: 8px;
+          align-items: start;
+          padding: 8px 0;
+          border-bottom: 1px solid #edf1f5;
+        }}
+        .live-list-row:last-child {{
+          border-bottom: none;
+          padding-bottom: 0;
+        }}
+        .live-list-rank {{
+          width: 24px;
+          height: 24px;
+          border-radius: 999px;
+          background: #eef3fd;
+          color: #174ea6;
+          font-size: 12px;
+          font-weight: 800;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+        }}
+        .live-list-main {{
+          min-width: 0;
         }}
         .live-table-card table {{
           border-radius: 12px;
@@ -2210,6 +2341,9 @@ def render_admin_page(
           .live-head {{
             flex-direction: column;
             align-items: flex-start;
+          }}
+          .live-report-grid {{
+            grid-template-columns: 1fr;
           }}
           .section {{
             padding: 14px;
@@ -2672,6 +2806,7 @@ def render_admin_page(
         }}
 
         let liveRows = Array.isArray(STATE.live?.logs) ? STATE.live.logs : [];
+        let liveReport = STATE.live?.report && typeof STATE.live.report === "object" ? STATE.live.report : null;
         let liveConnectionState = STATE.live?.can_view ? "connecting" : "locked";
         let livePollTimer = null;
         let livePaused = false;
@@ -2764,6 +2899,7 @@ def render_admin_page(
           STATE = nextState;
           permissions = new Set(STATE.principal.permissions);
           liveRows = Array.isArray(STATE.live?.logs) ? STATE.live.logs : liveRows;
+          liveReport = STATE.live?.report && typeof STATE.live.report === "object" ? STATE.live.report : liveReport;
           renderServices();
           renderRoutes();
           renderOutputProfiles();
@@ -3469,6 +3605,177 @@ def render_admin_page(
           }};
         }}
 
+        function numberOrZero(value) {{
+          const numeric = Number(value || 0);
+          return Number.isFinite(numeric) ? numeric : 0;
+        }}
+
+        function formatMsNumber(value) {{
+          return `${{numberOrZero(value).toFixed(3)}} ms`;
+        }}
+
+        function percent(numerator, denominator) {{
+          const total = numberOrZero(denominator);
+          if (!total) {{
+            return "0.0%";
+          }}
+          return `${{((numberOrZero(numerator) / total) * 100).toFixed(1)}}%`;
+        }}
+
+        function liveAnalytics() {{
+          const report = liveReport && typeof liveReport === "object" ? liveReport : null;
+          const totals = report?.totals && typeof report.totals === "object" ? report.totals : null;
+          const hourly = Array.isArray(report?.hourly) ? report.hourly : [];
+          const statusBreakdown = Array.isArray(report?.status_breakdown) ? report.status_breakdown : [];
+          const topServices = Array.isArray(report?.top_services) ? report.top_services : [];
+          const topPaths = Array.isArray(report?.top_paths) ? report.top_paths : [];
+          return {{
+            report,
+            totals,
+            hourly,
+            statusBreakdown,
+            topServices,
+            topPaths,
+            recent: summarizeLiveRows(liveRows),
+          }};
+        }}
+
+        function chartBarPath(points, baseline) {{
+          if (!points.length) return "";
+          return points.map((point) => `M${{point.x.toFixed(1)}} ${{baseline.toFixed(1)}} V${{point.y.toFixed(1)}}`).join(" ");
+        }}
+
+        function chartLinePath(points) {{
+          if (!points.length) return "";
+          return points.map((point, index) => `${{index === 0 ? "M" : "L"}}${{point.x.toFixed(1)}} ${{point.y.toFixed(1)}}`).join(" ");
+        }}
+
+        function renderTrendChart(hourly) {{
+          if (!hourly.length) {{
+            return '<div class="empty">No 24-hour activity has been recorded yet.</div>';
+          }}
+          const width = 760;
+          const height = 220;
+          const paddingTop = 18;
+          const paddingRight = 18;
+          const paddingBottom = 30;
+          const paddingLeft = 18;
+          const innerWidth = width - paddingLeft - paddingRight;
+          const innerHeight = height - paddingTop - paddingBottom;
+          const maxRequests = Math.max(1, ...hourly.map((bucket) => numberOrZero(bucket.requests)));
+          const maxFailures = Math.max(1, ...hourly.map((bucket) => numberOrZero(bucket.failures)));
+          const stepX = hourly.length > 1 ? innerWidth / (hourly.length - 1) : innerWidth;
+          const baselineY = paddingTop + innerHeight;
+          const requestPoints = hourly.map((bucket, index) => {{
+            const x = paddingLeft + stepX * index;
+            const requestHeight = (numberOrZero(bucket.requests) / maxRequests) * innerHeight;
+            return {{
+              x,
+              y: baselineY - requestHeight,
+              label: String(bucket.label || ""),
+              requests: numberOrZero(bucket.requests),
+            }};
+          }});
+          const failurePoints = hourly.map((bucket, index) => {{
+            const x = paddingLeft + stepX * index;
+            const failureHeight = (numberOrZero(bucket.failures) / maxFailures) * innerHeight;
+            return {{
+              x,
+              y: baselineY - failureHeight,
+              failures: numberOrZero(bucket.failures),
+            }};
+          }});
+          const gridLines = [0, 0.25, 0.5, 0.75, 1].map((ratio) => {{
+            const y = paddingTop + innerHeight * ratio;
+            return `<line x1="${{paddingLeft}}" y1="${{y.toFixed(1)}}" x2="${{width - paddingRight}}" y2="${{y.toFixed(1)}}" class="live-chart-grid"></line>`;
+          }}).join("");
+          const labelEvery = Math.max(1, Math.floor(hourly.length / 6));
+          const labels = requestPoints
+            .map((point, index) => index % labelEvery === 0 || index === hourly.length - 1
+              ? `<text x="${{point.x.toFixed(1)}}" y="${{height - 8}}" text-anchor="middle" class="live-chart-label">${{esc(point.label)}}</text>`
+              : "")
+            .join("");
+          const requestBarWidth = Math.max(8, innerWidth / Math.max(hourly.length * 1.85, 1));
+          const bars = requestPoints
+            .map((point) => `
+              <rect
+                x="${{(point.x - requestBarWidth / 2).toFixed(1)}}"
+                y="${{point.y.toFixed(1)}}"
+                width="${{requestBarWidth.toFixed(1)}}"
+                height="${{Math.max(1, baselineY - point.y).toFixed(1)}}"
+                rx="4"
+                class="live-chart-bar"
+              >
+                <title>${{point.label}}: ${{point.requests}} requests</title>
+              </rect>
+            `)
+            .join("");
+          const failuresPath = chartLinePath(failurePoints);
+          const failureDots = failurePoints
+            .map((point, index) => `
+              <circle cx="${{point.x.toFixed(1)}}" cy="${{point.y.toFixed(1)}}" r="3.2" class="live-chart-line-dot">
+                <title>${{requestPoints[index].label}}: ${{point.failures}} failures</title>
+              </circle>
+            `)
+            .join("");
+          return `
+            <div class="live-chart-wrap">
+              <svg viewBox="0 0 ${{width}} ${{height}}" class="live-chart" role="img" aria-label="24 hour request and failure chart">
+                ${{gridLines}}
+                <path d="${{chartBarPath(requestPoints, baselineY)}}" class="live-chart-bar-guide"></path>
+                ${{bars}}
+                <path d="${{failuresPath}}" class="live-chart-line"></path>
+                ${{failureDots}}
+                ${{labels}}
+              </svg>
+              <div class="live-chart-legend">
+                <span><i class="live-chart-chip requests"></i>Requests per hour</span>
+                <span><i class="live-chart-chip failures"></i>4xx/5xx failures per hour</span>
+              </div>
+            </div>
+          `;
+        }}
+
+        function renderStatusBreakdown(statusBreakdown) {{
+          const items = statusBreakdown.filter((item) => numberOrZero(item?.count) > 0);
+          if (!items.length) {{
+            return '<div class="muted">No status buckets recorded in the last 24 hours.</div>';
+          }}
+          return `
+            <div class="live-pill-grid">
+              ${{
+                items.map((item) => `
+                  <div class="live-pill">
+                    <span class="tag">${{esc(item.label)}}</span>
+                    <strong>${{numberOrZero(item.count)}}</strong>
+                  </div>
+                `).join("")
+              }}
+            </div>
+          `;
+        }}
+
+        function renderTopList(items, keyName, emptyText) {{
+          if (!Array.isArray(items) || !items.length) {{
+            return `<div class="muted">${{esc(emptyText)}}</div>`;
+          }}
+          return `
+            <div class="live-list">
+              ${{
+                items.map((item, index) => `
+                  <div class="live-list-row">
+                    <div class="live-list-rank">${{index + 1}}</div>
+                    <div class="live-list-main">
+                      <div class="mono">${{esc(item[keyName] || "-")}}</div>
+                      <div class="muted">${{numberOrZero(item.requests)}} req | ${{numberOrZero(item.failures)}} fail | ${{formatMsNumber(item.avg_duration_ms)}}</div>
+                    </div>
+                  </div>
+                `).join("")
+              }}
+            </div>
+          `;
+        }}
+
         function liveBadgeState() {{
           if (!STATE.live?.can_view) {{
             return {{ label: "Monitor access required", className: "warn" }};
@@ -3886,9 +4193,26 @@ def render_admin_page(
             return;
           }}
 
-          const summary = summarizeLiveRows(liveRows);
+          const analytics = liveAnalytics();
+          const summary = analytics.recent;
+          const totals = analytics.totals || {{
+            requests: summary.total,
+            failures: summary.failures,
+            successes: Math.max(0, summary.total - summary.failures),
+            failure_rate: summary.total ? (summary.failures / summary.total) * 100 : 0,
+            cache_hits: liveRows.filter((row) => liveResponseSource(row) === "cache").length,
+            cache_hit_rate: summary.total
+              ? (liveRows.filter((row) => liveResponseSource(row) === "cache").length / summary.total) * 100
+              : 0,
+            avg_duration_ms: summary.averageDurationMicros / 1000,
+            p95_duration_ms: 0,
+            requests_last_hour: summary.total,
+            failures_last_hour: summary.failures,
+            peak_bucket_requests: summary.total,
+          }};
           const badge = liveBadgeState();
           const recentRows = liveRows.slice(0, 12);
+          const reportGeneratedAt = analytics.report?.generated_at || summary.lastSeen || "";
 
           wrap.innerHTML = `
             <div class="live-grid">
@@ -3898,19 +4222,63 @@ def render_admin_page(
                 <div class="live-subvalue">${{(STATE.routes || []).length}} route(s), ${{STATE.clients.length}} client(s)</div>
               </div>
               <div class="live-stat">
-                <div class="live-label">Recent Requests</div>
+                <div class="live-label">Requests | 24h</div>
+                <div class="live-value">${{numberOrZero(totals.requests)}}</div>
+                <div class="live-subvalue">${{numberOrZero(totals.requests_last_hour)}} in the last hour</div>
+              </div>
+              <div class="live-stat">
+                <div class="live-label">Failures | 24h</div>
+                <div class="live-value">${{numberOrZero(totals.failures)}}</div>
+                <div class="live-subvalue">${{percent(totals.failures, totals.requests)}} failure rate</div>
+              </div>
+              <div class="live-stat">
+                <div class="live-label">Cache Hit Rate | 24h</div>
+                <div class="live-value">${{percent(totals.cache_hits, totals.requests)}}</div>
+                <div class="live-subvalue">${{numberOrZero(totals.cache_hits)}} cached responses</div>
+              </div>
+              <div class="live-stat">
+                <div class="live-label">Average Duration | 24h</div>
+                <div class="live-value">${{formatMsNumber(totals.avg_duration_ms)}}</div>
+                <div class="live-subvalue">Visible sample: ${{formatMsNumber(summary.averageDurationMicros / 1000)}}</div>
+              </div>
+              <div class="live-stat">
+                <div class="live-label">P95 Duration | 24h</div>
+                <div class="live-value">${{formatMsNumber(totals.p95_duration_ms)}}</div>
+                <div class="live-subvalue">Peak hour: ${{numberOrZero(totals.peak_bucket_requests)}} req</div>
+              </div>
+              <div class="live-stat">
+                <div class="live-label">Latest Visible</div>
                 <div class="live-value">${{summary.total}}</div>
-                <div class="live-subvalue">Loaded from monitor storage</div>
+                <div class="live-subvalue">Recent rows refreshed: ${{esc(formatDateTime(summary.lastSeen))}}</div>
               </div>
-              <div class="live-stat">
-                <div class="live-label">Recent Failures</div>
-                <div class="live-value">${{summary.failures}}</div>
-                <div class="live-subvalue">HTTP 4xx and 5xx in the visible sample</div>
+            </div>
+
+            <div class="live-report-grid">
+              <div class="live-chart-card">
+                <h3 class="live-card-title">24 Hour Activity</h3>
+                <div class="live-card-note">
+                  Hourly requests and failures from monitor storage, refreshed with the Live tab.
+                  Snapshot time: <span class="mono">${{esc(formatDateTime(reportGeneratedAt))}}</span>
+                </div>
+                ${{renderTrendChart(analytics.hourly)}}
               </div>
-              <div class="live-stat">
-                <div class="live-label">Average Duration</div>
-                <div class="live-value">${{(summary.averageDurationMicros / 1000).toFixed(3)}} ms</div>
-                <div class="live-subvalue">Last event: ${{esc(formatDateTime(summary.lastSeen))}}</div>
+
+              <div class="live-report-side">
+                <div class="live-list-card">
+                  <h3 class="live-card-title">Status Breakdown | 24h</h3>
+                  <div class="live-card-note">Count of 2xx, 3xx, 4xx, 5xx, and other responses in the report window.</div>
+                  ${{renderStatusBreakdown(analytics.statusBreakdown)}}
+                </div>
+                <div class="live-list-card">
+                  <h3 class="live-card-title">Top Services | 24h</h3>
+                  <div class="live-card-note">Busiest upstream services by request volume and average latency.</div>
+                  ${{renderTopList(analytics.topServices, "name", "No service activity in the last 24 hours.")}}
+                </div>
+                <div class="live-list-card">
+                  <h3 class="live-card-title">Top Gateway Paths | 24h</h3>
+                  <div class="live-card-note">Most active public routes in the same report window.</div>
+                  ${{renderTopList(analytics.topPaths, "path", "No gateway path activity in the last 24 hours.")}}
+                </div>
               </div>
             </div>
 
@@ -3920,7 +4288,7 @@ def render_admin_page(
                   <h3 class="section-title" style="font-size:16px; margin-bottom:4px;">Live Request Feed</h3>
                   <div class="section-note">${{livePaused
                     ? 'Updates are paused. Resume when you want the table to move again.'
-                    : 'This tab refreshes automatically from <span class="mono">/__monitor/logs</span>.'}}</div>
+                    : 'This tab refreshes automatically from <span class="mono">/__monitor/logs</span> and keeps the richer upstream and response details here. The standalone log table stays more compact.'}}</div>
                 </div>
                 <span class="live-badge ${{badge.className}}">
                   <span class="live-dot"></span>
@@ -3973,19 +4341,34 @@ def render_admin_page(
         async function refreshLiveLogs() {{
           if (!STATE.live?.can_view || livePaused) return;
           try {{
-            const response = await fetch(STATE.live.logs_url || "/__monitor/logs", {{
-              headers: {{
-                "Accept": "application/json",
-              }},
-              cache: "no-store",
-            }});
+            const [logsResponse, reportResponse] = await Promise.all([
+              fetch(STATE.live.logs_url || "/__monitor/logs", {{
+                headers: {{
+                  "Accept": "application/json",
+                }},
+                cache: "no-store",
+              }}),
+              fetch(STATE.live.report_url || "/__monitor/report?hours=24&bucket_minutes=60", {{
+                headers: {{
+                  "Accept": "application/json",
+                }},
+                cache: "no-store",
+              }}),
+            ]);
             if (livePaused) return;
-            if (!response.ok) {{
-              throw new Error(`HTTP ${{response.status}}`);
+            if (!logsResponse.ok) {{
+              throw new Error(`HTTP ${{logsResponse.status}}`);
             }}
-            const payload = await response.json();
+            if (!reportResponse.ok) {{
+              throw new Error(`HTTP ${{reportResponse.status}}`);
+            }}
+            const [payload, reportPayload] = await Promise.all([
+              logsResponse.json(),
+              reportResponse.json(),
+            ]);
             if (livePaused) return;
             liveRows = Array.isArray(payload) ? payload : [];
+            liveReport = reportPayload && typeof reportPayload === "object" ? reportPayload : liveReport;
             liveConnectionState = "online";
           }} catch (_error) {{
             if (livePaused) return;
@@ -6231,6 +6614,18 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
             if parsed.path == "/__monitor/logs":
                 self._send_json(runtime.list_logs(limit=200))
+                return
+
+            if parsed.path == "/__monitor/report":
+                try:
+                    hours = max(1, int(str(query.get("hours", "24") or "24")))
+                except ValueError:
+                    hours = 24
+                try:
+                    bucket_minutes = max(1, int(str(query.get("bucket_minutes", "60") or "60")))
+                except ValueError:
+                    bucket_minutes = 60
+                self._send_json(runtime.log_report(hours=hours, bucket_minutes=bucket_minutes))
                 return
 
             if parsed.path == "/__monitor/stream":

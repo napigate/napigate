@@ -597,6 +597,8 @@ Common:
   - `GET /__monitor`
 - JSON monitor:
   - `GET /__monitor/logs`
+- JSON 24h monitor report:
+  - `GET /__monitor/report`
 - Live stream:
   - `GET /__monitor/stream`
   - these monitor endpoints are served only from the admin listener, not the public listener
@@ -657,6 +659,7 @@ Common:
 - Active tabs are dark with white text by design.
 - Monitor and admin Live tables now show `Status` plus a `Response` column for each request row.
 - Monitor and admin Live views now expose the final upstream URL plus a copyable rendered `cURL` for proxied requests.
+- The Admin `Live` tab also includes a 24-hour summary with hourly request/failure buckets and top service/path activity.
 - The Config tab now shows the current public/admin listener URLs plus the active state-store mode.
 - Client forms support:
   - slug, title, and code
