@@ -815,7 +815,9 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
                   <th><div class="th-inner"><span>Gateway Path</span><button class="filter-btn" type="button" data-filter-column="gateway_path" onclick="openFilterModal('gateway_path')" title="Filter Gateway Path" aria-label="Filter Gateway Path"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
                   <th><div class="th-inner"><span>Service</span><button class="filter-btn" type="button" data-filter-column="service_name" onclick="openFilterModal('service_name')" title="Filter Service" aria-label="Filter Service"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
                   <th><div class="th-inner"><span>Endpoint</span><button class="filter-btn" type="button" data-filter-column="endpoint_name" onclick="openFilterModal('endpoint_name')" title="Filter Endpoint" aria-label="Filter Endpoint"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
+                  <th><div class="th-inner"><span>Upstream</span><button class="filter-btn" type="button" data-filter-column="upstream" onclick="openFilterModal('upstream')" title="Filter Upstream" aria-label="Filter Upstream"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
                   <th><div class="th-inner"><span>Status</span><button class="filter-btn" type="button" data-filter-column="status_code" onclick="openFilterModal('status_code')" title="Filter Status" aria-label="Filter Status"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
+                  <th><div class="th-inner"><span>Response</span><button class="filter-btn" type="button" data-filter-column="response" onclick="openFilterModal('response')" title="Filter Response" aria-label="Filter Response"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
                   <th><div class="th-inner"><span>Duration</span><button class="filter-btn" type="button" data-filter-column="duration_display" onclick="openFilterModal('duration_display')" title="Filter Duration" aria-label="Filter Duration"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
                   <th><div class="th-inner"><span>IP</span><button class="filter-btn" type="button" data-filter-column="client_ip" onclick="openFilterModal('client_ip')" title="Filter IP" aria-label="Filter IP"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
                 </tr>
@@ -871,7 +873,9 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
           gateway_path: {{ label: "Gateway Path", value: (row) => String(row.gateway_path || "") }},
           service_name: {{ label: "Service", value: (row) => String(row.service_name || "") }},
           endpoint_name: {{ label: "Endpoint", value: (row) => String(row.endpoint_name || "") }},
+          upstream: {{ label: "Upstream", value: (row) => `${{String(row.upstream_url || "")}} ${{String(row.upstream_curl || "")}} ${{String(responseSource(row) || "")}}` }},
           status_code: {{ label: "Status", value: (row) => String(row.status_code || "") }},
+          response: {{ label: "Response", value: (row) => responseText(row) }},
           duration_display: {{ label: "Duration", value: (row) => String(row.duration_display || row.duration_ms || "") }},
           client_ip: {{ label: "IP", value: (row) => String(row.client_ip || "") }},
         }};
@@ -1103,12 +1107,14 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
                   <td class="mono">${{esc(row.gateway_path)}}</td>
                   <td>${{esc(row.service_name)}}</td>
                   <td>${{esc(row.endpoint_name)}}</td>
+                  <td>${{renderUpstreamCell(row)}}</td>
                   <td><span class="status-badge ${{statusClass(row.status_code)}}">${{row.status_code}}</span></td>
+                  <td>${{renderResponseCell(row)}}</td>
                   <td>${{esc(row.duration_display || formatDuration(row))}}</td>
                   <td class="mono">${{esc(row.client_ip)}}</td>
                 </tr>
               `).join("")
-            : `<tr><td colspan="8">${{allRows.length ? "No logs match the active filters." : "No logs yet."}}</td></tr>`;
+            : `<tr><td colspan="10">${{allRows.length ? "No logs match the active filters." : "No logs yet."}}</td></tr>`;
           updateFilterButtons();
           renderConnectionBadge();
         }}
@@ -4543,7 +4549,7 @@ def render_admin_page(
                   <h3 class="section-title" style="font-size:16px; margin-bottom:4px;">Live Request Feed</h3>
                   <div class="section-note">${{livePaused
                     ? 'Updates are paused. Resume when you want the table to move again.'
-                    : 'This tab refreshes automatically from <span class="mono">/__monitor/logs</span> and keeps the richer upstream and response details here. The standalone log table stays more compact.'}}</div>
+                    : 'This tab refreshes automatically from <span class="mono">/__monitor/logs</span>. For richer upstream and response details, use the standalone monitor table.'}}</div>
                 </div>
                 <span class="live-badge ${{badge.className}}">
                   <span class="live-dot"></span>
@@ -4561,9 +4567,7 @@ def render_admin_page(
 	                          <th>Method</th>
 	                          <th>Gateway Path</th>
 	                          <th>Service</th>
-	                          <th>Upstream</th>
 	                          <th>Status</th>
-	                          <th>Response</th>
 	                          <th>Duration</th>
 	                          <th>Client IP</th>
 	                        </tr>
@@ -4576,9 +4580,7 @@ def render_admin_page(
 	                              <td>${{esc(row.method)}}</td>
 	                              <td class="mono">${{esc(row.gateway_path)}}</td>
 	                              <td>${{esc(row.service_name)}} / ${{esc(row.endpoint_name)}}</td>
-	                              <td>${{renderLiveUpstreamCell(row)}}</td>
 	                              <td><span class="tag ${{statusClass(row.status_code)}}">${{esc(row.status_code)}}</span></td>
-	                              <td>${{renderLiveResponseCell(row)}}</td>
 	                              <td>${{esc(row.duration_display || formatDuration(row))}}</td>
 	                              <td class="mono">${{esc(row.client_ip)}}</td>
                             </tr>
