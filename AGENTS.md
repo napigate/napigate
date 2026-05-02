@@ -8,6 +8,7 @@ This file stores the working knowledge for the `NapiGate` project so future sess
 - Purpose: a lightweight, config-driven Python API gateway
 - Current goals:
   - route incoming gateway paths to one or more configured endpoint targets
+  - keep HTTP ingress stable while supporting multiple upstream target transports
   - keep gateway routes separate from upstream endpoint definitions
   - support route strategies for `single`, `round_robin`, `failover`, and `parallel_race`
   - authenticate incoming gateway clients against protected routes
@@ -27,14 +28,15 @@ This file stores the working knowledge for the `NapiGate` project so future sess
 
 ## 2) Architecture Decisions
 
-- This project intentionally stays on `stdlib + requests + PyYAML`; Redis and PostgreSQL support are optional install extras.
+- This project intentionally stays on `stdlib + requests + PyYAML`; Redis, PostgreSQL, and gRPC support are optional install extras.
 - The HTTP server runs on `PooledHTTPServer`, a subclass of `ThreadingHTTPServer` that dispatches into a `ThreadPoolExecutor` bounded by `NAPIGATE_MAX_WORKERS` (default 256) instead of spawning unbounded threads.
 - Cache and rate-limit state lives in pluggable backends (`gateway/cache.py`): in-memory by default, Redis when `NAPIGATE_REDIS_URL` is set. If Redis is unreachable at startup, both backends fall back to in-memory automatically and log a warning.
 - Config and security state can stay file-backed or move to PostgreSQL through `gateway/state_store.py`; in PostgreSQL mode the source of truth is table-backed by entity (`services`, `service_endpoints`, `routes`, `clients`, `output_profiles`, `users`, `roles`) while runtime still serves a RAM snapshot and only refreshes when the underlying revision changes.
-- NapiGate now runs two listeners by default: a public listener for gateway traffic and OAuth token issuance, and a separate admin listener for `/__admin`, `/__monitor`, and `/__logout`.
+- NapiGate now runs two listeners by default: a public listener for gateway traffic and OAuth token issuance, and a separate admin listener for `/__login`, `/__admin`, `/__monitor`, and `/__logout`.
 - Rate-limiter state is NOT cleared on config reload; only response/pre-call/auth caches are cleared.
-- Upstream responses stream through to the client without buffering when no transforming output profile is applied and response caching is off. Otherwise the body is buffered to allow envelope transforms or cache storage.
+- Upstream HTTP responses stream through to the client without buffering when no transforming output profile is applied and response caching is off. Otherwise the body is buffered to allow envelope transforms or cache storage.
 - Services and endpoints remain config-driven.
+- Public ingress stays HTTP/1.1 today, but service and route configs now keep an APISIX-inspired protocol catalog explicit. Runtime execution currently supports HTTP ingress plus `http` and unary `grpc` upstream targets; other declared protocols return `501` until their transport handlers land.
 - Public gateway exposure is now top-level route-driven:
   - `routes[].gateway_path`
   - `routes[].methods`
@@ -78,7 +80,12 @@ This file stores the working knowledge for the `NapiGate` project so future sess
   - rate limiting (via `_rate_limiter` backend)
   - `pre_call` execution
   - local configured responses
-  - upstream proxying — buffered or streaming
+  - upstream HTTP proxying — buffered or streaming
+  - upstream gRPC invocation through the transport adapter path
+- `gateway/grpc_support.py`
+  - optional gRPC unary transport execution
+  - dynamic descriptor loading from server reflection or descriptor-set files
+  - grpcurl-like monitor command rendering
 - `gateway/output_sandbox.py`
   - syntax validation and safe execution for `custom` output profile code
   - limited helper set for response shaping without unrestricted Python access
@@ -226,12 +233,15 @@ Common:
 ### Service Fields
 
 - `base_url`
+- `protocol`
+- `target`
 - `timeout_seconds`
 - `verify_ssl`
 - `trust_env_proxy`
 - `forward_napigate_headers`
 - `variables`
 - `headers`
+- `grpc`
 - `pre_call`
 - `response_cache`
 - `cors`
@@ -243,6 +253,8 @@ Common:
 - `name`
 - `slug`
 - `upstream_path`
+- `grpc.full_method`
+- `grpc.request_body`
 - `response`
 - `headers`
 - `query`
@@ -253,11 +265,21 @@ Common:
 - `output_profile` at endpoint level runs first; if the route also has an `output_profile`, the route profile runs on the endpoint-shaped result.
 - `response_cache` resolution order is endpoint first, then service, then route.
 - `headers` can also blank out inherited incoming headers for an upstream target by setting a header value to an empty string.
+- For `protocol: grpc`, service `target` is the upstream authority, `grpc.full_method` is the protobuf method path, and `grpc.request_body` can build the request message from templates. If `grpc.request_body` is omitted, the incoming HTTP JSON body is used.
+- Known service protocol values are:
+  - `http`
+  - `grpc`
+  - `websocket`
+  - `grpc_web`
+  - `http3`
+  - `tcp`
+  - `udp`
 
 ### Route Fields
 
 - `name`
 - `slug`
+- `protocol`
 - `methods`
 - `gateway_path`
 - `strategy`
@@ -723,6 +745,7 @@ If dependencies are missing:
 
 ```bash
 pip install requests pyyaml
+pip install ".[grpc]"
 ```
 
 ## 13) Important Operational Notes
@@ -738,6 +761,7 @@ pip install requests pyyaml
 - `NAPIGATE_REDIS_URL` enables Redis-backed rate limiting and response caching when set (e.g. `redis://localhost:6379/0`). Falls back to in-memory on connection failure. Requires the `redis` optional dependency (`pip install ".[redis]"`).
 - `NAPIGATE_STATE_STORE=file|postgres` selects whether config/security persist locally or in PostgreSQL.
 - `NAPIGATE_POSTGRES_DSN` is required when `NAPIGATE_STATE_STORE=postgres`. PostgreSQL support requires `pip install ".[postgres]"`.
+- gRPC upstreams require the `grpc` optional dependency (`pip install ".[grpc]"`) unless you are using the published Docker image, which already includes it.
 - `NAPIGATE_STATE_SYNC_INTERVAL_SECONDS` controls how often each instance polls PostgreSQL for updated config/security revisions.
 - `APP_PORT` is the public listener port; `ADMIN_PORT` is the separate admin/monitor listener port.
 - `NAPIGATE_MAX_WORKERS` caps the request handler thread pool (default `256`). Long-lived SSE connections at `/__monitor/stream` each occupy one worker for their duration.
@@ -755,10 +779,10 @@ pip install requests pyyaml
   - `NAPIGATE_IMAGE_GID`
   - `NAPIGATE_IMAGE_USER`
   - `NAPIGATE_IMAGE_GROUP`
-- `NAPIGATE_ADMIN_USERNAME` and `NAPIGATE_ADMIN_PASSWORD` protect both monitor and admin pages.
+- `NAPIGATE_ADMIN_USERNAME` and `NAPIGATE_ADMIN_PASSWORD` provide the bootstrap admin account for the built-in control-plane login page.
 - `NAPIGATE_ADMIN_ACCESS_WHITELIST_IPS` restricts `/__admin` UI and admin API requests to comma-separated IP/CIDR ranges when set.
 - `observability.trusted_proxy_ips` lists the reverse proxies whose forwarded IP headers can be trusted; when set, monitor and audit logs resolve the end-user IP from `X-Forwarded-For`, `Forwarded`, or `X-Real-IP`.
-- `/__admin`, `/__monitor`, and `/__logout` do not exist on the public listener by design.
+- `/__login`, `/__admin`, `/__monitor`, and `/__logout` do not exist on the public listener by design.
 - `NAPIGATE_SECURITY_CONFIG` can override the default security file path.
 - Default mirrors:
   - `DEBIAN_MIRROR_URL=https://deb.debian.org/debian`
@@ -886,3 +910,10 @@ pip install requests pyyaml
   - auth methods stay attached to the client
   - custom trusted hooks stay inside `pre_call.code` or `external_service.script`
   - runtime stays lightweight and dependency-minimal
+- Known route protocol values are:
+  - `http`
+  - `websocket`
+  - `grpc`
+  - `grpc_web`
+  - `http3`
+- Only route protocol `http` is executable today. Other declared route protocols remain config-valid and admin-visible, but runtime returns `501` until those listeners and upgrade paths are implemented.

@@ -3,17 +3,22 @@ from __future__ import annotations
 import argparse
 import base64
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
+import hashlib
 from html import escape
+import hmac
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
 import logging
 from pathlib import Path
+import secrets
 import threading
 import time
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 import yaml
 
@@ -37,6 +42,8 @@ from gateway.admin_ops import (
 )
 from gateway.admin_state import build_admin_page_state
 from gateway.config import (
+    ROUTE_PROTOCOL_CHOICES,
+    SERVICE_PROTOCOL_CHOICES,
     configure_config_document_io,
     get_config_source_label,
     load_config_document,
@@ -63,6 +70,11 @@ SETTINGS = load_settings()
 runtime: GatewayRuntime
 security: SecurityManager
 state_store: Any
+ADMIN_SESSION_COOKIE = "napigate_admin_session"
+ADMIN_SESSION_PATH = "/__"
+ADMIN_SESSION_TTL_SECONDS = 12 * 60 * 60
+_ADMIN_SESSION_SECRET: bytes | None = None
+_PRINCIPAL_CACHE_EMPTY = object()
 
 
 def _config_path_arg_default() -> str:
@@ -103,6 +115,323 @@ def configure_application(*, config_path: Path | str, security_path: Path | str)
     )
     runtime = GatewayRuntime(config_path=Path(config_path), redis_url=SETTINGS.redis_url)
     security = SecurityManager(config_path=Path(security_path))
+
+
+def _admin_session_secret() -> bytes:
+    global _ADMIN_SESSION_SECRET
+    if _ADMIN_SESSION_SECRET is not None:
+        return _ADMIN_SESSION_SECRET
+
+    configured = get_env("NAPIGATE_ADMIN_SESSION_SECRET", "APIGATE_ADMIN_SESSION_SECRET").strip()
+    if configured:
+        _ADMIN_SESSION_SECRET = configured.encode("utf-8")
+        return _ADMIN_SESSION_SECRET
+
+    if SETTINGS.admin_auth.enabled:
+        seed = (
+            f"{SETTINGS.admin_auth.username}\0"
+            f"{SETTINGS.admin_auth.password}\0"
+            f"{SETTINGS.admin_auth.realm}"
+        ).encode("utf-8")
+        _ADMIN_SESSION_SECRET = hashlib.sha256(seed).digest()
+        return _ADMIN_SESSION_SECRET
+
+    _ADMIN_SESSION_SECRET = secrets.token_bytes(32)
+    LOGGER.warning(
+        "Admin session secret is ephemeral because neither "
+        "NAPIGATE_ADMIN_SESSION_SECRET nor bootstrap admin credentials are configured."
+    )
+    return _ADMIN_SESSION_SECRET
+
+
+def _urlsafe_b64encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _urlsafe_b64decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(f"{value}{padding}".encode("ascii"))
+
+
+def render_login_page(*, error: str = "", message: str = "", next_path: str = "/__admin", username: str = "") -> str:
+    error_html = (
+        f'<div class="notice error">{escape(error)}</div>'
+        if error
+        else ""
+    )
+    message_html = (
+        f'<div class="notice ok">{escape(message)}</div>'
+        if message and not error
+        else ""
+    )
+    return f"""
+    <!doctype html>
+    <html lang="en" dir="ltr">
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>NapiGate Login</title>
+      <style>
+        :root {{
+          color-scheme: light;
+          --bg: #f4f7fb;
+          --panel: #ffffff;
+          --ink: #18202a;
+          --muted: #5f6b7a;
+          --line: #dbe3ee;
+          --blue: #1f6feb;
+          --blue-strong: #1148a8;
+          --danger: #c62828;
+          --danger-bg: #fff1f1;
+          --ok: #166534;
+          --ok-bg: #eefbf2;
+          --shadow: 0 18px 60px rgba(26, 40, 58, 0.12);
+          font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }}
+        * {{ box-sizing: border-box; }}
+        body {{
+          margin: 0;
+          min-height: 100vh;
+          background:
+            radial-gradient(circle at top left, rgba(31, 111, 235, 0.16), transparent 28%),
+            radial-gradient(circle at right 18%, rgba(15, 118, 110, 0.12), transparent 22%),
+            var(--bg);
+          color: var(--ink);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 28px 16px;
+        }}
+        .shell {{
+          width: min(100%, 980px);
+          display: grid;
+          grid-template-columns: minmax(260px, 1fr) minmax(320px, 430px);
+          gap: 20px;
+          align-items: stretch;
+        }}
+        .intro,
+        .card {{
+          background: rgba(255,255,255,0.94);
+          border: 1px solid var(--line);
+          border-radius: 28px;
+          box-shadow: var(--shadow);
+        }}
+        .intro {{
+          padding: 30px;
+          display: flex;
+          flex-direction: column;
+          justify-content: space-between;
+          gap: 18px;
+        }}
+        .brand {{
+          display: flex;
+          align-items: center;
+          gap: 12px;
+        }}
+        .mark {{
+          display: grid;
+          grid-template-columns: repeat(2, 12px);
+          gap: 4px;
+          padding: 4px;
+          border-radius: 12px;
+          background: #fff;
+          border: 1px solid var(--line);
+        }}
+        .mark span {{
+          width: 12px;
+          height: 12px;
+          border-radius: 4px;
+          display: block;
+        }}
+        .mark .a {{ background: #1f6feb; }}
+        .mark .b {{ background: #159957; }}
+        .mark .c {{ background: #f59e0b; }}
+        .mark .d {{ background: #dc2626; }}
+        .intro h1 {{
+          margin: 0;
+          font-size: clamp(2.1rem, 4vw, 3.2rem);
+          line-height: 1.02;
+          letter-spacing: -0.04em;
+        }}
+        .intro p,
+        .intro li,
+        .card p {{
+          color: var(--muted);
+          line-height: 1.72;
+        }}
+        .eyebrow {{
+          margin: 0 0 12px;
+          color: var(--blue);
+          font-size: 0.83rem;
+          letter-spacing: 0.14em;
+          text-transform: uppercase;
+          font-weight: 700;
+        }}
+        .bullets {{
+          margin: 0;
+          padding-left: 18px;
+        }}
+        .bullets li + li {{
+          margin-top: 8px;
+        }}
+        .card {{
+          padding: 26px;
+        }}
+        .card h2 {{
+          margin: 0 0 6px;
+          font-size: 1.35rem;
+        }}
+        .notice {{
+          margin-bottom: 14px;
+          padding: 11px 13px;
+          border-radius: 14px;
+          font-size: 0.94rem;
+        }}
+        .notice.error {{
+          color: var(--danger);
+          background: var(--danger-bg);
+          border: 1px solid rgba(198, 40, 40, 0.16);
+        }}
+        .notice.ok {{
+          color: var(--ok);
+          background: var(--ok-bg);
+          border: 1px solid rgba(22, 101, 52, 0.12);
+        }}
+        form {{
+          margin-top: 18px;
+          display: grid;
+          gap: 14px;
+        }}
+        label {{
+          display: grid;
+          gap: 8px;
+          font-size: 0.92rem;
+          font-weight: 600;
+        }}
+        input {{
+          width: 100%;
+          min-height: 46px;
+          padding: 0 14px;
+          border-radius: 14px;
+          border: 1px solid var(--line);
+          background: #fff;
+          color: var(--ink);
+          font: inherit;
+        }}
+        input:focus {{
+          outline: 2px solid rgba(31, 111, 235, 0.18);
+          border-color: rgba(31, 111, 235, 0.34);
+        }}
+        button {{
+          min-height: 48px;
+          border: 0;
+          border-radius: 14px;
+          background: linear-gradient(180deg, var(--blue) 0%, var(--blue-strong) 100%);
+          color: #fff;
+          font: inherit;
+          font-weight: 700;
+          cursor: pointer;
+          box-shadow: 0 12px 28px rgba(31, 111, 235, 0.22);
+        }}
+        .meta {{
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px;
+          margin-top: 18px;
+        }}
+        .chip {{
+          display: inline-flex;
+          align-items: center;
+          min-height: 32px;
+          padding: 0 12px;
+          border-radius: 999px;
+          background: #f6f8fb;
+          border: 1px solid var(--line);
+          color: var(--muted);
+          font-size: 0.85rem;
+        }}
+        .footnote {{
+          margin-top: 14px;
+          font-size: 0.86rem;
+          color: var(--muted);
+        }}
+        .mono {{
+          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        }}
+        @media (max-width: 880px) {{
+          .shell {{
+            grid-template-columns: 1fr;
+          }}
+          .intro {{
+            padding: 24px;
+          }}
+          .card {{
+            padding: 22px;
+          }}
+        }}
+      </style>
+    </head>
+    <body>
+      <div class="shell">
+        <section class="intro">
+          <div>
+            <div class="brand">
+              <div class="mark">
+                <span class="a"></span>
+                <span class="b"></span>
+                <span class="c"></span>
+                <span class="d"></span>
+              </div>
+              <div>
+                <div class="eyebrow">NapiGate Control Plane</div>
+                <h1>Sign in to the admin and monitor surface.</h1>
+              </div>
+            </div>
+            <p>
+              Public gateway traffic stays on its own listener. Routes, users, output profiles,
+              monitor logs, and audit history stay behind the admin listener and a signed session.
+            </p>
+          </div>
+          <div>
+            <ul class="bullets">
+              <li>Use the bootstrap admin from <span class="mono">.env</span> or any configured user account.</li>
+              <li>Roles still decide whether this account can open <span class="mono">/__admin</span>, <span class="mono">/__monitor</span>, or both.</li>
+              <li>Logout clears the session cookie so switching users works reliably.</li>
+            </ul>
+            <div class="meta">
+              <span class="chip">Public: /__health and /__oauth/token stay separate</span>
+              <span class="chip">Next: <span class="mono">{escape(next_path)}</span></span>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="eyebrow">Login</div>
+          <h2>Use your control-plane account</h2>
+          <p>The session is stored in a signed cookie. Browser Basic Auth prompts are no longer used for the admin UI.</p>
+          {error_html}
+          {message_html}
+          <form method="post" action="/__login" autocomplete="on">
+            <input type="hidden" name="next" value="{escape(next_path)}">
+            <label>
+              <span>Username</span>
+              <input name="username" value="{escape(username)}" autocomplete="username" required>
+            </label>
+            <label>
+              <span>Password</span>
+              <input name="password" type="password" autocomplete="current-password" required>
+            </label>
+            <button type="submit">Sign In</button>
+          </form>
+          <div class="footnote">
+            Accounts with only <span class="mono">monitor_access</span> will be sent to
+            <span class="mono">/__monitor</span> after login.
+          </div>
+        </section>
+      </div>
+    </body>
+    </html>
+    """
 
 
 def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
@@ -462,7 +791,7 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
             </div>
             <div class="stat">
               <div class="stat-label">Average Duration</div>
-              <div class="stat-value" id="stat-duration">0 ms</div>
+              <div class="stat-value" id="stat-duration">0 us</div>
             </div>
             <div class="stat">
               <div class="stat-label">Latest Visible</div>
@@ -481,7 +810,7 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
                   <th><div class="th-inner"><span>Upstream</span><button class="filter-btn" type="button" data-filter-column="upstream" onclick="openFilterModal('upstream')" title="Filter Upstream" aria-label="Filter Upstream"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
                   <th><div class="th-inner"><span>Status</span><button class="filter-btn" type="button" data-filter-column="status_code" onclick="openFilterModal('status_code')" title="Filter Status" aria-label="Filter Status"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
                   <th><div class="th-inner"><span>Response</span><button class="filter-btn" type="button" data-filter-column="response" onclick="openFilterModal('response')" title="Filter Response" aria-label="Filter Response"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
-                  <th><div class="th-inner"><span>Duration (ms)</span><button class="filter-btn" type="button" data-filter-column="duration_ms" onclick="openFilterModal('duration_ms')" title="Filter Duration" aria-label="Filter Duration"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
+                  <th><div class="th-inner"><span>Duration</span><button class="filter-btn" type="button" data-filter-column="duration_display" onclick="openFilterModal('duration_display')" title="Filter Duration" aria-label="Filter Duration"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
                   <th><div class="th-inner"><span>IP</span><button class="filter-btn" type="button" data-filter-column="client_ip" onclick="openFilterModal('client_ip')" title="Filter IP" aria-label="Filter IP"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h14l-5.5 6.5v4l-3 1v-5z"></path></svg></button></div></th>
                 </tr>
               </thead>
@@ -542,7 +871,7 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
           }},
           status_code: {{ label: "Status", value: (row) => String(row.status_code || "") }},
           response: {{ label: "Response", value: (row) => responseText(row) }},
-          duration_ms: {{ label: "Duration", value: (row) => String(row.duration_ms || "") }},
+          duration_display: {{ label: "Duration", value: (row) => String(row.duration_display || row.duration_ms || "") }},
           client_ip: {{ label: "IP", value: (row) => String(row.client_ip || "") }},
         }};
 
@@ -719,6 +1048,27 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
           return String(row.response_body || row.error || "").trim();
         }}
 
+        function durationMicros(row) {{
+          const direct = Number(row.duration_us || 0);
+          if (Number.isFinite(direct) && direct > 0) {{
+            return direct;
+          }}
+          const millis = Number(row.duration_ms || 0);
+          if (!Number.isFinite(millis) || millis <= 0) {{
+            return 0;
+          }}
+          return Math.max(0, Math.round(millis * 1000));
+        }}
+
+        function formatDuration(row) {{
+          const micros = durationMicros(row);
+          if (micros < 1000) {{
+            return `${{micros}} us`;
+          }}
+          const millis = micros / 1000;
+          return `${{millis.toFixed(3)}} ms`;
+        }}
+
         function renderResponseCell(row) {{
           const text = responseText(row);
           if (!text) {{
@@ -734,14 +1084,16 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
         function render(rows = filteredRows()) {{
           const totalRows = rows.length;
           const total5xx = rows.filter((row) => row.status_code >= 500).length;
-          const avgDuration = totalRows
-            ? Math.round(rows.reduce((sum, row) => sum + Number(row.duration_ms || 0), 0) / totalRows)
+          const avgDurationMicros = totalRows
+            ? Math.round(rows.reduce((sum, row) => sum + durationMicros(row), 0) / totalRows)
             : 0;
           const activeCount = activeFilterEntries().length;
 
           document.getElementById("stat-rows").textContent = String(totalRows);
           document.getElementById("stat-errors").textContent = String(total5xx);
-          document.getElementById("stat-duration").textContent = `${{avgDuration}} ms`;
+          document.getElementById("stat-duration").textContent = avgDurationMicros < 1000
+            ? `${{avgDurationMicros}} us`
+            : `${{(avgDurationMicros / 1000).toFixed(3)}} ms`;
           document.getElementById("stat-updated").textContent = rows[0]?.created_at || "-";
           filterSummary.textContent = activeCount
             ? `${{totalRows}} / ${{allRows.length}} rows | ${{activeCount}} filter(s)`
@@ -758,7 +1110,7 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
                   <td>${{renderUpstreamCell(row)}}</td>
                   <td><span class="status-badge ${{statusClass(row.status_code)}}">${{row.status_code}}</span></td>
                   <td>${{renderResponseCell(row)}}</td>
-                  <td>${{row.duration_ms}}</td>
+                  <td>${{esc(row.duration_display || formatDuration(row))}}</td>
                   <td class="mono">${{esc(row.client_ip)}}</td>
                 </tr>
               `).join("")
@@ -2016,7 +2368,7 @@ def render_admin_page(
             <div class="section-head">
               <div>
                 <h2 class="section-title">Users</h2>
-                <div class="section-note">Users sign in with Basic Auth and receive access through assigned roles.</div>
+                <div class="section-note">Users sign in through the control-plane login page and receive access through assigned roles.</div>
               </div>
               <div class="actions" id="users-top-actions"></div>
             </div>
@@ -2095,7 +2447,8 @@ def render_admin_page(
 
         const FIELD_HELP = {{
           service_name: {{ title: "Service Name", text: "A stable internal identifier used in config, logs, scopes, and templates.", example: "billing_api" }},
-          base_url: {{ title: "Base URL", text: "The upstream base address joined with each endpoint upstream path.", example: "https://api.example.com" }},
+          service_protocol: {{ title: "Service Protocol", text: "Select the upstream transport family. HTTP and gRPC run today. Other APISIX-inspired types can be declared now and enforced later.", example: "http or grpc" }},
+          base_url: {{ title: "Base URL", text: "For HTTP, WebSocket, gRPC-Web, and HTTP/3 services this is the upstream URL or base URL. For gRPC, TCP, and UDP services this field carries the upstream target such as host:port.", example: "https://api.example.com or grpc.internal:50051" }},
           timeout_seconds: {{ title: "Timeout Seconds", text: "Maximum upstream wait time before the gateway aborts the request.", example: "15" }},
           verify_ssl: {{ title: "Verify SSL", text: "Reject upstream TLS certificates that are invalid, expired, or signed by an unknown CA.", example: "On for public HTTPS APIs" }},
           trust_env_proxy: {{ title: "Trust Env Proxy", text: "Allow upstream requests to use HTTP_PROXY or HTTPS_PROXY from the runtime environment.", example: "Enable only when the container must reach APIs through a proxy" }},
@@ -2115,7 +2468,7 @@ def render_admin_page(
           rate_limit_window_seconds: {{ title: "Window Seconds", text: "Length of the sliding rate-limit window in seconds.", example: "60" }},
           rate_limit_scope: {{ title: "Rate Limit Scope", text: "Choose whether the bucket is tracked by authenticated client, IP address, or client then IP fallback.", example: "client_or_ip" }},
           endpoint_name: {{ title: "Endpoint Name", text: "A stable internal target name used by routes, scopes, logs, and templates.", example: "user_by_id" }},
-          upstream_path: {{ title: "Upstream Path", text: "The path or absolute URL sent upstream after template rendering. Leave blank only for local response endpoints.", example: "/users/{{ path.id }}" }},
+          upstream_path: {{ title: "Upstream Path", text: "For HTTP targets this is the upstream path or absolute URL. For gRPC targets this field carries the full method, such as /package.Service/Method. Leave blank only for local response endpoints.", example: "/users/{{ path.id }} or /helloworld.Greeter/SayHello" }},
           endpoint_headers_yaml: {{ title: "Endpoint Headers", text: "Headers added only for this endpoint after template rendering.", example: '{{ "Authorization": "Bearer {{ vars.access_token }}" }}' }},
           query_yaml: {{ title: "Endpoint Query", text: "Query parameters forced or templated by the gateway for this endpoint.", example: '{{ "expand": "profile" }}' }},
           pre_call_cache_ttl_seconds: {{ title: "Pre-call Cache TTL", text: "Cache successful pre_call variable output in memory for this many seconds.", example: "300" }},
@@ -2124,6 +2477,7 @@ def render_admin_page(
           endpoint_slug: {{ title: "Endpoint Slug", text: "Stable machine-friendly identifier for automation, success hooks, downstream mapping, and admin APIs.", example: "user_by_id" }},
           route_name: {{ title: "Route Name", text: "A stable internal name for the public gateway route.", example: "get_user" }},
           route_slug: {{ title: "Route Slug", text: "Machine-friendly route identifier used in logs, headers, and admin state.", example: "get-user" }},
+          route_protocol: {{ title: "Route Protocol", text: "Select the incoming route protocol contract. Only HTTP ingress is implemented today. WebSocket, gRPC, gRPC-Web, and HTTP/3 can already be declared explicitly.", example: "http or websocket" }},
           methods: {{ title: "Methods", text: "Comma-separated HTTP methods accepted by this gateway route.", example: "GET, POST" }},
           gateway_path: {{ title: "Gateway Path", text: "The public path exposed by NapiGate. Use path tokens like {{id}} or {{path:path}}.", example: "/v1/users/{{id}}" }},
           route_strategy: {{ title: "Route Strategy", text: "single calls one target, round_robin rotates targets, failover tries the next target on 5xx or connection failure, parallel_race calls targets concurrently and returns the first healthy response.", example: "failover" }},
@@ -2504,8 +2858,11 @@ def render_admin_page(
               if (min !== null && numberValue < min) fail(field, `Must be at least ${{field.min}}.`);
               if (max !== null && numberValue > max) fail(field, `Must be at most ${{field.max}}.`);
             }}
-            if (value && /(^|_)(url|base_url)$/.test(field.name || "") && !/^https?:\\/\\//i.test(value)) {{
-              fail(field, "Use an absolute http(s) URL.");
+            if (value && field.name === "base_url") {{
+              const serviceProtocol = String(form.querySelector('[name="protocol"]')?.value || "http").trim().toLowerCase();
+              if (serviceProtocol === "http" && !/^https?:\\/\\//i.test(value)) {{
+                fail(field, "Use an absolute http(s) URL.");
+              }}
             }}
             if (value && ["service_name", "endpoint_name", "endpoint_slug", "route_name", "route_slug", "client_slug", "client_code", "profile_slug", "role_name", "success_key", "data_key", "message_key", "error_key", "gateway_response_success_key", "gateway_response_data_key", "gateway_response_message_key", "gateway_response_error_key"].includes(field.name)) {{
               if (!isSafeIdentifier(value)) fail(field, "Use letters, numbers, underscore, or dash. Start with a letter or underscore.");
@@ -3081,16 +3438,36 @@ def render_admin_page(
           return date.toLocaleString();
         }}
 
+        function durationMicros(row) {{
+          const direct = Number(row.duration_us || 0);
+          if (Number.isFinite(direct) && direct > 0) {{
+            return direct;
+          }}
+          const millis = Number(row.duration_ms || 0);
+          if (!Number.isFinite(millis) || millis <= 0) {{
+            return 0;
+          }}
+          return Math.max(0, Math.round(millis * 1000));
+        }}
+
+        function formatDuration(row) {{
+          const micros = durationMicros(row);
+          if (micros < 1000) {{
+            return `${{micros}} us`;
+          }}
+          return `${{(micros / 1000).toFixed(3)}} ms`;
+        }}
+
         function summarizeLiveRows(rows) {{
           const total = rows.length;
           const failures = rows.filter((row) => Number(row.status_code || 0) >= 400).length;
-          const averageDuration = total
-            ? Math.round(rows.reduce((sum, row) => sum + Number(row.duration_ms || 0), 0) / total)
+          const averageDurationMicros = total
+            ? Math.round(rows.reduce((sum, row) => sum + durationMicros(row), 0) / total)
             : 0;
           return {{
             total,
             failures,
-            averageDuration,
+            averageDurationMicros,
             lastSeen: rows[0]?.created_at || "",
           }};
         }}
@@ -3535,7 +3912,7 @@ def render_admin_page(
               </div>
               <div class="live-stat">
                 <div class="live-label">Average Duration</div>
-                <div class="live-value">${{summary.averageDuration}} ms</div>
+                <div class="live-value">${{summary.averageDurationMicros < 1000 ? `${{summary.averageDurationMicros}} us` : `${{(summary.averageDurationMicros / 1000).toFixed(3)}} ms`}}</div>
                 <div class="live-subvalue">Last event: ${{esc(formatDateTime(summary.lastSeen))}}</div>
               </div>
             </div>
@@ -3582,7 +3959,7 @@ def render_admin_page(
 	                              <td>${{renderLiveUpstreamCell(row)}}</td>
 	                              <td><span class="tag ${{statusClass(row.status_code)}}">${{esc(row.status_code)}}</span></td>
 	                              <td>${{renderLiveResponseCell(row)}}</td>
-	                              <td>${{esc(row.duration_ms)}} ms</td>
+	                              <td>${{esc(row.duration_display || formatDuration(row))}}</td>
 	                              <td class="mono">${{esc(row.client_ip)}}</td>
                             </tr>
                           `).join("")
@@ -3648,6 +4025,39 @@ def render_admin_page(
           livePollTimer = window.setInterval(refreshLiveLogs, 3000);
         }}
 
+        function protocolCatalog(kind) {{
+          return Array.isArray(STATE.catalog?.[kind]) ? STATE.catalog[kind] : [];
+        }}
+
+        function protocolOptionLabel(item) {{
+          if (!item) return "";
+          return item.implemented ? item.code : `${{item.code}} (planned)`;
+        }}
+
+        function serviceProtocolOptionsHtml(selected = "http") {{
+          return protocolCatalog("service_protocols")
+            .map((item) => `<option value="${{esc(item.code)}}" ${{(selected || "http") === item.code ? "selected" : ""}}>${{esc(protocolOptionLabel(item))}}</option>`)
+            .join("");
+        }}
+
+        function routeProtocolOptionsHtml(selected = "http") {{
+          return protocolCatalog("route_protocols")
+            .map((item) => `<option value="${{esc(item.code)}}" ${{(selected || "http") === item.code ? "selected" : ""}}>${{esc(protocolOptionLabel(item))}}</option>`)
+            .join("");
+        }}
+
+        function protocolTag(code, implemented) {{
+          return `<span class="tag ${{implemented ? "ok" : "warn"}}">Protocol ${{esc(code)}}${{implemented ? "" : " planned"}}</span>`;
+        }}
+
+        function serviceProtocolImplemented(code) {{
+          return protocolCatalog("service_protocols").some((item) => item.code === code && item.implemented);
+        }}
+
+        function routeProtocolImplemented(code) {{
+          return protocolCatalog("route_protocols").some((item) => item.code === code && item.implemented);
+        }}
+
         function renderServices() {{
           const wrap = document.getElementById("services-table-wrap");
           const topActions = document.getElementById("services-top-actions");
@@ -3665,7 +4075,8 @@ def render_admin_page(
               <thead>
                 <tr>
                   <th>Name</th>
-                  <th>Base URL</th>
+                  <th>Protocol</th>
+                  <th>Base URL / Target</th>
                   <th>Timeout</th>
                   <th>Endpoints</th>
                   <th>Features</th>
@@ -3677,6 +4088,7 @@ def render_admin_page(
                   STATE.services.map((service) => `
                     <tr>
                       <td><strong>${{esc(service.name)}}</strong></td>
+                      <td>${{protocolTag(service.protocol || "http", serviceProtocolImplemented(service.protocol || "http"))}}</td>
                       <td class="mono">${{esc(service.base_url)}}</td>
                       <td>${{service.timeout_seconds}}</td>
                       <td>${{service.endpoints.length}}</td>
@@ -3768,6 +4180,7 @@ def render_admin_page(
         function buildRouteCurl(routeSlug, methodName = "", authSample = null) {{
           const route = routeBySlug(routeSlug);
           if (!route) return "";
+          if (String(route.protocol || "http").toLowerCase() !== "http") return "";
           const requestMethod = String(methodName || route.methods?.[0] || "GET").toUpperCase();
           const publicBaseUrl = String(STATE.network?.public_base_url || window.location.origin || "").trim();
           let url = `${{publicBaseUrl}}${{sampleGatewayPath(route.gateway_path)}}`;
@@ -3797,6 +4210,10 @@ def render_admin_page(
         }}
 
         function routeCurlButtonHtml(routeSlug, methodName = "", label = "Copy cURL") {{
+          const route = routeBySlug(routeSlug);
+          if (route && String(route.protocol || "http").toLowerCase() !== "http") {{
+            return `<span class="tag warn">cURL unavailable for ${{esc(route.protocol)}}</span>`;
+          }}
           return `
             <button
               class="btn light"
@@ -3906,6 +4323,15 @@ def render_admin_page(
         function showRouteCurlModal(routeSlug, methodName = "") {{
           const route = routeBySlug(routeSlug);
           if (!route) return;
+          if (String(route.protocol || "http").toLowerCase() !== "http") {{
+            openModal("Generate cURL", `
+              <div class="detail-box">
+                <strong>${{esc(route.protocol || "route")}}</strong>
+                <div class="muted" style="margin-top:8px;">Sample cURL generation is only available for HTTP ingress routes right now.</div>
+              </div>
+            `);
+            return;
+          }}
 
           const requestMethod = String(methodName || route.methods?.[0] || "GET").toUpperCase();
           const protectedTargets = routeProtectedTargets(route);
@@ -3973,6 +4399,7 @@ def render_admin_page(
               <thead>
                 <tr>
                   <th>Name</th>
+                  <th>Protocol</th>
                   <th>Gateway Path</th>
                   <th>Methods</th>
                   <th>Strategy</th>
@@ -3986,6 +4413,7 @@ def render_admin_page(
                   STATE.routes.map((route) => `
                     <tr>
                       <td><strong>${{esc(route.name)}}</strong><div class="muted mono">${{esc(route.slug)}}</div></td>
+                      <td>${{protocolTag(route.protocol || "http", routeProtocolImplemented(route.protocol || "http"))}}</td>
                       <td class="mono">${{esc(route.gateway_path)}}</td>
                       <td>${{(route.methods || []).map((method) => `<span class="tag">${{esc(method)}}</span>`).join('')}}</td>
                       <td><span class="tag ${{route.strategy === 'failover' ? 'warn' : route.strategy === 'parallel_race' ? 'ok' : ''}}">${{esc(route.strategy)}}</span></td>
@@ -4012,7 +4440,11 @@ def render_admin_page(
                       <td>
                         <div class="actions">
                           <button class="btn light" type="button" onclick="showRouteView(decodeURIComponent('${{arg(route.slug)}}'))">View</button>
-                          <button class="btn light" type="button" onclick="showRouteCurlModal(decodeURIComponent('${{arg(route.slug)}}'), decodeURIComponent('${{arg(route.methods?.[0] || 'GET')}}'))">Copy cURL</button>
+                          ${{
+                            (route.protocol || "http") === "http"
+                              ? `<button class="btn light" type="button" onclick="showRouteCurlModal(decodeURIComponent('${{arg(route.slug)}}'), decodeURIComponent('${{arg(route.methods?.[0] || 'GET')}}'))">Copy cURL</button>`
+                              : `<span class="tag warn">No cURL</span>`
+                          }}
                           ${{
                             has("services_manage")
                               ? `
@@ -4287,8 +4719,14 @@ def render_admin_page(
                 <span>Service Name</span>
                 <input name="service_name" value="${{esc(service?.name || "")}}" required>
               </label>
+              <label data-help="service_protocol">
+                <span>Service Protocol</span>
+                <select name="protocol">
+                  ${{serviceProtocolOptionsHtml(service?.protocol || "http")}}
+                </select>
+              </label>
               <label data-help="base_url">
-                <span>Base URL</span>
+                <span>Base URL / Target</span>
                 <input name="base_url" value="${{esc(service?.base_url || "")}}" required>
               </label>
               <label data-help="timeout_seconds">
@@ -4656,6 +5094,12 @@ def render_admin_page(
               <label data-help="route_slug">
                 <span>Route Slug</span>
                 <input name="route_slug" value="${{esc(route?.slug || "")}}" required>
+              </label>
+              <label data-help="route_protocol">
+                <span>Route Protocol</span>
+                <select name="protocol">
+                  ${{routeProtocolOptionsHtml(route?.protocol || "http")}}
+                </select>
               </label>
               <label data-help="methods">
                 <span>Methods</span>
@@ -5739,6 +6183,19 @@ class GatewayHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/__login":
+            if not self._is_admin_listener():
+                self._not_found()
+                return
+            if self.command == "GET":
+                self._handle_login_page(query)
+                return
+            if self.command == "POST":
+                self._handle_login_submit()
+                return
+            self._not_found()
+            return
+
         if parsed.path == "/__logout":
             if not self._is_admin_listener():
                 self._not_found()
@@ -5757,7 +6214,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             if not self._is_admin_listener():
                 self._not_found()
                 return
-            principal = self._require_permission("monitor_access")
+            principal = self._require_permission("monitor_access", interactive=parsed.path == "/__monitor")
             if principal is None:
                 return
 
@@ -5766,7 +6223,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 self._write_response(
                     OutgoingResponse(
                         status_code=200,
-                        headers={"Content-Type": "text/html; charset=utf-8"},
+                        headers={
+                            "Content-Type": "text/html; charset=utf-8",
+                            "Cache-Control": "no-store",
+                        },
                         body=body if self.command != "HEAD" else b"",
                     )
                 )
@@ -5787,7 +6247,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             if not self._ensure_admin_ip_allowed():
                 return
             if parsed.path == "/__admin":
-                principal = self._require_permission("admin_access")
+                principal = self._require_permission("admin_access", interactive=True)
                 if principal is None:
                     return
                 body = render_admin_page(
@@ -5801,7 +6261,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 self._write_response(
                     OutgoingResponse(
                         status_code=200,
-                        headers={"Content-Type": "text/html; charset=utf-8"},
+                        headers={
+                            "Content-Type": "text/html; charset=utf-8",
+                            "Cache-Control": "no-store",
+                        },
                         body=body if self.command != "HEAD" else b"",
                     )
                 )
@@ -5998,38 +6461,199 @@ class GatewayHandler(BaseHTTPRequestHandler):
             for key, values in parsed.items()
         }
 
-    def _authenticate_principal(self) -> AuthenticatedPrincipal | None:
-        cached = getattr(self, "_principal_cache", None)
-        if cached is not None:
-            return cached
+    def _safe_next_path(self, raw_value: str | None) -> str:
+        candidate = str(raw_value or "").strip()
+        if not candidate:
+            return "/__admin"
+        parsed = urlsplit(candidate)
+        if parsed.scheme or parsed.netloc:
+            return "/__admin"
+        path = str(parsed.path or "").strip()
+        if not path.startswith("/__"):
+            return "/__admin"
+        if not (
+            path == "/__admin"
+            or path.startswith("/__admin/")
+            or path == "/__monitor"
+            or path.startswith("/__monitor/")
+        ):
+            return "/__admin"
+        return f"{path}?{parsed.query}" if parsed.query else path
 
-        header = self.headers.get("Authorization", "")
-        if not header.startswith("Basic "):
-            return None
+    def _default_control_plane_path(self, principal: AuthenticatedPrincipal | None = None) -> str:
+        if principal is not None:
+            if principal.can("admin_access"):
+                return "/__admin"
+            if principal.can("monitor_access"):
+                return "/__monitor"
+        return "/__admin"
 
+    def _post_login_target(
+        self,
+        principal: AuthenticatedPrincipal,
+        requested_next: str | None = None,
+    ) -> str:
+        target = self._safe_next_path(requested_next)
+        if target.startswith("/__admin") and principal.can("admin_access"):
+            return target
+        if target.startswith("/__monitor") and principal.can("monitor_access"):
+            return target
+        return self._default_control_plane_path(principal)
+
+    def _login_location(
+        self,
+        *,
+        next_path: str | None = None,
+        error: str = "",
+        message: str = "",
+    ) -> str:
+        safe_next = self._safe_next_path(next_path)
+        query_parts = [f"next={quote(safe_next, safe='/?=&')}"]
+        if error:
+            query_parts.append(f"error={quote(str(error))}")
+        if message:
+            query_parts.append(f"message={quote(str(message))}")
+        return f"/__login?{'&'.join(query_parts)}"
+
+    def _send_login_page(
+        self,
+        *,
+        next_path: str,
+        error: str = "",
+        message: str = "",
+        username: str = "",
+        status_code: int = 200,
+    ) -> None:
+        body = render_login_page(
+            error=error,
+            message=message,
+            next_path=self._safe_next_path(next_path),
+            username=username,
+        ).encode("utf-8")
+        self._write_response(
+            OutgoingResponse(
+                status_code=status_code,
+                headers={
+                    "Content-Type": "text/html; charset=utf-8",
+                    "Cache-Control": "no-store",
+                },
+                body=body if self.command != "HEAD" else b"",
+            )
+        )
+
+    def _build_admin_session_token(self, principal: AuthenticatedPrincipal) -> str:
+        expires_at = int(time.time()) + ADMIN_SESSION_TTL_SECONDS
+        payload = json.dumps(
+            {
+                "u": principal.username,
+                "s": principal.source,
+                "e": expires_at,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        signature = hmac.new(_admin_session_secret(), payload, hashlib.sha256).digest()
+        return f"{_urlsafe_b64encode(payload)}.{_urlsafe_b64encode(signature)}"
+
+    def _admin_session_cookie_header(self, *, principal: AuthenticatedPrincipal | None = None, clear: bool = False) -> str:
+        parts = [f"{ADMIN_SESSION_COOKIE}={'' if clear else self._build_admin_session_token(principal)}"]
+        parts.append(f"Path={ADMIN_SESSION_PATH}")
+        parts.append("HttpOnly")
+        parts.append("SameSite=Lax")
+        if self._request_scheme() == "https":
+            parts.append("Secure")
+        if clear:
+            parts.append("Max-Age=0")
+            parts.append("Expires=Thu, 01 Jan 1970 00:00:00 GMT")
+        else:
+            parts.append(f"Max-Age={ADMIN_SESSION_TTL_SECONDS}")
+        return "; ".join(parts)
+
+    def _session_token_from_cookie(self) -> str:
+        cookie_header = str(self.headers.get("Cookie", "") or "")
+        if not cookie_header:
+            return ""
+        cookie = SimpleCookie()
         try:
-            decoded = base64.b64decode(header[6:].encode("ascii")).decode("utf-8")
-            username, password = decoded.split(":", 1)
+            cookie.load(cookie_header)
+        except Exception:  # noqa: BLE001
+            return ""
+        morsel = cookie.get(ADMIN_SESSION_COOKIE)
+        return morsel.value if morsel else ""
+
+    def _principal_from_session(self) -> AuthenticatedPrincipal | None:
+        token = self._session_token_from_cookie()
+        if not token or "." not in token:
+            return None
+        encoded_payload, encoded_signature = token.split(".", 1)
+        try:
+            payload = _urlsafe_b64decode(encoded_payload)
+            signature = _urlsafe_b64decode(encoded_signature)
+        except Exception:  # noqa: BLE001
+            return None
+        expected_signature = hmac.new(_admin_session_secret(), payload, hashlib.sha256).digest()
+        if not hmac.compare_digest(signature, expected_signature):
+            return None
+        try:
+            parsed = json.loads(payload.decode("utf-8"))
         except Exception:  # noqa: BLE001
             return None
 
-        principal = security.authenticate(
+        expires_at = int(parsed.get("e", 0) or 0)
+        if expires_at <= int(time.time()):
+            return None
+
+        username = str(parsed.get("u", "")).strip()
+        source = str(parsed.get("s", "")).strip().lower()
+        if not username or source not in {"bootstrap", "config"}:
+            return None
+
+        return security.restore_session_principal(
             username,
-            password,
+            source=source,
             bootstrap_username=SETTINGS.admin_auth.username,
-            bootstrap_password=SETTINGS.admin_auth.password,
         )
+
+    def _authenticate_principal(self) -> AuthenticatedPrincipal | None:
+        cached = getattr(self, "_principal_cache", _PRINCIPAL_CACHE_EMPTY)
+        if cached is not _PRINCIPAL_CACHE_EMPTY:
+            return cached
+        principal = self._principal_from_session()
         self._principal_cache = principal
         return principal
 
-    def _require_permission(self, permission: str) -> AuthenticatedPrincipal | None:
+    def _redirect_for_available_surface(
+        self,
+        principal: AuthenticatedPrincipal,
+        permission: str,
+    ) -> bool:
+        if permission == "admin_access" and principal.can("monitor_access"):
+            self._redirect("/__monitor")
+            return True
+        if permission == "monitor_access" and principal.can("admin_access"):
+            self._redirect("/__admin")
+            return True
+        return False
+
+    def _require_permission(
+        self,
+        permission: str,
+        *,
+        interactive: bool = False,
+    ) -> AuthenticatedPrincipal | None:
         principal = self._authenticate_principal()
         if principal is None:
             self._discard_request_body()
-            self._auth_challenge()
+            if interactive and self.command == "GET":
+                self._redirect(self._login_location(next_path=self.path))
+            else:
+                self._auth_required_json(next_path=self.path)
             return None
         if permission and not principal.can(permission):
             self._discard_request_body()
+            if interactive and self.command == "GET" and self._redirect_for_available_surface(principal, permission):
+                return None
             self._forbidden(permission)
             return None
         return principal
@@ -6039,25 +6663,77 @@ class GatewayHandler(BaseHTTPRequestHandler):
         if content_length > 0:
             self.rfile.read(content_length)
 
-    def _auth_challenge(self) -> None:
-        body = b'{"detail":"Authentication required."}'
+    def _auth_required_json(self, *, next_path: str | None = None) -> None:
+        safe_next = self._safe_next_path(next_path or "/__admin")
+        body = json.dumps(
+            {
+                "detail": "Authentication required.",
+                "login_url": self._login_location(next_path=safe_next),
+            }
+        ).encode("utf-8")
         self.send_response(401, HTTPStatus.UNAUTHORIZED.phrase)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("WWW-Authenticate", f'Basic realm="{SETTINGS.admin_auth.realm}"')
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
 
     def _force_logout(self) -> None:
-        body = b'{"detail":"Logged out."}'
-        self.send_response(401, HTTPStatus.UNAUTHORIZED.phrase)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("WWW-Authenticate", 'Basic realm="Logged Out"')
-        self.send_header("Content-Length", str(len(body)))
+        self.send_response(303, HTTPStatus.SEE_OTHER.phrase)
+        self.send_header("Location", self._login_location(next_path="/__admin", message="Signed out."))
+        self.send_header("Set-Cookie", self._admin_session_cookie_header(clear=True))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
         self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(body)
+
+    def _handle_login_page(self, query: dict[str, str]) -> None:
+        principal = self._authenticate_principal()
+        if principal is not None:
+            self._redirect(self._post_login_target(principal, query.get("next", "")))
+            return
+        self._send_login_page(
+            next_path=query.get("next", "/__admin"),
+            error=query.get("error", ""),
+            message=query.get("message", ""),
+        )
+
+    def _handle_login_submit(self) -> None:
+        form = self._parse_form()
+        username = str(form.get("username", "")).strip()
+        password = str(form.get("password", ""))
+        next_path = self._safe_next_path(str(form.get("next", "/__admin")))
+
+        principal = security.authenticate(
+            username,
+            password,
+            bootstrap_username=SETTINGS.admin_auth.username,
+            bootstrap_password=SETTINGS.admin_auth.password,
+        )
+        if principal is None:
+            self._send_login_page(
+                next_path=next_path,
+                error="Invalid username or password.",
+                username=username,
+                status_code=401,
+            )
+            return
+        if not principal.can("admin_access") and not principal.can("monitor_access"):
+            self._send_login_page(
+                next_path=next_path,
+                error="This account does not have admin or monitor access.",
+                username=username,
+                status_code=403,
+            )
+            return
+
+        self._principal_cache = principal
+        self.send_response(303, HTTPStatus.SEE_OTHER.phrase)
+        self.send_header("Location", self._post_login_target(principal, next_path))
+        self.send_header("Set-Cookie", self._admin_session_cookie_header(principal=principal))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _forbidden(self, permission: str) -> None:
         self._send_json(
@@ -6433,6 +7109,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             form = self._parse_form()
             original_name = str(form.get("original_name", "")).strip()
             service_name = str(form.get("service_name", "")).strip()
+            protocol = str(form.get("protocol", "http")).strip().lower() or "http"
             base_url = str(form.get("base_url", "")).strip()
             timeout_seconds = float(str(form.get("timeout_seconds", "30")).strip() or "30")
             variables = self._parse_yaml_mapping(str(form.get("variables_yaml", "")), "Variables")
@@ -6466,7 +7143,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
             if not service_name:
                 raise ValueError("Service name is required.")
             if not base_url:
-                raise ValueError("Base URL is required.")
+                raise ValueError("Base URL/Target is required.")
+            if protocol not in SERVICE_PROTOCOL_CHOICES:
+                raise ValueError(
+                    f"Service protocol must be one of: {', '.join(SERVICE_PROTOCOL_CHOICES)}."
+                )
+            if protocol == "http" and not base_url.startswith(("http://", "https://")):
+                raise ValueError("HTTP services must use an absolute http(s) Base URL.")
             if timeout_seconds < 0:
                 raise ValueError("Timeout seconds must be zero or positive.")
             if pre_call_cache_ttl < 0:
@@ -6487,6 +7170,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 runtime.config_path,
                 original_name=original_name,
                 service_name=service_name,
+                protocol=protocol,
                 base_url=base_url,
                 timeout_seconds=timeout_seconds,
                 verify_ssl="verify_ssl" in form,
@@ -6693,6 +7377,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             original_slug = str(form.get("original_slug", "")).strip().lower()
             route_name = str(form.get("route_name", "")).strip()
             route_slug = str(form.get("route_slug", "")).strip().lower()
+            protocol = str(form.get("protocol", "http")).strip().lower() or "http"
             methods = self._parse_methods(str(form.get("methods", "GET")))
             gateway_path = str(form.get("gateway_path", "")).strip()
             strategy = str(form.get("strategy", "single")).strip().lower() or "single"
@@ -6738,6 +7423,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 raise ValueError("Route name is required.")
             if not route_slug:
                 raise ValueError("Route slug is required.")
+            if protocol not in ROUTE_PROTOCOL_CHOICES:
+                raise ValueError(
+                    f"Route protocol must be one of: {', '.join(ROUTE_PROTOCOL_CHOICES)}."
+                )
             if not gateway_path:
                 raise ValueError("Gateway path is required.")
             if not gateway_path.startswith("/"):
@@ -6756,6 +7445,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 original_slug=original_slug,
                 route_name=route_name,
                 route_slug=route_slug,
+                protocol=protocol,
                 methods=methods,
                 gateway_path=gateway_path,
                 strategy=strategy,

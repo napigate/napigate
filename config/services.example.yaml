@@ -175,6 +175,7 @@ observability:
 routes:
   - name: status_ok
     slug: status-ok
+    protocol: http
     methods:
       - GET
     gateway_path: /demo/status
@@ -185,6 +186,7 @@ routes:
 
   - name: public_ip
     slug: public-ip
+    protocol: http
     methods:
       - GET
     gateway_path: /demo/ip
@@ -202,6 +204,7 @@ routes:
 
   - name: public_ip_round_robin
     slug: public-ip-round-robin
+    protocol: http
     methods:
       - GET
     gateway_path: /demo/ip/round-robin
@@ -215,6 +218,7 @@ routes:
 
   - name: public_ip_failover
     slug: public-ip-failover
+    protocol: http
     methods:
       - GET
     gateway_path: /demo/ip/failover
@@ -228,6 +232,7 @@ routes:
 
   - name: public_ip_parallel_race
     slug: public-ip-parallel-race
+    protocol: http
     methods:
       - GET
     gateway_path: /demo/ip/parallel
@@ -241,6 +246,7 @@ routes:
 
   - name: protected_headers
     slug: protected-headers
+    protocol: http
     methods:
       - GET
     gateway_path: /demo/headers
@@ -268,6 +274,7 @@ routes:
 
   - name: user_by_id
     slug: user-by-id
+    protocol: http
     methods:
       - GET
     gateway_path: /demo/users/{id}
@@ -278,6 +285,18 @@ routes:
       - service: protected_httpbin
         endpoint: user_by_id
     output_profile: partner_jsonp
+
+  - name: hello_grpc
+    slug: hello-grpc
+    protocol: http
+    methods:
+      - POST
+    gateway_path: /demo/grpc/hello
+    strategy: single
+    targets:
+      - service: greeter_grpc
+        endpoint: say_hello
+    output_profile: standard_json
 
 services:
   status:
@@ -368,3 +387,32 @@ services:
         upstream_path: /anything/users/{{ path.id }}
         headers:
           X-User-Id: "{{ path.id }}"
+
+  greeter_grpc:
+    protocol: grpc
+    target: localhost:50051
+    timeout_seconds: 10
+    grpc:
+      use_tls: false
+      use_reflection: true
+    headers:
+      x-gateway-service: greeter_grpc
+    endpoints:
+      - name: say_hello
+        slug: say-hello
+        grpc:
+          full_method: /helloworld.Greeter/SayHello
+          request_body:
+            name: "{{ request.json.name }}"
+
+  # Declared protocol examples inspired by APISIX.
+  # These are not executed by the current runtime yet, but the config/admin
+  # contract now keeps them explicit instead of treating everything as generic HTTP.
+  #
+  # echo_websocket:
+  #   protocol: websocket
+  #   base_url: wss://echo.example.com
+  #   endpoints:
+  #     - name: raw_echo
+  #       slug: raw-echo
+  #       upstream_path: /raw

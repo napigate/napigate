@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from gateway.config import DEFAULT_TRUSTED_PROXY_IPS
+from gateway.config import (
+    DEFAULT_TRUSTED_PROXY_IPS,
+    ROUTE_PROTOCOL_CHOICES,
+    RUNTIME_IMPLEMENTED_ROUTE_PROTOCOLS,
+    RUNTIME_IMPLEMENTED_SERVICE_PROTOCOLS,
+    SERVICE_PROTOCOL_CHOICES,
+)
 from gateway.security import AuthenticatedPrincipal
 
 
@@ -44,17 +50,23 @@ def serialize_services(document: dict[str, Any]) -> list[dict[str, Any]]:
     services_state: list[dict[str, Any]] = []
     services = document.get("services") or {}
     for service_name, service_data in services.items():
+        protocol = str(service_data.get("protocol", "http") or "http").strip().lower() or "http"
         endpoints_state = []
         for endpoint in service_data.get("endpoints") or []:
             response = endpoint.get("response")
+            grpc = endpoint.get("grpc") if isinstance(endpoint.get("grpc"), dict) else {}
             endpoints_state.append(
                 {
                     "name": str(endpoint.get("name", "")),
                     "slug": str(endpoint.get("slug", endpoint.get("name", ""))).strip().lower(),
-                    "upstream_path": str(endpoint.get("upstream_path", "")),
+                    "upstream_path": str(
+                        grpc.get("full_method", endpoint.get("upstream_path", "")) or ""
+                    ),
                     "headers": endpoint.get("headers") or {},
                     "query": endpoint.get("query") or {},
                     "pre_call": serialize_pre_call(endpoint.get("pre_call")),
+                    "protocol": protocol,
+                    "grpc": grpc or None,
                     "output_profile": str(endpoint.get("output_profile", "") or ""),
                     "response_cache": serialize_response_cache(endpoint.get("response_cache")),
                     "response": (
@@ -73,7 +85,15 @@ def serialize_services(document: dict[str, Any]) -> list[dict[str, Any]]:
         services_state.append(
             {
                 "name": service_name,
-                "base_url": str(service_data.get("base_url", "")),
+                "protocol": protocol,
+                "target": str(service_data.get("target", service_data.get("base_url", "")) or ""),
+                "base_url": str(
+                    service_data.get(
+                        "base_url" if protocol == "http" else "target",
+                        service_data.get("base_url", ""),
+                    )
+                    or ""
+                ),
                 "timeout_seconds": float(service_data.get("timeout_seconds", 30)),
                 "verify_ssl": bool(service_data.get("verify_ssl", True)),
                 "trust_env_proxy": bool(service_data.get("trust_env_proxy", False)),
@@ -81,6 +101,7 @@ def serialize_services(document: dict[str, Any]) -> list[dict[str, Any]]:
                 "variables": service_data.get("variables") or {},
                 "headers": service_data.get("headers") or {},
                 "pre_call": serialize_pre_call(service_data.get("pre_call")),
+                "grpc": service_data.get("grpc") if isinstance(service_data.get("grpc"), dict) else None,
                 "response_cache": serialize_response_cache(service_data.get("response_cache")),
                 "cors": {
                     "enabled": bool((service_data.get("cors") or {}).get("enabled", False)),
@@ -135,6 +156,7 @@ def serialize_routes(document: dict[str, Any]) -> list[dict[str, Any]]:
                 {
                     "name": str(route.get("name", "")),
                     "slug": str(route.get("slug", route.get("name", ""))).strip().lower(),
+                    "protocol": str(route.get("protocol", "http") or "http").strip().lower() or "http",
                     "methods": list(route.get("methods") or ["GET"]),
                     "gateway_path": str(route.get("gateway_path", "")),
                     "strategy": str(route.get("strategy", "single") or "single"),
@@ -157,6 +179,7 @@ def serialize_routes(document: dict[str, Any]) -> list[dict[str, Any]]:
                 {
                     "name": name,
                     "slug": str(endpoint.get("slug", name)).strip().lower(),
+                    "protocol": "http",
                     "methods": list(endpoint.get("methods") or ["GET"]),
                     "gateway_path": str(endpoint.get("gateway_path", "")),
                     "strategy": "single",
@@ -324,6 +347,22 @@ def build_admin_page_state(
     return {
         "services": serialize_services(document),
         "routes": serialize_routes(document),
+        "catalog": {
+            "service_protocols": [
+                {
+                    "code": protocol,
+                    "implemented": protocol in RUNTIME_IMPLEMENTED_SERVICE_PROTOCOLS,
+                }
+                for protocol in SERVICE_PROTOCOL_CHOICES
+            ],
+            "route_protocols": [
+                {
+                    "code": protocol,
+                    "implemented": protocol in RUNTIME_IMPLEMENTED_ROUTE_PROTOCOLS,
+                }
+                for protocol in ROUTE_PROTOCOL_CHOICES
+            ],
+        },
         "clients": serialize_clients(document),
         "output_profiles": serialize_output_profiles(document),
         "settings": serialize_gateway_settings(document),

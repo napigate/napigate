@@ -29,6 +29,8 @@ from gateway.config import (
     GatewayResponseConfig,
     OutputProfileConfig,
     PreCallConfig,
+    RUNTIME_IMPLEMENTED_ROUTE_PROTOCOLS,
+    RUNTIME_IMPLEMENTED_SERVICE_PROTOCOLS,
     ResponseCacheConfig,
     RouteConfig,
     ServiceConfig,
@@ -38,6 +40,7 @@ from gateway.config import (
     get_config_source_label,
     load_gateway_config,
 )
+from gateway.grpc_support import GrpcTransportError, invoke_grpc_unary
 from gateway.integrations import IntegrationDispatcher
 from gateway.logging_utils import configure_log_retention_hours
 from gateway.monitoring import LogEntry, RequestLogStore
@@ -320,7 +323,8 @@ class GatewayRuntime:
             response_body = self._error_response_body(exc.status_code, exc.detail, request)
             raise
         finally:
-            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            duration_us = max(0, int(round((time.perf_counter() - started_at) * 1_000_000)))
+            duration_ms = round(duration_us / 1000, 3)
             self._write_log(
                 request_id=request_id,
                 request=request,
@@ -329,6 +333,7 @@ class GatewayRuntime:
                 upstream_curl="",
                 status_code=status_code,
                 duration_ms=duration_ms,
+                duration_us=duration_us,
                 error_message=error_message,
                 response_body=response_body,
             )
@@ -337,6 +342,7 @@ class GatewayRuntime:
         matched = self.match(request.method, request.path)
         if matched is None:
             raise GatewayError(404, "No route matched this request.")
+        self._ensure_transport_supported(matched)
 
         request_id = str(uuid.uuid4())
         started_at = time.perf_counter()
@@ -438,7 +444,8 @@ class GatewayRuntime:
             LOGGER.exception("Unhandled gateway error for %s", request.path)
             raise GatewayError(500, "Gateway internal error.") from exc
         finally:
-            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            duration_us = max(0, int(round((time.perf_counter() - started_at) * 1_000_000)))
+            duration_ms = round(duration_us / 1000, 3)
             self._write_log(
                 request_id=request_id,
                 request=request,
@@ -447,8 +454,31 @@ class GatewayRuntime:
                 upstream_curl=upstream_curl,
                 status_code=status_code,
                 duration_ms=duration_ms,
+                duration_us=duration_us,
                 error_message=error_message,
                 response_body=response_body,
+            )
+
+    def _ensure_transport_supported(self, matched: MatchedEndpoint) -> None:
+        route_protocol = str(matched.route.protocol or "http").strip().lower() or "http"
+        service_protocol = str(matched.service.protocol or "http").strip().lower() or "http"
+        if route_protocol not in RUNTIME_IMPLEMENTED_ROUTE_PROTOCOLS:
+            raise GatewayError(
+                501,
+                (
+                    f"Route protocol '{route_protocol}' is declared for route "
+                    f"'{matched.route.slug}' but is not implemented in this NapiGate runtime yet."
+                ),
+                matched=matched,
+            )
+        if service_protocol not in RUNTIME_IMPLEMENTED_SERVICE_PROTOCOLS:
+            raise GatewayError(
+                501,
+                (
+                    f"Service protocol '{service_protocol}' is declared for service "
+                    f"'{matched.service.name}' but is not implemented in this NapiGate runtime yet."
+                ),
+                matched=matched,
             )
 
     def _execute_route(
@@ -666,9 +696,6 @@ class GatewayRuntime:
                 response_source="local",
             )
 
-        upstream_path = self.render_template(matched.endpoint.upstream_path, context)
-        upstream_url = self._join_url(matched.service.base_url, str(upstream_path))
-
         rendered_service_headers = self._render_header_mapping(matched.service.headers, context)
         rendered_endpoint_headers = self._render_header_mapping(matched.endpoint.headers, context)
         request_headers = self._prepare_request_headers(
@@ -683,6 +710,50 @@ class GatewayRuntime:
         if matched.service.forward_napigate_headers:
             request_headers["X-NapiGate-Endpoint-Slug"] = matched.endpoint.slug
             request_headers["X-NapiGate-Route-Slug"] = matched.route.slug
+
+        if matched.service.protocol == "grpc":
+            try:
+                grpc_result = self._execute_grpc_request(
+                    matched=matched,
+                    request=request,
+                    context=context,
+                    request_headers=request_headers,
+                )
+            except GrpcTransportError as exc:
+                raise GatewayError(
+                    exc.status_code,
+                    exc.detail,
+                    matched=matched,
+                    upstream_url=exc.upstream_url,
+                    upstream_curl=exc.upstream_curl,
+                ) from exc
+            outgoing_response = OutgoingResponse(
+                status_code=grpc_result.status_code,
+                headers=self.merge_response_headers(grpc_result.headers, {"X-Request-ID": request_id}),
+                body=grpc_result.body,
+            )
+            outgoing_response = self._apply_output_profile(
+                matched=matched,
+                request=request,
+                response=outgoing_response,
+            )
+            outgoing_response = self._tag_route_response(matched=matched, response=outgoing_response)
+            self._store_cached_response(
+                matched=matched,
+                request=request,
+                authenticated_client=authenticated_client,
+                response=outgoing_response,
+            )
+            return TargetExecutionResult(
+                matched=matched,
+                response=outgoing_response,
+                upstream_url=grpc_result.upstream_url,
+                upstream_curl=grpc_result.upstream_curl,
+                response_source="upstream",
+            )
+
+        upstream_path = self.render_template(matched.endpoint.upstream_path, context)
+        upstream_url = self._join_url(matched.service.base_url, str(upstream_path))
 
         rendered_query = self.render_data(matched.endpoint.query, context)
         final_query = self._merge_query_params(
@@ -812,6 +883,94 @@ class GatewayRuntime:
             upstream_curl=upstream_curl,
             response_source="upstream",
         )
+
+    def _execute_grpc_request(
+        self,
+        *,
+        matched: MatchedEndpoint,
+        request: IncomingRequest,
+        context: dict[str, Any],
+        request_headers: dict[str, str],
+    ):
+        grpc_config = matched.service.grpc
+        grpc_method = matched.endpoint.grpc
+        if grpc_config is None:
+            raise GrpcTransportError(
+                f"Service '{matched.service.name}' is configured for grpc but grpc settings are missing.",
+                status_code=500,
+            )
+        full_method = (
+            self.render_template(grpc_method.full_method, context)
+            if grpc_method is not None
+            else self.render_template(matched.endpoint.upstream_path, context)
+        )
+        if not full_method:
+            raise GrpcTransportError(
+                f"Endpoint '{matched.endpoint.name}' in service '{matched.service.name}' is missing a grpc full method.",
+                status_code=500,
+            )
+        payload = self._grpc_request_payload(
+            matched=matched,
+            request=request,
+            context=context,
+        )
+        return invoke_grpc_unary(
+            target=self._service_target(matched.service),
+            full_method=str(full_method),
+            payload=payload,
+            metadata=self._grpc_request_metadata(request_headers),
+            timeout_seconds=matched.service.timeout_seconds,
+            use_tls=grpc_config.use_tls,
+            authority=grpc_config.authority,
+            root_certificates_path=self._resolve_config_reference(grpc_config.root_certificates_path),
+            descriptor_set_path=self._resolve_config_reference(grpc_config.descriptor_set_path),
+            use_reflection=grpc_config.use_reflection,
+        )
+
+    def _grpc_request_payload(
+        self,
+        *,
+        matched: MatchedEndpoint,
+        request: IncomingRequest,
+        context: dict[str, Any],
+    ) -> Any:
+        grpc_method = matched.endpoint.grpc
+        if grpc_method is not None and grpc_method.request_body is not None:
+            return self.render_data(grpc_method.request_body, context)
+        if request.json_body is not None:
+            return request.json_body
+        if request.body:
+            raise GrpcTransportError(
+                "gRPC targets require a JSON request body or grpc.request_body mapping.",
+                status_code=400,
+            )
+        return {}
+
+    def _grpc_request_metadata(self, request_headers: dict[str, str]) -> list[tuple[str, str]]:
+        metadata: list[tuple[str, str]] = []
+        filtered = {
+            "host",
+            "content-length",
+            "connection",
+            "content-type",
+        }
+        for name, value in request_headers.items():
+            lowered = str(name).strip().lower()
+            if not lowered or lowered in filtered:
+                continue
+            metadata.append((lowered, str(value)))
+        return metadata
+
+    def _service_target(self, service: ServiceConfig) -> str:
+        return str(service.target or service.base_url).strip()
+
+    def _resolve_config_reference(self, value: str | None) -> str | None:
+        if not value:
+            return None
+        path = Path(value)
+        if path.is_absolute():
+            return str(path)
+        return str((self.config_path.parent / path).resolve())
 
     def list_logs(self, limit: int = 200) -> list[dict[str, Any]]:
         return self.log_store.recent(limit=limit)
@@ -1532,6 +1691,7 @@ class GatewayRuntime:
             "route": {
                 "name": matched.route.name,
                 "slug": matched.route.slug,
+                "protocol": matched.route.protocol,
                 "methods": matched.route.methods,
                 "gateway_path": matched.route.gateway_path,
                 "strategy": matched.route.strategy,
@@ -1542,17 +1702,38 @@ class GatewayRuntime:
             },
             "service": {
                 "name": matched.service.name,
+                "protocol": matched.service.protocol,
                 "base_url": matched.service.base_url,
+                "target": matched.service.target,
                 "timeout_seconds": matched.service.timeout_seconds,
                 "verify_ssl": matched.service.verify_ssl,
                 "trust_env_proxy": matched.service.trust_env_proxy,
                 "variables": matched.service.variables,
+                "grpc": (
+                    {
+                        "use_tls": matched.service.grpc.use_tls,
+                        "use_reflection": matched.service.grpc.use_reflection,
+                        "descriptor_set_path": matched.service.grpc.descriptor_set_path,
+                        "authority": matched.service.grpc.authority,
+                        "root_certificates_path": matched.service.grpc.root_certificates_path,
+                    }
+                    if matched.service.grpc is not None
+                    else None
+                ),
             },
             "endpoint": {
                 "name": matched.endpoint.name,
                 "slug": matched.endpoint.slug,
                 "gateway_path": matched.route.gateway_path,
                 "upstream_path": matched.endpoint.upstream_path,
+                "grpc": (
+                    {
+                        "full_method": matched.endpoint.grpc.full_method,
+                        "request_body": matched.endpoint.grpc.request_body,
+                    }
+                    if matched.endpoint.grpc is not None
+                    else None
+                ),
                 "response": (
                     {
                         "status_code": matched.endpoint.response.status_code,
@@ -1964,6 +2145,8 @@ class GatewayRuntime:
 
     def _should_stream_response(self, matched: MatchedEndpoint) -> bool:
         """Return True when the response can be streamed without buffering."""
+        if matched.service.protocol != "http":
+            return False
         for profile_slug in self._output_profile_slugs(matched):
             profile = self.output_profiles.get(profile_slug)
             if profile and profile.enabled and profile.type != "passthrough":
@@ -2157,7 +2340,8 @@ class GatewayRuntime:
         upstream_url: str,
         upstream_curl: str,
         status_code: int,
-        duration_ms: int,
+        duration_ms: float,
+        duration_us: int,
         error_message: str,
         response_body: str,
     ) -> None:
@@ -2172,6 +2356,7 @@ class GatewayRuntime:
             upstream_curl=upstream_curl,
             status_code=status_code,
             duration_ms=duration_ms,
+            duration_us=duration_us,
             client_ip=request.client_ip,
             error=error_message,
             response_body=response_body,
@@ -2192,13 +2377,14 @@ class GatewayRuntime:
                 "upstream_url": upstream_url,
                 "status_code": status_code,
                 "duration_ms": duration_ms,
+                "duration_us": duration_us,
                 "client_ip": request.client_ip,
                 "error": error_message,
                 "created_at": created_at,
             }
         )
         LOGGER.info(
-            "request_id=%s method=%s path=%s route=%s service=%s endpoint=%s status=%s duration_ms=%s upstream=%s error=%s",
+            "request_id=%s method=%s path=%s route=%s service=%s endpoint=%s status=%s duration_ms=%s duration_us=%s upstream=%s error=%s",
             request_id,
             request.method,
             request.path,
@@ -2207,6 +2393,7 @@ class GatewayRuntime:
             matched.endpoint.name,
             status_code,
             duration_ms,
+            duration_us,
             upstream_url,
             error_message or "-",
         )

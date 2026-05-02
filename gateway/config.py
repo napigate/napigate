@@ -15,6 +15,24 @@ DEFAULT_TRUSTED_PROXY_IPS = [
     "192.168.0.0/16",
     "10.0.0.0/8",
 ]
+SERVICE_PROTOCOL_CHOICES = (
+    "http",
+    "grpc",
+    "websocket",
+    "grpc_web",
+    "http3",
+    "tcp",
+    "udp",
+)
+ROUTE_PROTOCOL_CHOICES = (
+    "http",
+    "websocket",
+    "grpc",
+    "grpc_web",
+    "http3",
+)
+RUNTIME_IMPLEMENTED_SERVICE_PROTOCOLS = {"http", "grpc"}
+RUNTIME_IMPLEMENTED_ROUTE_PROTOCOLS = {"http"}
 
 
 CONFIG_PATH = Path("config/services.yaml")
@@ -69,6 +87,21 @@ class ResponseCacheConfig:
     vary_by_client: bool = True
     vary_headers: list[str] = field(default_factory=list)
     methods: list[str] = field(default_factory=lambda: ["GET"])
+
+
+@dataclass(slots=True)
+class GrpcServiceConfig:
+    use_tls: bool = False
+    use_reflection: bool = True
+    descriptor_set_path: str | None = None
+    authority: str | None = None
+    root_certificates_path: str | None = None
+
+
+@dataclass(slots=True)
+class GrpcMethodConfig:
+    full_method: str
+    request_body: Any = None
 
 
 @dataclass(slots=True)
@@ -200,6 +233,7 @@ class EndpointConfig:
     query: dict[str, Any] = field(default_factory=dict)
     pre_call: PreCallConfig | None = None
     response: StaticResponseConfig | None = None
+    grpc: GrpcMethodConfig | None = None
     output_profile: str | None = None
     response_cache: ResponseCacheConfig = field(default_factory=ResponseCacheConfig)
     success_hook: SuccessHookConfig | None = None
@@ -218,6 +252,7 @@ class RouteConfig:
     slug: str
     methods: list[str]
     gateway_path: str
+    protocol: str = "http"
     strategy: str = "single"
     targets: list[RouteTargetConfig] = field(default_factory=list)
     auth: RouteAuthConfig = field(default_factory=RouteAuthConfig)
@@ -233,6 +268,8 @@ class RouteConfig:
 class ServiceConfig:
     name: str
     base_url: str
+    protocol: str = "http"
+    target: str = ""
     timeout_seconds: float = 30.0
     verify_ssl: bool = True
     trust_env_proxy: bool = False
@@ -240,6 +277,7 @@ class ServiceConfig:
     variables: dict[str, Any] = field(default_factory=dict)
     headers: dict[str, Any] = field(default_factory=dict)
     pre_call: PreCallConfig | None = None
+    grpc: GrpcServiceConfig | None = None
     response_cache: ResponseCacheConfig = field(default_factory=ResponseCacheConfig)
     auth: RouteAuthConfig = field(default_factory=RouteAuthConfig)
     cors: CorsConfig = field(default_factory=CorsConfig)
@@ -434,6 +472,63 @@ def _load_response_cache_config(value: Any, *, label: str) -> ResponseCacheConfi
             label=f"{label}.vary_headers",
         ),
         methods=methods,
+    )
+
+
+def _normalize_service_protocol(value: Any, *, label: str) -> str:
+    protocol = str(value or "http").strip().lower() or "http"
+    if protocol not in SERVICE_PROTOCOL_CHOICES:
+        allowed = ", ".join(SERVICE_PROTOCOL_CHOICES)
+        raise ValueError(f"{label} must be one of: {allowed}.")
+    return protocol
+
+
+def _normalize_route_protocol(value: Any, *, label: str) -> str:
+    protocol = str(value or "http").strip().lower() or "http"
+    if protocol not in ROUTE_PROTOCOL_CHOICES:
+        allowed = ", ".join(ROUTE_PROTOCOL_CHOICES)
+        raise ValueError(f"{label} must be one of: {allowed}.")
+    return protocol
+
+
+def _load_grpc_service_config(value: Any, *, label: str) -> GrpcServiceConfig:
+    if value is None:
+        return GrpcServiceConfig()
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a mapping.")
+
+    descriptor_set_path = str(value.get("descriptor_set_path", "") or "").strip() or None
+    use_reflection_value = value.get("use_reflection")
+    use_reflection = (
+        bool(use_reflection_value)
+        if use_reflection_value is not None
+        else descriptor_set_path is None
+    )
+
+    return GrpcServiceConfig(
+        use_tls=bool(value.get("use_tls", False)),
+        use_reflection=use_reflection,
+        descriptor_set_path=descriptor_set_path,
+        authority=str(value.get("authority", "") or "").strip() or None,
+        root_certificates_path=str(value.get("root_certificates_path", "") or "").strip() or None,
+    )
+
+
+def _load_grpc_method_config(value: Any, *, label: str) -> GrpcMethodConfig | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a mapping.")
+
+    full_method = str(
+        value.get("full_method", value.get("method", value.get("upstream_path", ""))) or ""
+    ).strip()
+    if not full_method:
+        raise ValueError(f"{label}.full_method is required.")
+
+    return GrpcMethodConfig(
+        full_method=full_method,
+        request_body=value.get("request_body", value.get("body")),
     )
 
 
@@ -1059,9 +1154,28 @@ def _load_services_block(
                 f"Service '{service_name}' uses deprecated service-local clients. Define clients at the top-level 'clients' list."
             )
 
+        protocol = _normalize_service_protocol(
+            service_data.get("protocol", "http"),
+            label=f"Service '{service_name}' protocol",
+        )
         base_url = str(service_data.get("base_url", "")).strip()
-        if not base_url:
+        target = str(service_data.get("target", "")).strip()
+        effective_target = target or base_url
+        if protocol == "http" and not base_url:
             raise ValueError(f"Service '{service_name}' is missing base_url.")
+        if protocol != "http" and not effective_target:
+            raise ValueError(
+                f"Service '{service_name}' is missing target. Use target or base_url for non-http services."
+            )
+        grpc_raw = service_data.get("grpc")
+        grpc_config = (
+            _load_grpc_service_config(
+                grpc_raw,
+                label=f"grpc for service '{service_name}'",
+            )
+            if protocol == "grpc" or grpc_raw is not None
+            else None
+        )
 
         endpoints_block = service_data.get("endpoints", [])
         if not isinstance(endpoints_block, list):
@@ -1070,6 +1184,8 @@ def _load_services_block(
         service = ServiceConfig(
             name=service_name,
             base_url=base_url,
+            protocol=protocol,
+            target=effective_target,
             timeout_seconds=float(service_data.get("timeout_seconds", 30)),
             verify_ssl=bool(service_data.get("verify_ssl", True)),
             trust_env_proxy=bool(service_data.get("trust_env_proxy", False)),
@@ -1080,6 +1196,7 @@ def _load_services_block(
                 service_data.get("pre_call"),
                 label=f"pre_call for service '{service_name}'",
             ),
+            grpc=grpc_config,
             response_cache=_load_response_cache_config(
                 service_data.get("response_cache"),
                 label=f"response_cache for service '{service_name}'",
@@ -1134,7 +1251,19 @@ def _load_services_block(
                 label=f"response for endpoint '{name}' in service '{service_name}'",
             )
 
-            if not upstream_path and response is None:
+            grpc_method = _load_grpc_method_config(
+                endpoint_data.get("grpc"),
+                label=f"grpc for endpoint '{name}' in service '{service_name}'",
+            )
+            if grpc_method is None and protocol == "grpc" and upstream_path:
+                grpc_method = GrpcMethodConfig(full_method=upstream_path)
+
+            if protocol == "grpc":
+                if grpc_method is None and response is None:
+                    raise ValueError(
+                        f"Endpoint '{name}' in service '{service_name}' needs grpc.full_method or response."
+                    )
+            elif not upstream_path and response is None:
                 raise ValueError(
                     f"Endpoint '{name}' in service '{service_name}' needs upstream_path or response."
                 )
@@ -1171,6 +1300,7 @@ def _load_services_block(
                 query=dict(endpoint_data.get("query") or {}),
                 pre_call=pre_call,
                 response=response,
+                grpc=grpc_method,
                 output_profile=output_profile,
                 response_cache=response_cache,
                 success_hook=success_hook,
@@ -1233,6 +1363,7 @@ def _load_routes_block(
                     slug=endpoint.slug,
                     methods=endpoint.methods,
                     gateway_path=endpoint.gateway_path,
+                    protocol="http",
                     strategy="single",
                     targets=[RouteTargetConfig(service=service.name, endpoint=endpoint.name)],
                     auth=RouteAuthConfig(required=bool(service.auth.required)),
@@ -1264,6 +1395,10 @@ def _load_routes_block(
         gateway_path = str(route_data.get("gateway_path", "")).strip()
         if not gateway_path:
             raise ValueError(f"Route '{name}' needs gateway_path.")
+        protocol = _normalize_route_protocol(
+            route_data.get("protocol", "http"),
+            label=f"Route '{name}' protocol",
+        )
         strategy = str(route_data.get("strategy", "single")).strip().lower() or "single"
         if strategy == "parallel":
             strategy = "parallel_race"
@@ -1321,6 +1456,7 @@ def _load_routes_block(
                 slug=slug,
                 methods=methods,
                 gateway_path=gateway_path,
+                protocol=protocol,
                 strategy=strategy,
                 targets=targets,
                 auth=route_auth,

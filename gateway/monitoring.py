@@ -18,11 +18,18 @@ class LogEntry:
     upstream_url: str
     upstream_curl: str
     status_code: int
-    duration_ms: int
+    duration_ms: float
+    duration_us: int
     client_ip: str
     error: str
     response_body: str
     created_at: str
+
+
+def _format_duration(duration_ms: float, duration_us: int) -> str:
+    if duration_us < 1000:
+        return f"{duration_us} us"
+    return f"{duration_ms:.3f} ms"
 
 
 class RequestLogStore:
@@ -57,7 +64,8 @@ class RequestLogStore:
                     upstream_url TEXT NOT NULL,
                     upstream_curl TEXT NOT NULL DEFAULT '',
                     status_code INTEGER NOT NULL,
-                    duration_ms INTEGER NOT NULL,
+                    duration_ms REAL NOT NULL,
+                    duration_us INTEGER NOT NULL DEFAULT 0,
                     client_ip TEXT NOT NULL,
                     error TEXT NOT NULL,
                     response_body TEXT NOT NULL DEFAULT '',
@@ -80,6 +88,11 @@ class RequestLogStore:
                 "request_logs",
                 "response_body",
                 "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                "request_logs",
+                "duration_us",
+                "INTEGER NOT NULL DEFAULT 0",
             )
             self._connection.commit()
 
@@ -135,12 +148,13 @@ class RequestLogStore:
                     upstream_curl,
                     status_code,
                     duration_ms,
+                    duration_us,
                     client_ip,
                     error,
                     response_body,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry.request_id,
@@ -152,6 +166,7 @@ class RequestLogStore:
                     entry.upstream_curl,
                     entry.status_code,
                     entry.duration_ms,
+                    entry.duration_us,
                     entry.client_ip,
                     entry.error,
                     entry.response_body,
@@ -174,6 +189,7 @@ class RequestLogStore:
                     upstream_curl,
                     status_code,
                     duration_ms,
+                    duration_us,
                     client_ip,
                     error,
                     response_body,
@@ -187,6 +203,12 @@ class RequestLogStore:
         return [
             {
                 **dict(row),
+                "duration_ms": round(float(row["duration_ms"] or 0), 3),
+                "duration_us": int(row["duration_us"] or round(float(row["duration_ms"] or 0) * 1000)),
+                "duration_display": _format_duration(
+                    round(float(row["duration_ms"] or 0), 3),
+                    int(row["duration_us"] or round(float(row["duration_ms"] or 0) * 1000)),
+                ),
                 "success": int(row["status_code"]) < 400,
                 "response_source": (
                     "cache"

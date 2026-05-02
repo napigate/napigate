@@ -320,6 +320,44 @@ class SecurityManager:
             permissions=permissions,
         )
 
+    def restore_session_principal(
+        self,
+        username: str,
+        *,
+        source: str,
+        bootstrap_username: str,
+    ) -> AuthenticatedPrincipal | None:
+        normalized_source = str(source or "").strip().lower()
+        if normalized_source == "bootstrap":
+            if bootstrap_username and hmac.compare_digest(username, bootstrap_username):
+                return AuthenticatedPrincipal(
+                    username=username,
+                    source="bootstrap",
+                    roles=["bootstrap_admin"],
+                    permissions=set(ALL_PERMISSIONS),
+                )
+            return None
+
+        with self._lock:
+            user = deepcopy(self.users.get(username))
+            roles = deepcopy(self.roles)
+
+        if not user or not user.get("enabled", True):
+            return None
+
+        role_names = [str(role) for role in user.get("roles") or []]
+        permissions: set[str] = set()
+        for role_name in role_names:
+            role = roles.get(role_name) or {}
+            permissions.update(str(item) for item in role.get("permissions") or [])
+
+        return AuthenticatedPrincipal(
+            username=username,
+            source="config",
+            roles=role_names,
+            permissions=permissions,
+        )
+
     def public_state(self) -> dict[str, Any]:
         with self._lock:
             roles = deepcopy(self.roles)

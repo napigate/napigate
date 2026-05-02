@@ -42,7 +42,7 @@ WORKDIR /code
 COPY pyproject.toml README.md ./
 COPY gateway ./gateway
 
-RUN pip install --no-cache-dir ".[redis,postgres]"
+RUN pip install --no-cache-dir ".[redis,postgres,grpc]"
 
 RUN mkdir -p /code/config /code/data /code/logs && \
     chown -R "${CURRENT_USER}:${CURRENT_GROUP}" /code

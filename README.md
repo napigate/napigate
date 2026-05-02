@@ -1,10 +1,11 @@
 # NapiGate
 
-NapiGate is a lightweight, config-driven Python API gateway built for small and mid-sized internal integrations. It keeps the stack intentionally small, routes requests to upstream services, authenticates gateway clients, supports trusted inline hooks, and exposes a simple built-in admin and monitoring UI.
+NapiGate is a lightweight, config-driven Python API gateway built for small and mid-sized internal integrations. It keeps the stack intentionally small, routes HTTP requests to HTTP or gRPC upstream services, authenticates gateway clients, supports trusted inline hooks, and exposes a simple built-in admin and monitoring UI.
 
 ## Highlights
 
 - YAML-defined services, endpoint targets, and gateway routes
+- HTTP ingress with an APISIX-inspired protocol catalog; HTTP ingress plus HTTP and gRPC unary upstream execution are supported today
 - route strategies for `single`, `round_robin`, `failover`, and `parallel_race`
 - reusable output profiles for passthrough, JSON envelope, and JSONP responses — selectable at route or endpoint level
 - Top-level client model with scoped access
@@ -20,7 +21,7 @@ NapiGate is a lightweight, config-driven Python API gateway built for small and 
 - Bounded thread pool (`NAPIGATE_MAX_WORKERS`) instead of unbounded per-connection threads
 - Streaming proxy for responses that need no body transformation — memory footprint stays flat for large payloads
 - Optional Redis backend for distributed rate limiting and response caching; falls back to in-memory automatically
-- Minimal dependency footprint: `stdlib + requests + PyYAML` with optional extras for Redis and PostgreSQL
+- Minimal dependency footprint: `stdlib + requests + PyYAML` with optional extras for Redis, PostgreSQL, and gRPC
 
 ## Why This Project
 
@@ -36,7 +37,8 @@ NapiGate is designed for teams that need an API gateway without adopting a large
 The codebase is split into a few focused modules:
 
 - [`gateway/config.py`](gateway/config.py): typed config loading, validation, and route compilation
-- [`gateway/runtime.py`](gateway/runtime.py): request matching, client auth, rate limiting, CORS handling, token issuance, output transforms, response caching, async success hooks, config hot-reload, and upstream proxying
+- [`gateway/runtime.py`](gateway/runtime.py): request matching, client auth, rate limiting, CORS handling, token issuance, output transforms, response caching, async success hooks, config hot-reload, and upstream execution
+- [`gateway/grpc_support.py`](gateway/grpc_support.py): optional dynamic gRPC invocation through server reflection or descriptor-set files
 - [`gateway/cache.py`](gateway/cache.py): pluggable cache and rate-limit backends — in-memory (default) or Redis
 - [`gateway/admin_ops.py`](gateway/admin_ops.py): config and security mutations used by the admin UI
 - [`gateway/state_store.py`](gateway/state_store.py): file or Postgres-backed config/security persistence plus admin audit logs
@@ -56,7 +58,7 @@ The runtime uses a bounded thread pool (`PooledHTTPServer`) and keeps the gatewa
 4. Enforce service-level rate limits when configured.
 5. Check endpoint response cache when configured.
 6. Run `pre_call` if defined.
-7. Render templates, optionally return a local configured response, otherwise forward the request upstream.
+7. Render templates, optionally return a local configured response, otherwise execute the configured upstream transport.
 8. Apply output shaping, response caching, async success hooks, CORS headers, and monitoring/logging records.
 
 ## Project Layout
@@ -108,6 +110,12 @@ To enable the optional Postgres-backed state store:
 pip install ".[postgres]"
 ```
 
+To enable gRPC upstream support outside the Docker image:
+
+```bash
+pip install ".[grpc]"
+```
+
 Or install dependencies without packaging:
 
 ```bash
@@ -116,6 +124,8 @@ pip install requests pyyaml
 pip install "redis[hiredis]"
 # optional Postgres state store:
 pip install "psycopg[binary]"
+# optional gRPC upstream support:
+pip install grpcio grpcio-reflection protobuf
 ```
 
 The package also exposes a console entrypoint after installation:
@@ -149,12 +159,78 @@ python3 -m gateway.main \
 
 - Public health: `http://127.0.0.1:8000/__health`
 - Public OAuth token endpoint: `http://127.0.0.1:8000/__oauth/token`
+- Admin login: `http://127.0.0.1:8001/__login`
 - Admin UI: `http://127.0.0.1:8001/__admin`
 - Monitor HTML: `http://127.0.0.1:8001/__monitor`
 - Monitor JSON: `http://127.0.0.1:8001/__monitor/logs`
 - Live stream: `http://127.0.0.1:8001/__monitor/stream`
 
-`/__admin`, `__monitor`, and `__logout` are intentionally unavailable on the public listener so they can be isolated with firewall rules or a separate reverse-proxy policy.
+`/__login`, `/__admin`, `/__monitor`, and `/__logout` are intentionally unavailable on the public listener so they can be isolated with firewall rules or a separate reverse-proxy policy.
+
+## gRPC Upstreams
+
+NapiGate keeps HTTP on the ingress side, then executes the matched target through the service transport. For gRPC, set the service `protocol` to `grpc`, point `target` at the upstream authority, and define each endpoint method through `grpc.full_method` or the existing `upstream_path` field.
+
+```yaml
+routes:
+  - name: hello_grpc
+    slug: hello-grpc
+    methods: [POST]
+    gateway_path: /demo/grpc/hello
+    strategy: single
+    targets:
+      - service: greeter_grpc
+        endpoint: say_hello
+
+services:
+  greeter_grpc:
+    protocol: grpc
+    target: localhost:50051
+    grpc:
+      use_tls: false
+      use_reflection: true
+    endpoints:
+      - name: say_hello
+        slug: say-hello
+        grpc:
+          full_method: /helloworld.Greeter/SayHello
+          request_body:
+            name: "{{ request.json.name }}"
+```
+
+Then call the public route with normal HTTP JSON:
+
+```bash
+curl -X POST http://127.0.0.1:8000/demo/grpc/hello \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Mohsen"}'
+```
+
+Notes:
+
+- `service.grpc.use_reflection: true` works when the upstream gRPC server exposes reflection.
+- If reflection is disabled, set `service.grpc.descriptor_set_path` to a compiled `.protoset` file that is reachable from the gateway container or process.
+- If `endpoint.grpc.request_body` is omitted, NapiGate forwards the incoming JSON body as the protobuf request message.
+- Service and endpoint header mappings become gRPC metadata after template rendering and auth stripping.
+
+## Protocol Catalog
+
+NapiGate now keeps protocol types explicit on both services and routes so the config and admin UI can describe more than plain HTTP.
+
+- Service protocol choices: `http`, `grpc`, `websocket`, `grpc_web`, `http3`, `tcp`, `udp`
+- Route protocol choices: `http`, `websocket`, `grpc`, `grpc_web`, `http3`
+- Runtime implemented today:
+  - route `http` -> service `http`
+  - route `http` -> service `grpc`
+- Declared but not executed yet:
+  - `websocket`
+  - `grpc` ingress
+  - `grpc_web`
+  - `http3`
+  - `tcp`
+  - `udp`
+
+When a declared-but-unimplemented protocol is matched, NapiGate returns `501` with a direct message instead of silently falling back to HTTP behavior.
 
 ### Nginx Reverse Proxy
 
@@ -238,6 +314,7 @@ docker compose up -d
 The default listener ports are controlled by `APP_PORT` and `ADMIN_PORT` in `.env`.
 `docker-compose.yml` runs the published image from `NAPIGATE_IMAGE` and does not build from the local Dockerfile during normal startup.
 The public listener uses `APP_PORT` and the separate admin/monitor listener uses `ADMIN_PORT`.
+The published Docker image already includes the optional Redis, Postgres, and gRPC dependencies.
 
 Compose mounts `config/`, `data/`, and `logs/` into the container. Changes to `config/services.yaml` and `config/security.yaml` are detected automatically by the running process, so Docker restart cycles are not required for routine config edits.
 
@@ -856,7 +933,7 @@ Current permissions:
 - `services_manage`
 - `security_manage`
 
-If `NAPIGATE_ADMIN_USERNAME` and `NAPIGATE_ADMIN_PASSWORD` are set, admin and monitor routes also require HTTP Basic Auth. The bootstrap admin from `.env` can then manage file-backed users and roles from the admin UI.
+The control-plane now uses a built-in login page and a signed session cookie instead of browser HTTP Basic Auth prompts. If `NAPIGATE_ADMIN_USERNAME` and `NAPIGATE_ADMIN_PASSWORD` are set, that bootstrap admin from `.env` can sign in immediately and manage file-backed users and roles from the admin UI.
 
 If `NAPIGATE_ADMIN_ACCESS_WHITELIST_IPS` is empty, admin routes accept requests from any IP. If it contains comma-separated IPs or CIDRs, every `/__admin` page and admin API request must originate from one of those ranges.
 
@@ -898,7 +975,7 @@ Examples:
 
 Notes:
 
-- These routes require HTTP Basic Auth plus the normal `services_manage` permission.
+- These routes require an authenticated admin session plus the normal `services_manage` permission.
 - Full config replacement accepts JSON or YAML request bodies.
 - Client automation should use `slug`, not the display title.
 

@@ -254,6 +254,7 @@ def save_service(
     *,
     original_name: str,
     service_name: str,
+    protocol: str,
     base_url: str,
     timeout_seconds: float,
     verify_ssl: bool,
@@ -291,14 +292,45 @@ def save_service(
     elif service_name in services:
         existing = dict(services[service_name])
 
-    payload: dict[str, Any] = {
-        "base_url": base_url,
-        "timeout_seconds": timeout_seconds,
-        "verify_ssl": verify_ssl,
-        "trust_env_proxy": trust_env_proxy,
-        "forward_napigate_headers": forward_napigate_headers,
-        "endpoints": list(existing.get("endpoints") or []),
+    managed_keys = {
+        "base_url",
+        "target",
+        "timeout_seconds",
+        "verify_ssl",
+        "trust_env_proxy",
+        "forward_napigate_headers",
+        "variables",
+        "headers",
+        "pre_call",
+        "response_cache",
+        "cors",
+        "rate_limit",
+        "endpoints",
     }
+    payload: dict[str, Any] = {
+        key: value
+        for key, value in existing.items()
+        if key not in managed_keys
+    }
+    payload.update(
+        {
+            "timeout_seconds": timeout_seconds,
+            "verify_ssl": verify_ssl,
+            "trust_env_proxy": trust_env_proxy,
+            "forward_napigate_headers": forward_napigate_headers,
+            "endpoints": list(existing.get("endpoints") or []),
+        }
+    )
+    service_protocol = str(protocol or existing.get("protocol", "http") or "http").strip().lower() or "http"
+    payload["protocol"] = service_protocol
+    if service_protocol == "http":
+        payload["base_url"] = base_url
+        payload.pop("target", None)
+    else:
+        payload["target"] = base_url
+        payload.pop("base_url", None)
+    if service_protocol != "grpc":
+        payload.pop("grpc", None)
     if variables:
         payload["variables"] = variables
     if headers:
@@ -339,6 +371,8 @@ def save_service(
             "window_seconds": rate_limit_window_seconds,
             "scope": rate_limit_scope,
         }
+    else:
+        payload.pop("rate_limit", None)
 
     services[service_name] = payload
     save_config_document(config_path, document)
@@ -440,6 +474,7 @@ def _legacy_routes_from_endpoints(document: dict[str, Any]) -> list[dict[str, An
             route: dict[str, Any] = {
                 "name": str(endpoint.get("name", "")),
                 "slug": str(endpoint.get("slug", endpoint.get("name", ""))).strip().lower(),
+                "protocol": "http",
                 "methods": list(endpoint.get("methods") or ["GET"]),
                 "gateway_path": gateway_path,
                 "strategy": "single",
@@ -532,7 +567,10 @@ def save_endpoint(
         ):
             raise ValueError(f"Endpoint slug '{endpoint_slug}' already exists in '{service_name}'.")
 
+    service_protocol = str(service.get("protocol", "http") or "http").strip().lower() or "http"
     if not upstream_path and not isinstance(existing_endpoint.get("response"), dict):
+        if service_protocol == "grpc":
+            raise ValueError("gRPC full method is required unless the endpoint already uses a local response block.")
         raise ValueError("Upstream path is required unless the endpoint already uses a local response block.")
 
     payload: dict[str, Any] = dict(existing_endpoint)
@@ -540,10 +578,21 @@ def save_endpoint(
     payload["slug"] = endpoint_slug
     payload.pop("methods", None)
     payload.pop("gateway_path", None)
-    if upstream_path:
-        payload["upstream_path"] = upstream_path
-    else:
+    if service_protocol == "grpc":
+        existing_grpc = payload.get("grpc")
+        grpc_payload = dict(existing_grpc) if isinstance(existing_grpc, dict) else {}
+        if upstream_path:
+            grpc_payload["full_method"] = upstream_path
+            payload["grpc"] = grpc_payload
+        else:
+            payload.pop("grpc", None)
         payload.pop("upstream_path", None)
+    else:
+        payload.pop("grpc", None)
+        if upstream_path:
+            payload["upstream_path"] = upstream_path
+        else:
+            payload.pop("upstream_path", None)
     if headers:
         payload["headers"] = headers
     else:
@@ -600,6 +649,7 @@ def save_route(
     original_slug: str,
     route_name: str,
     route_slug: str,
+    protocol: str,
     methods: list[str],
     gateway_path: str,
     strategy: str,
@@ -626,6 +676,7 @@ def save_route(
     payload: dict[str, Any] = {
         "name": route_name,
         "slug": route_slug,
+        "protocol": protocol,
         "methods": methods,
         "gateway_path": gateway_path,
         "strategy": strategy,
