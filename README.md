@@ -337,7 +337,7 @@ NAPIGATE_POSTGRES_DSN=postgresql://napigate:napigate@postgres:5432/napigate
 The default image is `napigate/napigate:latest`. Override it in `.env` when publishing under another Docker Hub namespace or when pinning a release:
 
 ```dotenv
-NAPIGATE_IMAGE=your-dockerhub-username/napigate:0.1.0
+NAPIGATE_IMAGE=your-dockerhub-username/napigate:0.1.1
 NAPIGATE_PULL_POLICY=missing
 ```
 
@@ -345,8 +345,8 @@ Build and push a release image explicitly with the build override:
 
 ```bash
 docker login
-NAPIGATE_IMAGE=your-dockerhub-username/napigate:0.1.0 docker compose -f docker-compose.yml -f docker-compose.build.yml build app
-NAPIGATE_IMAGE=your-dockerhub-username/napigate:0.1.0 docker compose -f docker-compose.yml -f docker-compose.build.yml push app
+NAPIGATE_IMAGE=your-dockerhub-username/napigate:0.1.1 docker compose -f docker-compose.yml -f docker-compose.build.yml build app
+NAPIGATE_IMAGE=your-dockerhub-username/napigate:0.1.1 docker compose -f docker-compose.yml -f docker-compose.build.yml push app
 ```
 
 For automated publishing, configure the GitHub repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`. The workflow in `.github/workflows/docker-image.yml` pushes `napigate/napigate:latest` from `main` and version tags from `v*.*.*` tags; change `IMAGE_NAME` in that workflow if the Docker Hub namespace is different.

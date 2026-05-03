@@ -97,6 +97,16 @@ def _security_path_default() -> str:
     )
 
 
+def normalize_request_target(target: str) -> str:
+    """Repair request targets that http.server decoded from raw UTF-8 bytes as latin-1."""
+    if not target:
+        return target
+    try:
+        return target.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return target
+
+
 def configure_application(*, config_path: Path | str, security_path: Path | str) -> None:
     global runtime
     global security
@@ -6625,7 +6635,7 @@ class PooledHTTPServer(ThreadingHTTPServer):
 
 class GatewayHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "NapiGate/0.1"
+    server_version = "NapiGate/0.1.1"
 
     def do_GET(self) -> None:  # noqa: N802
         self._dispatch()
@@ -6800,7 +6810,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
     def _dispatch(self) -> None:
         runtime.maybe_reload()
         security.maybe_reload()
-        parsed = urlsplit(self.path)
+        request_target = normalize_request_target(self.path)
+        parsed = urlsplit(request_target)
         query = {key: values[-1] for key, values in parse_qs(parsed.query, keep_blank_values=True).items()}
 
         if parsed.path == "/__health":
@@ -7079,7 +7090,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
         request = None
         try:
-            request = self._build_request(parsed)
+            request = self._build_request(parsed, request_target=request_target)
             if self.command == "OPTIONS":
                 options_response = runtime.handle_options(request)
                 if options_response is not None:
@@ -7302,10 +7313,11 @@ class GatewayHandler(BaseHTTPRequestHandler):
         principal = self._authenticate_principal()
         if principal is None:
             self._discard_request_body()
+            next_path = normalize_request_target(self.path)
             if interactive and self.command == "GET":
-                self._redirect(self._login_location(next_path=self.path))
+                self._redirect(self._login_location(next_path=next_path))
             else:
-                self._auth_required_json(next_path=self.path)
+                self._auth_required_json(next_path=next_path)
             return None
         if permission and not principal.can(permission):
             self._discard_request_body()
@@ -8672,13 +8684,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             self._send_json({"detail": str(exc)}, status_code=400)
 
-    def _build_request(self, parsed) -> IncomingRequest:
+    def _build_request(self, parsed, *, request_target: str) -> IncomingRequest:
         body = self._read_body()
         query = {key: values[-1] for key, values in parse_qs(parsed.query, keep_blank_values=True).items()}
         headers = {key: value for key, value in self.headers.items()}
         host = self.headers.get("Host", "127.0.0.1")
         scheme = "http"
-        url = f"{scheme}://{host}{self.path}"
+        url = f"{scheme}://{host}{request_target}"
         client_ip = self._client_ip()
         json_body = None
         if body:
