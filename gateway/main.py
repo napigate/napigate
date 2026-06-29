@@ -6724,7 +6724,7 @@ class PooledHTTPServer(ThreadingHTTPServer):
 
 class GatewayHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "NapiGate/0.1.1"
+    server_version = "NapiGate/0.1.2"
 
     def do_GET(self) -> None:  # noqa: N802
         self._dispatch()
