@@ -286,6 +286,7 @@ class RequestLogStore:
                 "requests": 0,
                 "failures": 0,
                 "cache_hits": 0,
+                "status_codes": {},
                 "avg_duration_ms": 0.0,
                 "_duration_sum_ms": 0.0,
             }
@@ -300,6 +301,7 @@ class RequestLogStore:
         requests_last_hour = 0
         failures_last_hour = 0
         status_breakdown: Counter[str] = Counter()
+        status_code_breakdown: Counter[str] = Counter()
         service_stats: dict[str, dict[str, float | int | str]] = {}
         path_stats: dict[str, dict[str, float | int | str]] = {}
         last_hour_cutoff = now - timedelta(hours=1)
@@ -334,6 +336,8 @@ class RequestLogStore:
                 requests_last_hour += 1
                 failures_last_hour += int(failed)
 
+            status_code_key = str(status_code)
+            status_code_breakdown[status_code_key] += 1
             if status_code >= 500:
                 status_breakdown["5xx"] += 1
             elif status_code >= 400:
@@ -352,6 +356,8 @@ class RequestLogStore:
                 bucket["requests"] += 1
                 bucket["failures"] += int(failed)
                 bucket["cache_hits"] += int(cache_hit)
+                bucket_status_codes = bucket["status_codes"]
+                bucket_status_codes[status_code_key] = int(bucket_status_codes.get(status_code_key, 0)) + 1
                 bucket["_duration_sum_ms"] += duration_ms
 
             service_entry = service_stats.setdefault(
@@ -380,8 +386,20 @@ class RequestLogStore:
             path_entry["failures"] += int(failed)
             path_entry["_duration_sum_ms"] += duration_ms
 
+        def _status_code_sort_key(value: str) -> tuple[int, str]:
+            try:
+                return (int(value), value)
+            except ValueError:
+                return (0, value)
+
         for bucket in buckets:
             requests = int(bucket["requests"] or 0)
+            status_codes = bucket.get("status_codes")
+            if isinstance(status_codes, dict):
+                bucket["status_codes"] = {
+                    code: int(status_codes.get(code, 0) or 0)
+                    for code in sorted((str(code) for code in status_codes.keys()), key=_status_code_sort_key)
+                }
             duration_sum = float(bucket.pop("_duration_sum_ms", 0.0) or 0.0)
             bucket["avg_duration_ms"] = round(duration_sum / requests, 3) if requests else 0.0
 
@@ -444,6 +462,10 @@ class RequestLogStore:
             "status_breakdown": [
                 {"label": label, "count": int(status_breakdown.get(label, 0))}
                 for label in ("2xx", "3xx", "4xx", "5xx", "other")
+            ],
+            "status_codes": [
+                {"code": code, "count": int(status_code_breakdown.get(code, 0))}
+                for code in sorted(status_code_breakdown.keys(), key=_status_code_sort_key)
             ],
             "top_services": _finalize_top_items(service_stats, key_name="name"),
             "top_paths": _finalize_top_items(path_stats, key_name="path"),

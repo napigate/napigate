@@ -85,11 +85,13 @@ class MonitoringTests(unittest.TestCase):
 
         self.assertEqual(report["timezone_offset_minutes"], 210)
         self.assertEqual(report["totals"]["requests"], 1)
+        self.assertEqual(report["status_codes"], [{"code": "200", "count": 1}])
         populated_bucket = next(bucket for bucket in report["hourly"] if bucket["requests"] == 1)
         bucket_start = datetime.fromisoformat(populated_bucket["bucket_start"])
         self.assertEqual(bucket_start.utcoffset(), timedelta(minutes=210))
         self.assertEqual(bucket_start.minute, 0)
         self.assertEqual(populated_bucket["label"], bucket_start.strftime("%H:%M"))
+        self.assertEqual(populated_bucket["status_codes"], {"200": 1})
 
     def test_cache_log_keeps_replayable_incoming_request_curl(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

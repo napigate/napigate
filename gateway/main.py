@@ -1850,6 +1850,52 @@ def render_admin_page(
           margin-bottom: 10px;
           line-height: 1.45;
         }}
+        .live-chart-toolbar {{
+          display: flex;
+          flex-wrap: wrap;
+          justify-content: space-between;
+          align-items: center;
+          gap: 8px;
+          margin-bottom: 10px;
+        }}
+        .live-chart-status-filter {{
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+          align-items: center;
+          min-width: 0;
+        }}
+        .live-status-check {{
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          border: 1px solid #d8e1ec;
+          border-radius: 999px;
+          background: #f8fafd;
+          color: #334155;
+          padding: 4px 8px;
+          font-size: 11px;
+          font-weight: 800;
+          cursor: pointer;
+          user-select: none;
+        }}
+        .live-status-check input {{
+          width: 13px;
+          height: 13px;
+          margin: 0;
+          accent-color: var(--accent);
+        }}
+        .live-status-check.excluded {{
+          opacity: 0.56;
+          background: #fff;
+        }}
+        .live-chart-action {{
+          background: #fff;
+          color: var(--ink);
+          border: 1px solid #d2d8e0;
+          padding: 5px 8px;
+          font-size: 11px;
+        }}
         .live-chart-wrap {{
           display: grid;
           gap: 10px;
@@ -1886,6 +1932,11 @@ def render_admin_page(
         .live-chart-label {{
           fill: #6b7280;
           font-size: 11px;
+          font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+        }}
+        .live-chart-axis-label {{
+          fill: #64748b;
+          font-size: 10px;
           font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
         }}
         .live-chart-legend {{
@@ -2849,6 +2900,7 @@ def render_admin_page(
         let liveConnectionState = STATE.live?.can_view ? "connecting" : "locked";
         let livePollTimer = null;
         let livePaused = false;
+        const liveChartExcludedStatuses = new Set();
 
         function openModal(title, bodyHtml) {{
           modalTitle.textContent = title;
@@ -3664,6 +3716,144 @@ def render_admin_page(
           return Number.isFinite(numeric) ? numeric : 0;
         }}
 
+        function statusCodeSortValue(value) {{
+          const numeric = Number(value);
+          return Number.isFinite(numeric) ? numeric : -1;
+        }}
+
+        function exactStatusCodesFromReport(report) {{
+          const reported = Array.isArray(report?.status_codes) ? report.status_codes : [];
+          const statusCounts = new Map();
+          reported.forEach((item) => {{
+            const code = String(item?.code ?? "").trim();
+            if (!code) return;
+            statusCounts.set(code, numberOrZero(item?.count));
+          }});
+          if (!statusCounts.size) {{
+            const hourly = Array.isArray(report?.hourly) ? report.hourly : [];
+            hourly.forEach((bucket) => {{
+              const bucketStatuses = bucket?.status_codes && typeof bucket.status_codes === "object"
+                ? bucket.status_codes
+                : {{}};
+              Object.entries(bucketStatuses).forEach(([code, count]) => {{
+                const key = String(code || "").trim();
+                if (!key) return;
+                statusCounts.set(key, numberOrZero(statusCounts.get(key)) + numberOrZero(count));
+              }});
+            }});
+          }}
+          return Array.from(statusCounts.entries())
+            .map(([code, count]) => ({{ code, count }}))
+            .sort((left, right) => statusCodeSortValue(left.code) - statusCodeSortValue(right.code) || left.code.localeCompare(right.code));
+        }}
+
+        function bucketStatusCounts(bucket) {{
+          const raw = bucket?.status_codes && typeof bucket.status_codes === "object" ? bucket.status_codes : null;
+          if (!raw) return null;
+          const counts = new Map();
+          Object.entries(raw).forEach(([code, count]) => {{
+            const key = String(code || "").trim();
+            if (!key) return;
+            counts.set(key, numberOrZero(count));
+          }});
+          return counts;
+        }}
+
+        function selectedChartStatusCodes(statusCodes) {{
+          return statusCodes
+            .map((item) => String(item?.code ?? "").trim())
+            .filter((code) => code && !liveChartExcludedStatuses.has(code));
+        }}
+
+        function filterHourlyByStatus(hourly, statusCodes) {{
+          const selected = new Set(selectedChartStatusCodes(statusCodes));
+          const hasStatusCounts = hourly.some((bucket) => {{
+            const counts = bucketStatusCounts(bucket);
+            return counts !== null && counts.size > 0;
+          }});
+          if (!hasStatusCounts || !statusCodes.length) {{
+            return hourly.map((bucket) => {{
+              const nextBucket = Object.assign({{}}, bucket);
+              nextBucket.requests = numberOrZero(bucket?.requests);
+              nextBucket.failures = numberOrZero(bucket?.failures);
+              return nextBucket;
+            }});
+          }}
+          return hourly.map((bucket) => {{
+            const counts = bucketStatusCounts(bucket) || new Map();
+            let requests = 0;
+            let failures = 0;
+            counts.forEach((count, code) => {{
+              if (!selected.has(String(code))) return;
+              const normalizedCount = numberOrZero(count);
+              requests += normalizedCount;
+              if (statusCodeSortValue(code) >= 400) {{
+                failures += normalizedCount;
+              }}
+            }});
+            const nextBucket = Object.assign({{}}, bucket);
+            nextBucket.requests = requests;
+            nextBucket.failures = failures;
+            return nextBucket;
+          }});
+        }}
+
+        function renderChartStatusFilter(statusCodes) {{
+          const items = Array.isArray(statusCodes) ? statusCodes.filter((item) => numberOrZero(item?.count) > 0) : [];
+          if (!items.length) return "";
+          return `
+            <div class="live-chart-toolbar">
+              <div class="live-chart-status-filter">
+                ${{
+                  items.map((item) => {{
+                    const code = String(item.code || "").trim();
+                    const checked = !liveChartExcludedStatuses.has(code);
+                    return `
+                      <label class="live-status-check ${{checked ? "" : "excluded"}}">
+                        <input type="checkbox" data-live-chart-status="${{esc(code)}}" onchange="toggleLiveChartStatus(this)" ${{checked ? "checked" : ""}}>
+                        <span>${{esc(code)}}</span>
+                        <span class="muted">${{numberOrZero(item.count)}}</span>
+                      </label>
+                    `;
+                  }}).join("")
+                }}
+              </div>
+              <div class="actions">
+                <button class="live-chart-action" type="button" onclick="resetLiveChartStatuses()">All</button>
+                <button class="live-chart-action" type="button" onclick="showOnlyFailureChartStatuses()">4xx/5xx</button>
+              </div>
+            </div>
+          `;
+        }}
+
+        function toggleLiveChartStatus(input) {{
+          const code = String(input?.dataset?.liveChartStatus || "").trim();
+          if (!code) return;
+          if (input.checked) {{
+            liveChartExcludedStatuses.delete(code);
+          }} else {{
+            liveChartExcludedStatuses.add(code);
+          }}
+          renderLive();
+        }}
+
+        function resetLiveChartStatuses() {{
+          liveChartExcludedStatuses.clear();
+          renderLive();
+        }}
+
+        function showOnlyFailureChartStatuses() {{
+          const statusCodes = exactStatusCodesFromReport(liveReport);
+          liveChartExcludedStatuses.clear();
+          statusCodes.forEach((item) => {{
+            const code = String(item?.code ?? "").trim();
+            if (code && statusCodeSortValue(code) < 400) {{
+              liveChartExcludedStatuses.add(code);
+            }}
+          }});
+          renderLive();
+        }}
+
         function formatMsNumber(value) {{
           return `${{numberOrZero(value).toFixed(3)}} ms`;
         }}
@@ -3681,6 +3871,7 @@ def render_admin_page(
           const totals = report?.totals && typeof report.totals === "object" ? report.totals : null;
           const hourly = Array.isArray(report?.hourly) ? report.hourly : [];
           const statusBreakdown = Array.isArray(report?.status_breakdown) ? report.status_breakdown : [];
+          const statusCodes = exactStatusCodesFromReport(report);
           const topServices = Array.isArray(report?.top_services) ? report.top_services : [];
           const topPaths = Array.isArray(report?.top_paths) ? report.top_paths : [];
           return {{
@@ -3688,6 +3879,7 @@ def render_admin_page(
             totals,
             hourly,
             statusBreakdown,
+            statusCodes,
             topServices,
             topPaths,
             recent: summarizeLiveRows(liveRows),
@@ -3704,25 +3896,35 @@ def render_admin_page(
           return points.map((point, index) => `${{index === 0 ? "M" : "L"}}${{point.x.toFixed(1)}} ${{point.y.toFixed(1)}}`).join(" ");
         }}
 
-        function renderTrendChart(hourly) {{
+        function chartCountTicks(maxValue) {{
+          const maxCount = Math.max(1, Math.ceil(numberOrZero(maxValue)));
+          const step = Math.max(1, Math.ceil(maxCount / 4));
+          const ticks = new Set([0, maxCount]);
+          for (let value = step; value < maxCount; value += step) {{
+            ticks.add(value);
+          }}
+          return Array.from(ticks).sort((left, right) => left - right);
+        }}
+
+        function renderTrendChart(hourly, statusCodes = []) {{
           if (!hourly.length) {{
             return '<div class="empty">No 24-hour activity has been recorded yet.</div>';
           }}
+          const filteredHourly = filterHourlyByStatus(hourly, statusCodes);
           const width = 760;
-          const height = 220;
+          const height = 230;
           const paddingTop = 18;
           const paddingRight = 18;
           const paddingBottom = 30;
-          const paddingLeft = 18;
+          const paddingLeft = 52;
           const innerWidth = width - paddingLeft - paddingRight;
           const innerHeight = height - paddingTop - paddingBottom;
-          const maxRequests = Math.max(1, ...hourly.map((bucket) => numberOrZero(bucket.requests)));
-          const maxFailures = Math.max(1, ...hourly.map((bucket) => numberOrZero(bucket.failures)));
-          const stepX = hourly.length > 1 ? innerWidth / (hourly.length - 1) : innerWidth;
+          const maxCount = Math.max(1, ...filteredHourly.map((bucket) => Math.max(numberOrZero(bucket.requests), numberOrZero(bucket.failures))));
+          const stepX = filteredHourly.length > 1 ? innerWidth / (filteredHourly.length - 1) : innerWidth;
           const baselineY = paddingTop + innerHeight;
-          const requestPoints = hourly.map((bucket, index) => {{
+          const requestPoints = filteredHourly.map((bucket, index) => {{
             const x = paddingLeft + stepX * index;
-            const requestHeight = (numberOrZero(bucket.requests) / maxRequests) * innerHeight;
+            const requestHeight = (numberOrZero(bucket.requests) / maxCount) * innerHeight;
             return {{
               x,
               y: baselineY - requestHeight,
@@ -3730,50 +3932,62 @@ def render_admin_page(
               requests: numberOrZero(bucket.requests),
             }};
           }});
-          const failurePoints = hourly.map((bucket, index) => {{
+          const failurePoints = filteredHourly.map((bucket, index) => {{
             const x = paddingLeft + stepX * index;
-            const failureHeight = (numberOrZero(bucket.failures) / maxFailures) * innerHeight;
+            const failureHeight = (numberOrZero(bucket.failures) / maxCount) * innerHeight;
             return {{
               x,
               y: baselineY - failureHeight,
               failures: numberOrZero(bucket.failures),
             }};
           }});
-          const gridLines = [0, 0.25, 0.5, 0.75, 1].map((ratio) => {{
-            const y = paddingTop + innerHeight * ratio;
-            return `<line x1="${{paddingLeft}}" y1="${{y.toFixed(1)}}" x2="${{width - paddingRight}}" y2="${{y.toFixed(1)}}" class="live-chart-grid"></line>`;
+          const gridLines = chartCountTicks(maxCount).map((value) => {{
+            const y = baselineY - (numberOrZero(value) / maxCount) * innerHeight;
+            return `
+              <line x1="${{paddingLeft}}" y1="${{y.toFixed(1)}}" x2="${{width - paddingRight}}" y2="${{y.toFixed(1)}}" class="live-chart-grid"></line>
+              <text x="${{(paddingLeft - 9).toFixed(1)}}" y="${{(y + 3.5).toFixed(1)}}" text-anchor="end" class="live-chart-axis-label">${{esc(value)}}</text>
+            `;
           }}).join("");
-          const labelEvery = Math.max(1, Math.floor(hourly.length / 6));
+          const labelEvery = Math.max(1, Math.floor(filteredHourly.length / 6));
           const labels = requestPoints
-            .map((point, index) => index % labelEvery === 0 || index === hourly.length - 1
+            .map((point, index) => index % labelEvery === 0 || index === filteredHourly.length - 1
               ? `<text x="${{point.x.toFixed(1)}}" y="${{height - 8}}" text-anchor="middle" class="live-chart-label">${{esc(point.label)}}</text>`
               : "")
             .join("");
-          const requestBarWidth = Math.max(8, innerWidth / Math.max(hourly.length * 1.85, 1));
+          const requestBarWidth = Math.max(8, innerWidth / Math.max(filteredHourly.length * 1.85, 1));
           const bars = requestPoints
-            .map((point) => `
-              <rect
-                x="${{(point.x - requestBarWidth / 2).toFixed(1)}}"
-                y="${{point.y.toFixed(1)}}"
-                width="${{requestBarWidth.toFixed(1)}}"
-                height="${{Math.max(1, baselineY - point.y).toFixed(1)}}"
-                rx="4"
-                class="live-chart-bar"
-              >
-                <title>${{point.label}}: ${{point.requests}} requests</title>
-              </rect>
-            `)
+            .map((point) => {{
+              const barHeight = Math.max(0, baselineY - point.y);
+              return `
+                <rect
+                  x="${{(point.x - requestBarWidth / 2).toFixed(1)}}"
+                  y="${{point.y.toFixed(1)}}"
+                  width="${{requestBarWidth.toFixed(1)}}"
+                  height="${{point.requests ? Math.max(1, barHeight).toFixed(1) : "0"}}"
+                  rx="4"
+                  class="live-chart-bar"
+                >
+                  <title>${{point.label}}: ${{point.requests}} selected requests</title>
+                </rect>
+              `;
+            }})
             .join("");
           const failuresPath = chartLinePath(failurePoints);
           const failureDots = failurePoints
             .map((point, index) => `
               <circle cx="${{point.x.toFixed(1)}}" cy="${{point.y.toFixed(1)}}" r="3.2" class="live-chart-line-dot">
-                <title>${{requestPoints[index].label}}: ${{point.failures}} failures</title>
+                <title>${{requestPoints[index].label}}: ${{point.failures}} selected failures</title>
               </circle>
             `)
             .join("");
+          const filterMarkup = renderChartStatusFilter(statusCodes);
+          const selectedStatusCount = selectedChartStatusCodes(statusCodes).length;
+          const statusNote = statusCodes.length
+            ? `<span>${{selectedStatusCount}}/${{statusCodes.length}} status codes shown</span>`
+            : "";
           return `
             <div class="live-chart-wrap">
+              ${{filterMarkup}}
               <svg viewBox="0 0 ${{width}} ${{height}}" class="live-chart" role="img" aria-label="24 hour request and failure chart">
                 ${{gridLines}}
                 <path d="${{chartBarPath(requestPoints, baselineY)}}" class="live-chart-bar-guide"></path>
@@ -3783,8 +3997,9 @@ def render_admin_page(
                 ${{labels}}
               </svg>
               <div class="live-chart-legend">
-                <span><i class="live-chart-chip requests"></i>Requests per hour</span>
-                <span><i class="live-chart-chip failures"></i>4xx/5xx failures per hour</span>
+                <span><i class="live-chart-chip requests"></i>Selected requests per hour</span>
+                <span><i class="live-chart-chip failures"></i>Selected 4xx/5xx per hour</span>
+                ${{statusNote}}
               </div>
             </div>
           `;
@@ -4620,7 +4835,7 @@ def render_admin_page(
                   Hourly requests and failures from monitor storage, refreshed with the Live tab.
                   Snapshot time: <span class="mono">${{esc(formatDateTime(reportGeneratedAt))}}</span>
                 </div>
-                ${{renderTrendChart(analytics.hourly)}}
+                ${{renderTrendChart(analytics.hourly, analytics.statusCodes)}}
               </div>
 
               <div class="live-report-side">
