@@ -163,7 +163,7 @@ python3 -m gateway.main \
 - Admin UI: `http://127.0.0.1:8001/__admin`
 - Monitor HTML: `http://127.0.0.1:8001/__monitor`
 - Monitor JSON: `http://127.0.0.1:8001/__monitor/logs`
-- Monitor 24h report JSON: `http://127.0.0.1:8001/__monitor/report?hours=24&bucket_minutes=60`
+- Monitor 24h report JSON: `http://127.0.0.1:8001/__monitor/report?hours=24&bucket_minutes=60&timezone_offset_minutes=210`
 - Live stream: `http://127.0.0.1:8001/__monitor/stream`
 
 `/__login`, `/__admin`, `/__monitor`, and `/__logout` are intentionally unavailable on the public listener so they can be isolated with firewall rules or a separate reverse-proxy policy.
@@ -951,8 +951,9 @@ The request monitor exposes:
 
 - HTML table view
 - JSON log list
-- 24-hour summary/report JSON with hourly buckets
+- 24-hour summary/report JSON with hourly buckets aligned to the optional `timezone_offset_minutes` offset; the Admin chart sends the browser offset automatically
 - server-sent events live stream
+- incoming request cURL capture, used on cache hits so query parameters, headers, and request bodies remain inspectable even when no upstream call runs
 
 Structured request logs can also be forwarded to configured HTTP JSON or Loki sinks through the async dispatcher.
 

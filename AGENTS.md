@@ -599,6 +599,7 @@ Common:
   - `GET /__monitor/logs`
 - JSON 24h monitor report:
   - `GET /__monitor/report`
+  - accepts `timezone_offset_minutes`; the Admin Live chart sends the browser offset so hourly buckets align with local wall-clock hours
 - Live stream:
   - `GET /__monitor/stream`
   - these monitor endpoints are served only from the admin listener, not the public listener
@@ -639,6 +640,7 @@ Common:
   - hourly cleanup of rows and rotated files when `observability.log_retention_hours` is set
 - proxied request capture:
   - monitor rows now also persist the final upstream URL and rendered `curl` command after templating, auth stripping, and header/query injection
+  - cache-hit rows persist a separate incoming request `curl` command because no upstream request is prepared; this keeps incoming query parameters, headers, and bodies inspectable
   - monitor rows also persist the final outgoing response body text shown to the client when it can be decoded as text
 
 ## 11) Admin UI Notes
@@ -661,6 +663,7 @@ Common:
 - Admin modal save/delete actions use AJAX when JavaScript is available, refresh the in-page admin state, and preserve the active tab instead of returning to Live.
 - Active tabs are dark with white text by design.
 - Monitor and admin Live tables now show `Status` plus a `Response` column for each request row.
+- Standalone monitor timestamps and Admin 24-hour chart labels use the browser timezone; report buckets are aligned through `timezone_offset_minutes`.
 - Monitor and admin Live views now expose the final upstream URL plus a copyable rendered `cURL` for proxied requests.
 - The Admin `Live` tab also includes a 24-hour summary with hourly request/failure buckets and top service/path activity.
 - The Config tab now shows the current public/admin listener URLs plus the active state-store mode.

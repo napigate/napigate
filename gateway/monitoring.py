@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
 import threading
@@ -25,6 +25,7 @@ class LogEntry:
     error: str
     response_body: str
     created_at: str
+    request_curl: str = ""
 
 
 def _format_duration(duration_ms: float, duration_us: int) -> str:
@@ -65,6 +66,7 @@ class RequestLogStore:
                     endpoint_name TEXT NOT NULL,
                     upstream_url TEXT NOT NULL,
                     upstream_curl TEXT NOT NULL DEFAULT '',
+                    request_curl TEXT NOT NULL DEFAULT '',
                     status_code INTEGER NOT NULL,
                     duration_ms REAL NOT NULL,
                     duration_us INTEGER NOT NULL DEFAULT 0,
@@ -84,6 +86,11 @@ class RequestLogStore:
             self._ensure_column(
                 "request_logs",
                 "upstream_curl",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                "request_logs",
+                "request_curl",
                 "TEXT NOT NULL DEFAULT ''",
             )
             self._ensure_column(
@@ -148,6 +155,7 @@ class RequestLogStore:
                     endpoint_name,
                     upstream_url,
                     upstream_curl,
+                    request_curl,
                     status_code,
                     duration_ms,
                     duration_us,
@@ -156,7 +164,7 @@ class RequestLogStore:
                     response_body,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry.request_id,
@@ -166,6 +174,7 @@ class RequestLogStore:
                     entry.endpoint_name,
                     entry.upstream_url,
                     entry.upstream_curl,
+                    entry.request_curl,
                     entry.status_code,
                     entry.duration_ms,
                     entry.duration_us,
@@ -189,6 +198,7 @@ class RequestLogStore:
                     endpoint_name,
                     upstream_url,
                     upstream_curl,
+                    request_curl,
                     status_code,
                     duration_ms,
                     duration_us,
@@ -224,12 +234,21 @@ class RequestLogStore:
             for row in rows
         ]
 
-    def report(self, *, hours: int = 24, bucket_minutes: int = 60, top_limit: int = 5) -> dict[str, Any]:
+    def report(
+        self,
+        *,
+        hours: int = 24,
+        bucket_minutes: int = 60,
+        top_limit: int = 5,
+        timezone_offset_minutes: int = 0,
+    ) -> dict[str, Any]:
         normalized_hours = max(1, int(hours or 24))
         normalized_bucket_minutes = max(1, int(bucket_minutes or 60))
+        normalized_timezone_offset = max(-840, min(840, int(timezone_offset_minutes or 0)))
+        report_timezone = timezone(timedelta(minutes=normalized_timezone_offset))
         bucket_count = max(1, (normalized_hours * 60 + normalized_bucket_minutes - 1) // normalized_bucket_minutes)
 
-        now = datetime.now(UTC)
+        now = datetime.now(UTC).astimezone(report_timezone)
         current_bucket_start = now.replace(second=0, microsecond=0)
         minute_remainder = current_bucket_start.minute % normalized_bucket_minutes
         current_bucket_start -= timedelta(minutes=minute_remainder)
@@ -253,7 +272,7 @@ class RequestLogStore:
                 WHERE created_at >= ?
                 ORDER BY created_at ASC
                 """,
-                (query_cutoff.isoformat(),),
+                (query_cutoff.astimezone(UTC).isoformat(),),
             ).fetchall()
 
         buckets = []
@@ -295,6 +314,7 @@ class RequestLogStore:
                 continue
             if created_at.tzinfo is None:
                 created_at = created_at.replace(tzinfo=UTC)
+            created_at = created_at.astimezone(report_timezone)
             if created_at < cutoff:
                 continue
 
@@ -404,6 +424,7 @@ class RequestLogStore:
         return {
             "hours": normalized_hours,
             "bucket_minutes": normalized_bucket_minutes,
+            "timezone_offset_minutes": normalized_timezone_offset,
             "generated_at": now.isoformat(),
             "window_start": cutoff.isoformat(),
             "window_end": now.isoformat(),

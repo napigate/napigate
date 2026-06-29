@@ -975,8 +975,18 @@ class GatewayRuntime:
     def list_logs(self, limit: int = 200) -> list[dict[str, Any]]:
         return self.log_store.recent(limit=limit)
 
-    def log_report(self, *, hours: int = 24, bucket_minutes: int = 60) -> dict[str, Any]:
-        return self.log_store.report(hours=hours, bucket_minutes=bucket_minutes)
+    def log_report(
+        self,
+        *,
+        hours: int = 24,
+        bucket_minutes: int = 60,
+        timezone_offset_minutes: int = 0,
+    ) -> dict[str, Any]:
+        return self.log_store.report(
+            hours=hours,
+            bucket_minutes=bucket_minutes,
+            timezone_offset_minutes=timezone_offset_minutes,
+        )
 
     def service_count(self) -> int:
         with self._lock:
@@ -2167,9 +2177,41 @@ class GatewayRuntime:
         verify_ssl: bool,
         allow_redirects: bool,
     ) -> str:
+        return self._build_curl_command(
+            method=prepared_request.method or "GET",
+            url=prepared_request.url or "",
+            headers=prepared_request.headers,
+            body=prepared_request.body,
+            timeout_seconds=timeout_seconds,
+            verify_ssl=verify_ssl,
+            allow_redirects=allow_redirects,
+        )
+
+    def _build_incoming_curl(self, request: IncomingRequest) -> str:
+        return self._build_curl_command(
+            method=request.method,
+            url=request.url,
+            headers=request.headers,
+            body=request.body,
+            timeout_seconds=None,
+            verify_ssl=True,
+            allow_redirects=False,
+        )
+
+    def _build_curl_command(
+        self,
+        *,
+        method: str,
+        url: str,
+        headers: Mapping[str, Any],
+        body: Any,
+        timeout_seconds: int | float | None,
+        verify_ssl: bool,
+        allow_redirects: bool,
+    ) -> str:
         command = [
             "curl",
-            f"-X {shlex.quote(prepared_request.method or 'GET')}",
+            f"-X {shlex.quote(method or 'GET')}",
         ]
         if not verify_ssl:
             command.append("-k")
@@ -2183,13 +2225,13 @@ class GatewayRuntime:
             )
             command.append(f"--max-time {shlex.quote(str(timeout_value))}")
 
-        for header_name, header_value in prepared_request.headers.items():
+        for header_name, header_value in headers.items():
             command.append(
                 f"-H {shlex.quote(f'{header_name}: {header_value}')}"
             )
 
         body_prefix = ""
-        prepared_body = prepared_request.body
+        prepared_body = body
         if prepared_body not in (None, b"", ""):
             if isinstance(prepared_body, bytes):
                 try:
@@ -2203,7 +2245,7 @@ class GatewayRuntime:
             else:
                 command.append(f"--data-binary {shlex.quote(str(prepared_body))}")
 
-        command.append(shlex.quote(prepared_request.url or ""))
+        command.append(shlex.quote(url or ""))
         rendered = " \\\n  ".join(command)
         return f"{body_prefix}{rendered}" if body_prefix else rendered
 
@@ -2349,6 +2391,11 @@ class GatewayRuntime:
         response_body: str,
     ) -> None:
         created_at = datetime.now(UTC).isoformat()
+        request_curl = (
+            self._build_incoming_curl(request)
+            if upstream_url == "cache://response"
+            else ""
+        )
         entry = LogEntry(
             request_id=request_id,
             method=request.method,
@@ -2357,6 +2404,7 @@ class GatewayRuntime:
             endpoint_name=matched.endpoint.name,
             upstream_url=upstream_url,
             upstream_curl=upstream_curl,
+            request_curl=request_curl,
             status_code=status_code,
             duration_ms=duration_ms,
             duration_us=duration_us,

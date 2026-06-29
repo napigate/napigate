@@ -878,7 +878,7 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
         let source = null;
 
         const FILTER_FIELDS = {{
-          created_at: {{ label: "Time", value: (row) => String(row.created_at || "") }},
+          created_at: {{ label: "Time", value: (row) => `${{formatDateTime(row.created_at)}} ${{String(row.created_at || "")}}` }},
           method: {{ label: "Method", value: (row) => String(row.method || "") }},
           gateway_path: {{ label: "Gateway Path", value: (row) => String(row.gateway_path || "") }},
           service_name: {{ label: "Service", value: (row) => String(row.service_name || "") }},
@@ -896,6 +896,13 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
             .replaceAll("<", "&lt;")
             .replaceAll(">", "&gt;")
             .replaceAll('"', "&quot;");
+        }}
+
+        function formatDateTime(value) {{
+          if (!value) return "-";
+          const date = new Date(value);
+          if (Number.isNaN(date.getTime())) return String(value);
+          return date.toLocaleString();
         }}
 
         function statusClass(code) {{
@@ -1019,12 +1026,25 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
           const source = responseSource(row);
           const upstreamUrl = String(row.upstream_url || "").trim();
           const upstreamCurl = String(row.upstream_curl || "").trim();
+          const requestCurl = String(row.request_curl || "").trim();
           if (source === "cache") {{
             return `
               <div class="upstream-cell">
                 <div><span class="tag warn">Cache</span></div>
                 <div class="muted mono">response cache hit</div>
-                <div class="muted">cURL (cache)</div>
+                ${{
+                  requestCurl
+                    ? `
+                      <details class="curl-block">
+                        <summary>Incoming cURL</summary>
+                        <div style="margin-top:6px;">
+                          <button class="btn-link" type="button" onclick="copyCurl(this)">Copy</button>
+                        </div>
+                        <pre class="mono curl-pre">${{esc(requestCurl)}}</pre>
+                      </details>
+                    `
+                    : '<div class="muted">Incoming cURL unavailable</div>'
+                }}
               </div>
             `;
           }}
@@ -1104,7 +1124,7 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
           document.getElementById("stat-rows").textContent = String(totalRows);
           document.getElementById("stat-errors").textContent = String(total5xx);
           document.getElementById("stat-duration").textContent = `${{(avgDurationMicros / 1000).toFixed(3)}} ms`;
-          document.getElementById("stat-updated").textContent = rows[0]?.created_at || "-";
+          document.getElementById("stat-updated").textContent = formatDateTime(rows[0]?.created_at);
           filterSummary.textContent = activeCount
             ? `${{totalRows}} / ${{allRows.length}} rows | ${{activeCount}} filter(s)`
             : "Filters: none";
@@ -1112,7 +1132,7 @@ def render_monitor_page(principal: AuthenticatedPrincipal) -> str:
           tbody.innerHTML = rows.length
             ? rows.map((row) => `
                 <tr>
-                  <td class="mono">${{esc(row.created_at)}}</td>
+                  <td class="mono">${{esc(formatDateTime(row.created_at))}}</td>
                   <td>${{esc(row.method)}}</td>
                   <td class="mono">${{esc(row.gateway_path)}}</td>
                   <td>${{esc(row.service_name)}}</td>
@@ -3593,6 +3613,21 @@ def render_admin_page(
           return date.toLocaleString();
         }}
 
+        function formatBucketTime(bucket) {{
+          const value = bucket?.bucket_start;
+          if (!value) return String(bucket?.label || "");
+          const date = new Date(value);
+          if (Number.isNaN(date.getTime())) return String(bucket?.label || value);
+          return date.toLocaleTimeString([], {{ hour: "2-digit", minute: "2-digit" }});
+        }}
+
+        function reportUrlWithBrowserTimezone(value) {{
+          const fallback = "/__monitor/report?hours=24&bucket_minutes=60";
+          const url = new URL(String(value || fallback), window.location.origin);
+          url.searchParams.set("timezone_offset_minutes", String(-new Date().getTimezoneOffset()));
+          return url.toString();
+        }}
+
         function durationMicros(row) {{
           const direct = Number(row.duration_us || 0);
           if (Number.isFinite(direct) && direct > 0) {{
@@ -3691,7 +3726,7 @@ def render_admin_page(
             return {{
               x,
               y: baselineY - requestHeight,
-              label: String(bucket.label || ""),
+              label: formatBucketTime(bucket),
               requests: numberOrZero(bucket.requests),
             }};
           }});
@@ -3849,12 +3884,27 @@ def render_admin_page(
           const source = liveResponseSource(row);
           const upstreamUrl = String(row.upstream_url || "").trim();
           const upstreamCurl = String(row.upstream_curl || "").trim();
+          const requestCurl = String(row.request_curl || "").trim();
           if (source === "cache") {{
             return `
               <div style="display:flex; flex-direction:column; gap:8px; min-width:260px;">
                 <div><span class="tag warn">Cache</span></div>
                 <div class="muted mono">response cache hit</div>
-                <div class="muted">cURL (cache)</div>
+                ${{
+                  requestCurl
+                    ? `
+                      <details data-live-curl>
+                        <summary>Incoming cURL</summary>
+                        <div class="actions" style="margin-top:8px;">
+                          <button class="btn light" type="button" onclick="copyLiveCurl(this)">Copy cURL</button>
+                        </div>
+                        <div class="detail-box" style="margin-top:8px;">
+                          <pre data-live-curl-output>${{esc(requestCurl)}}</pre>
+                        </div>
+                      </details>
+                    `
+                    : '<div class="muted">Incoming cURL unavailable</div>'
+                }}
               </div>
             `;
           }}
@@ -4615,7 +4665,7 @@ def render_admin_page(
                 }},
                 cache: "no-store",
               }}),
-              fetch(STATE.live.report_url || "/__monitor/report?hours=24&bucket_minutes=60", {{
+              fetch(reportUrlWithBrowserTimezone(STATE.live.report_url), {{
                 headers: {{
                   "Accept": "application/json",
                 }},
@@ -6893,7 +6943,20 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     bucket_minutes = max(1, int(str(query.get("bucket_minutes", "60") or "60")))
                 except ValueError:
                     bucket_minutes = 60
-                self._send_json(runtime.log_report(hours=hours, bucket_minutes=bucket_minutes))
+                try:
+                    timezone_offset_minutes = max(
+                        -840,
+                        min(840, int(str(query.get("timezone_offset_minutes", "0") or "0"))),
+                    )
+                except ValueError:
+                    timezone_offset_minutes = 0
+                self._send_json(
+                    runtime.log_report(
+                        hours=hours,
+                        bucket_minutes=bucket_minutes,
+                        timezone_offset_minutes=timezone_offset_minutes,
+                    )
+                )
                 return
 
             if parsed.path == "/__monitor/stream":
@@ -8689,8 +8752,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
         query = {key: values[-1] for key, values in parse_qs(parsed.query, keep_blank_values=True).items()}
         headers = {key: value for key, value in self.headers.items()}
         host = self.headers.get("Host", "127.0.0.1")
-        scheme = "http"
-        url = f"{scheme}://{host}{request_target}"
+        scheme = self._request_scheme()
+        authority = self._request_authority() or host
+        url = f"{scheme}://{authority}{request_target}"
         client_ip = self._client_ip()
         json_body = None
         if body:
