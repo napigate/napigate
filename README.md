@@ -722,7 +722,7 @@ Recommended admin flow:
 
 ### Response Caching
 
-Response caching can be configured on an endpoint, a service, or a route. Runtime resolves it in that order: endpoint, then service, then route. The cache uses a TTL store — in-memory by default, Redis when `NAPIGATE_REDIS_URL` is set. The Redis backend uses `SETEX` with pickle serialization and the key prefix `napigate:cache:`. Rate-limit state uses `napigate:rl:`. Both namespaces are isolated from any other keys in the same Redis instance.
+Response caching can be configured on an endpoint, a service, or a route. Runtime resolves it in that order: endpoint, then service, then route. The cache uses a TTL store — in-memory by default, Redis when `NAPIGATE_REDIS_URL` is set. The Redis backend uses `SETEX` with pickle serialization and the key prefix `napigate:cache:`. Rate-limit state uses `napigate:rl:`. Both namespaces are isolated from any other keys in the same Redis instance. Admins with `services_manage` can clear all gateway cache entries from `__admin#config`; this clears response, pre-call, and external-auth cache entries, but does not reset rate-limit state.
 
 ```yaml
 response_cache:
@@ -965,6 +965,7 @@ Examples:
 
 - `GET /__admin/api/config`
 - `PUT /__admin/api/config`
+- `POST /__admin/api/cache/clear`
 - `GET /__admin/api/backup?scope=full&format=yaml`
 - `POST /__admin/api/import?scope=services`
 - `GET /__admin/api/clients`
@@ -984,6 +985,7 @@ Notes:
 - Backup/import scopes that touch security data require `security_manage`; the full snapshot scope requires both `services_manage` and `security_manage`.
 - Full config replacement accepts JSON or YAML request bodies.
 - The Config tab can now export or import either a full snapshot (`config` + `security`) or an individual section such as `services`, `routes`, `clients`, `output_profiles`, `observability`, `roles`, or `users`.
+- The Config tab can clear the active gateway cache backend for response, pre-call, and external-auth cache entries; rate-limit counters are not cleared.
 - Client automation should use `slug`, not the display title.
 
 ## Example Requests
@@ -1016,7 +1018,7 @@ curl \
 - Runtime and admin config validation happen before persisted changes are accepted.
 - Request bodies are buffered in memory. Response bodies stream through without buffering when the endpoint-plus-route output-profile chain has no transforming profile and response caching is disabled; otherwise they are buffered to allow envelope wrapping or cache storage.
 - If you proxy NapiGate through Nginx and want streaming responses to reach the client without buffering, set `proxy_buffering off` in the relevant location block.
-- Rate-limiter sliding-window state is not cleared on config hot-reload; only the response/pre-call/auth caches are cleared.
+- Rate-limiter sliding-window state is not cleared on config hot-reload or manual cache clearing; only the response/pre-call/auth caches are cleared.
 - `trust_env_proxy` defaults to `false`.
 - `forward_napigate_headers` defaults to `true`.
 - `gateway_responses` defaults to `mode: default`, which keeps the runtime error shape as `{"detail": ...}` until you switch to `inline` or `profile`.

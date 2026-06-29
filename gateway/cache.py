@@ -35,7 +35,7 @@ return {1, retry_after}
 class CacheBackend(Protocol):
     def get(self, key: str) -> Any | None: ...
     def set(self, key: str, value: Any, ttl: float) -> None: ...
-    def clear(self) -> None: ...
+    def clear(self) -> int: ...
 
 
 @runtime_checkable
@@ -66,9 +66,11 @@ class MemoryCacheBackend:
         with self._lock:
             self._store[key] = (time.time() + ttl, value)
 
-    def clear(self) -> None:
+    def clear(self) -> int:
         with self._lock:
+            count = len(self._store)
             self._store.clear()
+        return count
 
 
 class MemoryRateLimitBackend:
@@ -122,17 +124,19 @@ class RedisCacheBackend:
         except Exception:
             LOGGER.warning("Redis SET failed for cache key %r", key, exc_info=True)
 
-    def clear(self) -> None:
+    def clear(self) -> int:
+        deleted_count = 0
         try:
             cursor = 0
             while True:
                 cursor, keys = self._redis.scan(cursor, match=f"{self._PREFIX}*", count=200)
                 if keys:
-                    self._redis.delete(*keys)
+                    deleted_count += int(self._redis.delete(*keys) or 0)
                 if cursor == 0:
                     break
         except Exception:
             LOGGER.warning("Redis cache CLEAR failed", exc_info=True)
+        return deleted_count
 
 
 class RedisRateLimitBackend:

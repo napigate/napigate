@@ -975,6 +975,10 @@ class GatewayRuntime:
     def list_logs(self, limit: int = 200) -> list[dict[str, Any]]:
         return self.log_store.recent(limit=limit)
 
+    def clear_cache(self) -> int:
+        with self._lock:
+            return self._cache.clear()
+
     def log_report(
         self,
         *,

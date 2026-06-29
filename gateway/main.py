@@ -4136,6 +4136,20 @@ def render_admin_page(
           return false;
         }}
 
+        async function clearGatewayCache(button) {{
+          if (!confirm("Clear all gateway response, pre-call, and external auth cache entries? Rate-limit counters are not affected.")) return false;
+          showAdminNotice("");
+          button?.setAttribute("disabled", "disabled");
+          try {{
+            await postAdminMutation("/__admin/api/cache/clear", new URLSearchParams());
+          }} catch (error) {{
+            showAdminNotice(String(error?.message || error), "error");
+          }} finally {{
+            button?.removeAttribute("disabled");
+          }}
+          return false;
+        }}
+
         function renderConfig() {{
           const wrap = document.getElementById("config-wrap");
           if (!wrap) return;
@@ -4276,6 +4290,31 @@ def render_admin_page(
                   </div>
                 </div>
               </form>
+            </div>
+            <div class="card" style="margin-top: 12px;">
+              <div class="section-head" style="margin-bottom: 14px;">
+                <div>
+                  <h3 class="section-title" style="font-size:16px; margin-bottom:4px;">Cache Maintenance</h3>
+                  <div class="section-note">Clear runtime cache entries from the active cache backend without changing gateway configuration.</div>
+                </div>
+                <div class="actions">
+                  <span class="tag">Response / pre-call / external auth</span>
+                  <span class="tag">Rate-limit unchanged</span>
+                </div>
+              </div>
+              <div class="form-grid">
+                <div class="full detail-box">
+                  This clears response-cache entries, cached <span class="mono">pre_call</span> variables, and cached <span class="mono">external_service</span> auth results from memory or Redis. Sliding-window rate-limit state is intentionally not cleared.
+                </div>
+                <div class="actions full">
+                  <button class="btn danger" type="button" onclick="clearGatewayCache(this)" ${{canEdit ? "" : "disabled"}}>Clear All Cache</button>
+                  ${{
+                    canEdit
+                      ? ""
+                      : '<span class="muted">This account does not have <code>services_manage</code> for cache maintenance.</span>'
+                  }}
+                </div>
+              </div>
             </div>
             <form method="post" action="/__admin/settings/save" data-gateway-settings-form onsubmit="return submitGatewaySettings(event, this)" style="margin-top: 12px;">
               <div class="card">
@@ -7001,6 +7040,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 if self._handle_admin_backup_import(parsed):
                     return
 
+            if parsed.path == "/__admin/api/cache/clear" and self.command == "POST":
+                if self._require_permission("services_manage") is None:
+                    return
+                self._handle_admin_cache_clear()
+                return
+
             if parsed.path == "/__admin/api/config":
                 if self._require_permission("services_manage") is None:
                     return
@@ -8499,6 +8544,27 @@ class GatewayHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             self._send_json({"detail": str(exc)}, status_code=400)
             return True
+
+    def _handle_admin_cache_clear(self) -> None:
+        try:
+            self._discard_request_body()
+            cleared_count = runtime.clear_cache()
+            entry_label = "entry" if cleared_count == 1 else "entries"
+            message = f"Cleared {cleared_count} gateway cache {entry_label}."
+            self._audit_admin_change(
+                action="clear",
+                target_kind="cache",
+                target_ref="all",
+                message=message,
+                details={
+                    "cleared_count": cleared_count,
+                    "scopes": ["response", "pre_call", "external_auth"],
+                    "rate_limit_cleared": False,
+                },
+            )
+            self._send_admin_mutation_success(message)
+        except Exception as exc:  # noqa: BLE001
+            self._send_admin_mutation_error(exc)
 
     def _handle_admin_config_get(self, parsed) -> None:
         self._send_config_document(load_config_document(runtime.config_path), parsed=parsed)

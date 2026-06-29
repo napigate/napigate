@@ -33,7 +33,7 @@ This file stores the working knowledge for the `NapiGate` project so future sess
 - Cache and rate-limit state lives in pluggable backends (`gateway/cache.py`): in-memory by default, Redis when `NAPIGATE_REDIS_URL` is set. If Redis is unreachable at startup, both backends fall back to in-memory automatically and log a warning.
 - Config and security state can stay file-backed or move to PostgreSQL through `gateway/state_store.py`; in PostgreSQL mode the source of truth is table-backed by entity (`services`, `service_endpoints`, `routes`, `clients`, `output_profiles`, `users`, `roles`) while runtime still serves a RAM snapshot and only refreshes when the underlying revision changes.
 - NapiGate now runs two listeners by default: a public listener for gateway traffic and OAuth token issuance, and a separate admin listener for `/__login`, `/__admin`, `/__monitor`, and `/__logout`.
-- Rate-limiter state is NOT cleared on config reload; only response/pre-call/auth caches are cleared.
+- Rate-limiter state is NOT cleared on config reload or manual cache clearing; only response/pre-call/auth caches are cleared.
 - Upstream HTTP responses stream through to the client without buffering when no transforming output profile is applied and response caching is off. Otherwise the body is buffered to allow envelope transforms or cache storage.
 - Services and endpoints remain config-driven.
 - Public ingress stays HTTP/1.1 today, but service and route configs now keep an APISIX-inspired protocol catalog explicit. Runtime execution currently supports HTTP ingress plus `http` and unary `grpc` upstream targets; other declared protocols return `501` until their transport handlers land.
@@ -437,7 +437,7 @@ Common:
 - `rate_limit` is configured at the service level.
 - It uses a sliding window — in-memory by default, Redis sorted-set when `NAPIGATE_REDIS_URL` is set.
 - The Redis path uses a Lua script for atomicity and UUID-suffixed member names to prevent request deduplication in high-concurrency scenarios.
-- Rate-limiter state is not cleared on config hot-reload.
+- Rate-limiter state is not cleared on config hot-reload or manual cache clearing.
 - `scope` can be:
   - `client_or_ip`
   - `client`
@@ -609,6 +609,10 @@ Common:
 - Admin config API:
   - `GET /__admin/api/config`
   - `PUT /__admin/api/config`
+- Admin cache API:
+  - `POST /__admin/api/cache/clear`
+  - clears response, pre-call, and external-auth cache entries from the active cache backend
+  - does not clear rate-limiter state
 - Admin backup/import APIs:
   - `GET /__admin/api/backup?scope=full&format=yaml`
   - `POST /__admin/api/import?scope=services`
@@ -668,6 +672,7 @@ Common:
 - The Admin `Live` tab also includes a 24-hour summary with hourly request/failure buckets and top service/path activity.
 - The Config tab now shows the current public/admin listener URLs plus the active state-store mode.
 - The Config tab now also exposes backup/export and import for either a full snapshot (`config` + `security`) or individual sections such as `services`, `routes`, `clients`, `output_profiles`, `observability`, `roles`, and `users`.
+- The Config tab now exposes cache maintenance for clearing response/pre-call/external-auth caches without resetting rate-limit counters.
 - Client forms support:
   - slug, title, and code
   - title and code
@@ -776,7 +781,7 @@ pip install ".[grpc]"
 - `APP_PORT` is the public listener port; `ADMIN_PORT` is the separate admin/monitor listener port.
 - `NAPIGATE_MAX_WORKERS` caps the request handler thread pool (default `256`). Long-lived SSE connections at `/__monitor/stream` each occupy one worker for their duration.
 - Response bodies stream through to the client (chunked transfer encoding) when no transforming output profile is active and response caching is off. To pass streaming responses through a reverse proxy without re-buffering, set `proxy_buffering off` on the upstream location.
-- Rate-limiter sliding-window state is NOT cleared on config hot-reload.
+- Rate-limiter sliding-window state is NOT cleared on config hot-reload or manual cache clearing.
 - Shared template changes go to `config/services.example.yaml`.
 - `config/services.yaml` and `config/security.yaml` are reloaded automatically when their on-disk contents change.
 - Container runtime user settings come from `.env`:
