@@ -724,6 +724,8 @@ Recommended admin flow:
 
 Response caching can be configured on an endpoint, a service, or a route. Runtime resolves it in that order: endpoint, then service, then route. The cache uses a TTL store — in-memory by default, Redis when `NAPIGATE_REDIS_URL` is set. The Redis backend uses `SETEX` with pickle serialization and the key prefix `napigate:cache:`. Rate-limit state uses `napigate:rl:`. Both namespaces are isolated from any other keys in the same Redis instance. Admins with `services_manage` can clear all gateway cache entries from `__admin#config`; this clears response, pre-call, and external-auth cache entries, but does not reset rate-limit state.
 
+When an incoming request contains the `X-Bypass-Cache` header, NapiGate skips the response-cache lookup and executes the configured target. The header name is case-insensitive and its value is ignored. NapiGate forwards the header to the upstream, and a successful fresh response is stored normally so it refreshes the matching cache entry.
+
 ```yaml
 response_cache:
   enabled: true

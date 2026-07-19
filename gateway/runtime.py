@@ -64,6 +64,7 @@ FILTERED_REQUEST_HEADERS = {
     "content-length",
     "connection",
 }
+RESPONSE_CACHE_BYPASS_HEADER = "X-Bypass-Cache"
 TEMPLATE_PATTERN = re.compile(r"{{\s*([^{}]+?)\s*}}")
 DATA_FIELD_TEMPLATE_PATTERN = re.compile(
     r"\$\{\s*([^{}]+?)\s*\}|\{\{\s*([^{}]+?)\s*\}\}"
@@ -1065,7 +1066,8 @@ class GatewayRuntime:
     ) -> OutgoingResponse | None:
         cache_config = self._route_response_cache_config(matched)
         if (
-            not cache_config.enabled
+            self._get_header(request.headers, RESPONSE_CACHE_BYPASS_HEADER) is not None
+            or not cache_config.enabled
             or cache_config.ttl_seconds <= 0
             or request.method.upper() not in cache_config.methods
         ):

@@ -471,6 +471,7 @@ Common:
 - It uses a TTL cache — in-memory by default, Redis (`SETEX`/`GET` with pickle) when `NAPIGATE_REDIS_URL` is set.
 - Only successful responses are cached.
 - Cache keys include method, path, query, configured vary headers, and optionally the authenticated client slug.
+- An incoming `X-Bypass-Cache` header skips the response-cache lookup regardless of its value, is forwarded to the upstream, and still allows a successful fresh response to refresh the matching cache entry.
 - When response caching is enabled for the matched scope, streaming is disabled for that request and the full body is buffered.
 
 ## 6.10) Success Hook Behavior
