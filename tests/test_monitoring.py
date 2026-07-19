@@ -93,7 +93,7 @@ class MonitoringTests(unittest.TestCase):
         self.assertEqual(populated_bucket["label"], bucket_start.strftime("%H:%M"))
         self.assertEqual(populated_bucket["status_codes"], {"200": 1})
 
-    def test_cache_log_keeps_replayable_incoming_request_curl(self) -> None:
+    def test_cache_and_coalesced_logs_keep_replayable_incoming_request_curl(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             runtime = GatewayRuntime.__new__(GatewayRuntime)
             runtime.log_store = RequestLogStore(Path(temporary_directory) / "monitor.db")
@@ -120,29 +120,42 @@ class MonitoringTests(unittest.TestCase):
             )
 
             try:
-                runtime._write_log(
-                    request_id="request-2",
-                    request=request,
-                    matched=matched,
-                    upstream_url="cache://response",
-                    upstream_curl="",
-                    status_code=200,
-                    duration_ms=0.5,
-                    duration_us=500,
-                    error_message="",
-                    response_body='{"ok": true}',
-                )
-                row = runtime.log_store.recent(limit=1)[0]
+                for index, upstream_url in enumerate(
+                    (
+                        "cache://response",
+                        "coalesce://response",
+                        "coalesce://error",
+                    ),
+                    start=2,
+                ):
+                    runtime._write_log(
+                        request_id=f"request-{index}",
+                        request=request,
+                        matched=matched,
+                        upstream_url=upstream_url,
+                        upstream_curl="",
+                        status_code=200,
+                        duration_ms=0.5,
+                        duration_us=500,
+                        error_message="",
+                        response_body='{"ok": true}',
+                    )
+                rows = runtime.log_store.recent(limit=3)
             finally:
                 runtime.log_store.close()
 
-        self.assertIn("-X POST", row["request_curl"])
-        self.assertIn("Content-Type: application/json", row["request_curl"])
-        self.assertIn("X-Trace: trace-1", row["request_curl"])
-        self.assertIn("--data-binary", row["request_curl"])
-        self.assertIn('{"amount":42}', row["request_curl"])
-        self.assertIn("https://gateway.test/payments?reference=A-42", row["request_curl"])
-        self.assertNotIn("request_curl", emitted_logs[0])
+        self.assertEqual(
+            {row["upstream_url"] for row in rows},
+            {"cache://response", "coalesce://response", "coalesce://error"},
+        )
+        for row in rows:
+            self.assertIn("-X POST", row["request_curl"])
+            self.assertIn("Content-Type: application/json", row["request_curl"])
+            self.assertIn("X-Trace: trace-1", row["request_curl"])
+            self.assertIn("--data-binary", row["request_curl"])
+            self.assertIn('{"amount":42}', row["request_curl"])
+            self.assertIn("https://gateway.test/payments?reference=A-42", row["request_curl"])
+        self.assertTrue(all("request_curl" not in payload for payload in emitted_logs))
 
 
 if __name__ == "__main__":

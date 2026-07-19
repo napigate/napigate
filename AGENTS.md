@@ -31,6 +31,7 @@ This file stores the working knowledge for the `NapiGate` project so future sess
 - This project intentionally stays on `stdlib + requests + PyYAML`; Redis, PostgreSQL, and gRPC support are optional install extras.
 - The HTTP server runs on `PooledHTTPServer`, a subclass of `ThreadingHTTPServer` that dispatches into a `ThreadPoolExecutor` bounded by `NAPIGATE_MAX_WORKERS` (default 256) instead of spawning unbounded threads.
 - Cache and rate-limit state lives in pluggable backends (`gateway/cache.py`): in-memory by default, Redis when `NAPIGATE_REDIS_URL` is set. If Redis is unreachable at startup, both backends fall back to in-memory automatically and log a warning.
+- Concurrent identical buffered `GET`/`HEAD` requests are coalesced in-process so one handler executes the complete route while the others wait for its result. Explicitly cacheable methods are eligible too. This in-flight registry is intentionally process-local; Redis shares completed cache entries, not the lock itself.
 - Config and security state can stay file-backed or move to PostgreSQL through `gateway/state_store.py`; in PostgreSQL mode the source of truth is table-backed by entity (`services`, `service_endpoints`, `routes`, `clients`, `output_profiles`, `users`, `roles`) while runtime still serves a RAM snapshot and only refreshes when the underlying revision changes.
 - NapiGate now runs two listeners by default: a public listener for gateway traffic and OAuth token issuance, and a separate admin listener for `/__login`, `/__admin`, `/__monitor`, and `/__logout`.
 - Rate-limiter state is NOT cleared on config reload or manual cache clearing; only response/pre-call/auth caches are cleared.
@@ -464,14 +465,18 @@ Common:
 - Image and opaque binary responses should usually stay on `passthrough`.
 - Deleting a referenced output profile clears dependent route or legacy endpoint `output_profile` values instead of blocking the delete.
 
-## 6.9) Response Cache Behavior
+## 6.9) Response Cache and Request Coalescing Behavior
 
 - `response_cache` can be configured on endpoints, services, or routes.
 - Runtime checks endpoint cache first, then service cache, then route cache.
 - It uses a TTL cache — in-memory by default, Redis (`SETEX`/`GET` with pickle) when `NAPIGATE_REDIS_URL` is set.
 - Only successful responses are cached.
-- Cache keys include method, path, query, configured vary headers, and optionally the authenticated client slug.
-- An incoming `X-Bypass-Cache` header skips the response-cache lookup regardless of its value, is forwarded to the upstream, and still allows a successful fresh response to refresh the matching cache entry.
+- Cache keys include method, path, query, a SHA-256 digest of any request body, configured vary headers, and optionally the authenticated client slug.
+- Concurrent identical buffered `GET`/`HEAD` requests are coalesced inside the current process even without response caching. One leader executes the complete route, including `pre_call`; waiters keep their own authentication, rate-limit accounting, request IDs, logs, and success hooks.
+- Methods explicitly included in `response_cache.methods` are also eligible for coalescing. Uncached methods other than `GET`/`HEAD` and every streaming response stay independent.
+- Cache-backed coordination uses the response-cache key. Uncached coordination uses a SHA-256 fingerprint of the route target and complete request context; the raw context is not exposed in the in-flight key.
+- Successful waiter responses include `X-NapiGate-Coalesced: true`; coalesced failures preserve the original status/detail and carry the same marker. Monitor rows use `coalesce://response` or `coalesce://error`.
+- An incoming `X-Bypass-Cache` header skips both the response-cache lookup and coalescing regardless of its value, is forwarded to the upstream, and still allows a successful fresh response to refresh the matching cache entry.
 - When response caching is enabled for the matched scope, streaming is disabled for that request and the full body is buffered.
 
 ## 6.10) Success Hook Behavior
@@ -781,6 +786,7 @@ pip install ".[grpc]"
 - `NAPIGATE_STATE_SYNC_INTERVAL_SECONDS` controls how often each instance polls PostgreSQL for updated config/security revisions.
 - `APP_PORT` is the public listener port; `ADMIN_PORT` is the separate admin/monitor listener port.
 - `NAPIGATE_MAX_WORKERS` caps the request handler thread pool (default `256`). Long-lived SSE connections at `/__monitor/stream` each occupy one worker for their duration.
+- Request coalescing coordinates eligible buffered work across those worker threads within one NapiGate process. Deployments with multiple app processes or replicas do not share in-flight ownership, even when Redis is enabled.
 - Response bodies stream through to the client (chunked transfer encoding) when no transforming output profile is active and response caching is off. To pass streaming responses through a reverse proxy without re-buffering, set `proxy_buffering off` on the upstream location.
 - Rate-limiter sliding-window state is NOT cleared on config hot-reload or manual cache clearing.
 - Shared template changes go to `config/services.example.yaml`.
@@ -888,6 +894,12 @@ pip install ".[grpc]"
   - optional PostgreSQL-backed config/security state with in-memory runtime snapshots and revision polling via `gateway/state_store.py`
   - admin mutations now write an audit log visible from the new `Audit` tab
   - admin and monitor endpoints moved onto a separate listener/port; the public listener no longer serves `/__admin` or `/__monitor`
+- 2026-07-20: eligible buffered requests gained in-process request coalescing:
+  - identical concurrent `GET`/`HEAD` requests execute one complete route/upstream call and share the buffered result, with or without response caching
+  - explicitly cacheable methods are eligible; uncached state-changing methods and streaming responses stay independent
+  - each waiter keeps a unique request ID and is visible as `coalesce://response`
+  - bypass-cache requests stay independent
+  - request body digests now participate in response-cache and coalescing keys
 - 2026-04-29: streaming proxy support added:
   - upstream responses stream through via chunked transfer encoding when no transforming output profile is active and response caching is off
   - passthrough profiles are compatible with streaming (they only add headers)

@@ -7,6 +7,7 @@ import ipaddress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import base64
+import hashlib
 import hmac
 import json
 import logging
@@ -129,6 +130,14 @@ class TargetExecutionResult:
 
 
 @dataclass(slots=True)
+class _InFlightRequest:
+    event: threading.Event = field(default_factory=threading.Event)
+    result: TargetExecutionResult | None = None
+    error: BaseException | None = None
+    waiter_count: int = 0
+
+
+@dataclass(slots=True)
 class AuthenticatedClient:
     client_slug: str
     client_code: str
@@ -163,6 +172,8 @@ class GatewayRuntime:
         self._config_signature: Any = None
         self._route_round_robin: dict[str, int] = {}
         self._lock = threading.RLock()
+        self._inflight_lock = threading.Lock()
+        self._inflight_requests: dict[str, _InFlightRequest] = {}
         self.dispatcher = IntegrationDispatcher()
 
     def load(self) -> None:
@@ -391,7 +402,7 @@ class GatewayRuntime:
                 )
                 return cached_response
 
-            result = self._execute_route(
+            result = self._execute_route_with_coalescing(
                 matched=matched,
                 request=request,
                 authenticated_client=authenticated_client,
@@ -520,6 +531,177 @@ class GatewayRuntime:
             forwarded_auth=forwarded_auth,
             request_id=request_id,
         )
+
+    def _execute_route_with_coalescing(
+        self,
+        *,
+        matched: MatchedEndpoint,
+        request: IncomingRequest,
+        authenticated_client: AuthenticatedClient | None,
+        forwarded_auth: AuthenticatedClient | None,
+        request_id: str,
+    ) -> TargetExecutionResult:
+        coalescing_key = self._request_coalescing_key(
+            matched=matched,
+            request=request,
+            authenticated_client=authenticated_client,
+            forwarded_auth=forwarded_auth,
+        )
+        if coalescing_key is None:
+            return self._execute_route(
+                matched=matched,
+                request=request,
+                authenticated_client=authenticated_client,
+                forwarded_auth=forwarded_auth,
+                request_id=request_id,
+            )
+
+        with self._inflight_lock:
+            in_flight = self._inflight_requests.get(coalescing_key)
+            is_leader = in_flight is None
+            if in_flight is None:
+                in_flight = _InFlightRequest()
+                self._inflight_requests[coalescing_key] = in_flight
+            else:
+                in_flight.waiter_count += 1
+
+        if not is_leader:
+            in_flight.event.wait()
+            if in_flight.error is not None:
+                self._raise_coalesced_error(
+                    in_flight.error,
+                    matched,
+                    request_id=request_id,
+                )
+            if in_flight.result is None:
+                raise GatewayError(
+                    500,
+                    "Coalesced request completed without a response.",
+                    headers={
+                        "X-Request-ID": request_id,
+                        "X-NapiGate-Coalesced": "true",
+                    },
+                    matched=matched,
+                    upstream_url="coalesce://error",
+                )
+            return self._clone_coalesced_result(in_flight.result, request_id=request_id)
+
+        try:
+            # Close the race between the first cache lookup and becoming the leader.
+            cached_response = self._get_cached_response(
+                matched=matched,
+                request=request,
+                authenticated_client=authenticated_client,
+                request_id=request_id,
+            )
+            if cached_response is not None:
+                result = TargetExecutionResult(
+                    matched=matched,
+                    response=cached_response,
+                    upstream_url="cache://response",
+                    upstream_curl="",
+                    response_source="cache",
+                )
+            else:
+                result = self._execute_route(
+                    matched=matched,
+                    request=request,
+                    authenticated_client=authenticated_client,
+                    forwarded_auth=forwarded_auth,
+                    request_id=request_id,
+                )
+            in_flight.result = self._snapshot_target_result(result)
+            return result
+        except BaseException as exc:
+            in_flight.error = exc
+            raise
+        finally:
+            in_flight.event.set()
+            with self._inflight_lock:
+                if self._inflight_requests.get(coalescing_key) is in_flight:
+                    self._inflight_requests.pop(coalescing_key, None)
+
+    def _snapshot_target_result(self, result: TargetExecutionResult) -> TargetExecutionResult:
+        if result.response.body_iter is not None:
+            raise RuntimeError("Streaming responses cannot be coalesced.")
+        return TargetExecutionResult(
+            matched=result.matched,
+            response=OutgoingResponse(
+                status_code=result.response.status_code,
+                headers=dict(result.response.headers),
+                body=bytes(result.response.body),
+            ),
+            upstream_url=result.upstream_url,
+            upstream_curl=result.upstream_curl,
+            response_source=result.response_source,
+        )
+
+    def _clone_coalesced_result(
+        self,
+        result: TargetExecutionResult,
+        *,
+        request_id: str,
+    ) -> TargetExecutionResult:
+        headers = {
+            key: value
+            for key, value in result.response.headers.items()
+            if key.lower() != "x-request-id"
+        }
+        headers = self.merge_response_headers(
+            headers,
+            {
+                "X-Request-ID": request_id,
+                "X-NapiGate-Coalesced": "true",
+            },
+        )
+        return TargetExecutionResult(
+            matched=result.matched,
+            response=OutgoingResponse(
+                status_code=result.response.status_code,
+                headers=headers,
+                body=bytes(result.response.body),
+            ),
+            upstream_url="coalesce://response",
+            upstream_curl="",
+            response_source="coalesced",
+        )
+
+    def _raise_coalesced_error(
+        self,
+        error: BaseException,
+        matched: MatchedEndpoint,
+        *,
+        request_id: str,
+    ) -> None:
+        coalesced_headers = {
+            "X-Request-ID": request_id,
+            "X-NapiGate-Coalesced": "true",
+        }
+        if isinstance(error, GatewayError):
+            raise GatewayError(
+                error.status_code,
+                error.detail,
+                headers=self.merge_response_headers(error.headers, coalesced_headers),
+                matched=error.matched or matched,
+                upstream_url="coalesce://error",
+            ) from error
+        if isinstance(error, requests.RequestException):
+            raise GatewayError(
+                502,
+                "Upstream request failed.",
+                headers=coalesced_headers,
+                matched=matched,
+                upstream_url="coalesce://error",
+            ) from error
+        if isinstance(error, Exception):
+            raise GatewayError(
+                500,
+                "Gateway internal error.",
+                headers=coalesced_headers,
+                matched=matched,
+                upstream_url="coalesce://error",
+            ) from error
+        raise error
 
     def _execute_failover(
         self,
@@ -1056,6 +1238,104 @@ class GatewayRuntime:
         )
         return response
 
+    def _request_coalescing_key(
+        self,
+        *,
+        matched: MatchedEndpoint,
+        request: IncomingRequest,
+        authenticated_client: AuthenticatedClient | None,
+        forwarded_auth: AuthenticatedClient | None,
+    ) -> str | None:
+        if self._get_header(request.headers, RESPONSE_CACHE_BYPASS_HEADER) is not None:
+            return None
+
+        targets = self._coalescing_targets(matched)
+        if not targets or any(not self._target_response_is_buffered(target) for target in targets):
+            return None
+
+        cache_config = self._route_response_cache_config(matched)
+        method = request.method.upper()
+        if (
+            cache_config.enabled
+            and cache_config.ttl_seconds > 0
+            and method in cache_config.methods
+        ):
+            cache_key = self._response_cache_key(
+                matched=matched,
+                request=request,
+                authenticated_client=authenticated_client,
+            )
+            return f"cache:{id(matched.route)}:{cache_key}"
+
+        # Without response caching, only HTTP-safe methods are automatically
+        # coalesced. POST and other potentially state-changing requests must be
+        # explicitly opted into response-cache methods before they can share work.
+        if method not in {"GET", "HEAD"}:
+            return None
+
+        fingerprint = {
+            "route_identity": id(matched.route),
+            "route_slug": matched.route.slug,
+            "route_strategy": matched.route.strategy,
+            "targets": [
+                {
+                    "service_identity": id(target.service),
+                    "service": target.service.name,
+                    "endpoint_identity": id(target.endpoint),
+                    "endpoint": target.endpoint.name,
+                }
+                for target in targets
+            ],
+            "method": method,
+            "path": request.path,
+            "url": request.url,
+            "query": request.query,
+            "headers": sorted(
+                (str(key).lower(), str(value))
+                for key, value in request.headers.items()
+                if str(key).lower() != "x-request-id"
+            ),
+            "body_sha256": hashlib.sha256(request.body).hexdigest(),
+            "json_body": request.json_body,
+            "client_ip": request.client_ip,
+            "authenticated_client": self._coalescing_client_identity(authenticated_client),
+            "forwarded_auth": self._coalescing_client_identity(forwarded_auth),
+        }
+        canonical = json.dumps(
+            fingerprint,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return f"request:{hashlib.sha256(canonical).hexdigest()}"
+
+    def _coalescing_targets(self, matched: MatchedEndpoint) -> list[MatchedEndpoint]:
+        if matched.route.strategy in {"single", "round_robin"}:
+            return [matched]
+        return self._target_matches_for_route(matched)
+
+    def _target_response_is_buffered(self, matched: MatchedEndpoint) -> bool:
+        return matched.endpoint.response is not None or not self._should_stream_response(matched)
+
+    @staticmethod
+    def _coalescing_client_identity(
+        client: AuthenticatedClient | None,
+    ) -> dict[str, Any] | None:
+        if client is None:
+            return None
+        return {
+            "client_slug": client.client_slug,
+            "client_code": client.client_code,
+            "auth_method_code": client.auth_method_code,
+            "auth_type": client.auth_type,
+            "source": client.source,
+            "metadata": client.metadata,
+            "consumed_headers": sorted(item.lower() for item in client.consumed_headers),
+            "consumed_query_params": sorted(client.consumed_query_params),
+            "consumed_cookie_names": sorted(client.consumed_cookie_names),
+        }
+
     def _get_cached_response(
         self,
         *,
@@ -1119,7 +1399,8 @@ class GatewayRuntime:
         stored_headers = {
             key: value
             for key, value in response.headers.items()
-            if key.lower() not in {"x-request-id", "x-napigate-cache"}
+            if key.lower()
+            not in {"x-request-id", "x-napigate-cache", "x-napigate-coalesced"}
         }
         self._cache.set(
             f"resp:{cache_key}",
@@ -1151,6 +1432,8 @@ class GatewayRuntime:
             )
         for key in sorted(request.query):
             parts.append(f"query:{key}={request.query[key]}")
+        if request.body:
+            parts.append(f"body-sha256={hashlib.sha256(request.body).hexdigest()}")
         for header_name in cache_config.vary_headers:
             parts.append(
                 f"header:{header_name.lower()}={self._get_header(request.headers, header_name) or ''}"
@@ -2399,7 +2682,11 @@ class GatewayRuntime:
         created_at = datetime.now(UTC).isoformat()
         request_curl = (
             self._build_incoming_curl(request)
-            if upstream_url == "cache://response"
+            if upstream_url in {
+                "cache://response",
+                "coalesce://response",
+                "coalesce://error",
+            }
             else ""
         )
         entry = LogEntry(

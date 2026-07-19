@@ -13,7 +13,7 @@ NapiGate is a lightweight, config-driven Python API gateway built for small and 
 - Multiple auth methods per client
 - Trusted `pre_call` hooks for downstream preparation
 - Trusted `external_service` auth scripts for custom validation
-- route response caching and async success hooks
+- route response caching with in-process request coalescing, plus async success hooks
 - optional structured request-log forwarding to HTTP JSON sinks or Loki
 - Built-in monitor UI, JSON logs endpoint, and live stream
 - file-backed or Postgres-backed config and security state with in-memory runtime snapshots
@@ -56,7 +56,7 @@ The runtime uses a bounded thread pool (`PooledHTTPServer`) and keeps the gatewa
 2. Enforce service protection and client scope.
 3. Authenticate the client using one of its enabled auth methods.
 4. Enforce service-level rate limits when configured.
-5. Check endpoint response cache when configured.
+5. Check the response cache and coalesce eligible identical buffered requests already in flight.
 6. Run `pre_call` if defined.
 7. Render templates, optionally return a local configured response, otherwise execute the configured upstream transport.
 8. Apply output shaping, response caching, async success hooks, CORS headers, and monitoring/logging records.
@@ -724,7 +724,13 @@ Recommended admin flow:
 
 Response caching can be configured on an endpoint, a service, or a route. Runtime resolves it in that order: endpoint, then service, then route. The cache uses a TTL store — in-memory by default, Redis when `NAPIGATE_REDIS_URL` is set. The Redis backend uses `SETEX` with pickle serialization and the key prefix `napigate:cache:`. Rate-limit state uses `napigate:rl:`. Both namespaces are isolated from any other keys in the same Redis instance. Admins with `services_manage` can clear all gateway cache entries from `__admin#config`; this clears response, pre-call, and external-auth cache entries, but does not reset rate-limit state.
 
-When an incoming request contains the `X-Bypass-Cache` header, NapiGate skips the response-cache lookup and executes the configured target. The header name is case-insensitive and its value is ignored. NapiGate forwards the header to the upstream, and a successful fresh response is stored normally so it refreshes the matching cache entry.
+Identical concurrent buffered `GET` and `HEAD` requests are coalesced inside the NapiGate process even when response caching is not enabled: one leader executes the complete route, including `pre_call` and the upstream call, while the other requests wait for that result. Methods explicitly enabled in `response_cache.methods` are also eligible, which permits intentional coalescing of a configured cacheable `POST` while leaving uncached state-changing methods independent. Streaming responses are never coalesced.
+
+Every waiting request still performs its own authentication and rate-limit check, receives its own `X-Request-ID`, emits its own success hook and log row, and is marked with `X-NapiGate-Coalesced: true`. Cache-backed coordination uses the response-cache key. Uncached coordination uses a SHA-256 fingerprint of the route target and full request context so header, client, IP, URL, query, or body differences do not share a result and raw credentials are not exposed in the in-flight key. Monitoring records waiting requests with `coalesce://response` or `coalesce://error` instead of pretending that they made another upstream call.
+
+In-flight coordination is process-local. Redis shares completed cached responses between NapiGate instances, but it does not turn the in-flight lock into a distributed lock. The default Docker deployment runs one NapiGate process, so all request-handler threads in that process participate in the same coalescing registry.
+
+When an incoming request contains the `X-Bypass-Cache` header, NapiGate skips both the response-cache lookup and request coalescing, then executes the configured target. The header name is case-insensitive and its value is ignored. NapiGate forwards the header to the upstream, and a successful fresh response is stored normally so it refreshes the matching cache entry.
 
 ```yaml
 response_cache:
